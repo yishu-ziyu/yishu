@@ -1,0 +1,72 @@
+import Foundation
+import XCTest
+@testable import YishuContext
+
+final class ContextFrameTests: XCTestCase {
+    func testContextFrameRoundTripsThroughVersionedJSON() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let point = ScreenPoint(x: 320, y: 240, coordinateSpace: .globalTopLeft)
+        let frame = ContextFrame(
+            capturedAt: now,
+            expiresAt: now.addingTimeInterval(15),
+            cursor: ObservedValue(value: point, source: "cg-event", capturedAt: now, confidence: 1),
+            pointerTrail: [PointerSample(capturedAt: now, point: point, kind: .move)],
+            frontmostApplication: ObservedValue(
+                value: ApplicationContext(name: "Notes", bundleIdentifier: "com.apple.Notes", processIdentifier: 42),
+                source: "workspace",
+                capturedAt: now,
+                confidence: 1
+            ),
+            activeWindow: nil,
+            elementUnderCursor: nil,
+            screenshots: [
+                ScreenshotContext(
+                    label: "cursor-display",
+                    base64Data: "anBlZw==",
+                    displayWidthPoints: 1512,
+                    displayHeightPoints: 982,
+                    screenshotWidthPixels: 1280,
+                    screenshotHeightPixels: 831
+                ),
+            ],
+            warnings: []
+        )
+
+        try frame.validate(referenceDate: now)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(frame)
+        let raw = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertTrue(raw.keys.contains("activeWindow"))
+        XCTAssertTrue(raw["activeWindow"] is NSNull)
+        XCTAssertTrue(raw.keys.contains("elementUnderCursor"))
+        XCTAssertTrue(raw["elementUnderCursor"] is NSNull)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(ContextFrame.self, from: data)
+
+        XCTAssertEqual(decoded.schemaVersion, yishuProtocolVersion)
+        XCTAssertEqual(decoded.cursor.value, point)
+        XCTAssertEqual(decoded.screenshots.first?.mediaType, "image/jpeg")
+    }
+
+    func testExpiredFrameIsRejected() {
+        let now = Date()
+        let point = ScreenPoint(x: 0, y: 0, coordinateSpace: .globalTopLeft)
+        let frame = ContextFrame(
+            capturedAt: now.addingTimeInterval(-20),
+            expiresAt: now.addingTimeInterval(-5),
+            cursor: ObservedValue(value: point, source: "test", capturedAt: now, confidence: 1),
+            pointerTrail: [],
+            frontmostApplication: nil,
+            activeWindow: nil,
+            elementUnderCursor: nil,
+            screenshots: [],
+            warnings: []
+        )
+
+        XCTAssertThrowsError(try frame.validate(referenceDate: now)) { error in
+            XCTAssertEqual(error as? ContextFrameValidationError, .expired)
+        }
+    }
+}

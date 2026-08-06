@@ -1,0 +1,26 @@
+[
+  {
+    "id": "seed-react",
+    "title": "ReAct Pattern",
+    "content": "ReAct interleaves reasoning traces with actions: Think, Act via tools, Observe results, then iterate until the task is done. Ground answers in tool evidence.",
+    "tags": ["react", "agent", "loop"],
+    "source": "seed",
+    "createdAt": "2026-08-06T00:00:00.000Z"
+  },
+  {
+    "id": "seed-formula",
+    "title": "Agent Formula",
+    "content": "Agent = LLM + context + tools. LLM is the policy, context is the observation space, tools are the action space.",
+    "tags": ["formula", "llm", "context", "tools"],
+    "source": "seed",
+    "createdAt": "2026-08-06T00:00:00.000Z"
+  },
+  {
+    "id": "seed-yishu",
+    "title": "Yishu Product",
+    "content": "奕枢 (Yishu) is the only user-visible identity. Voice and spatial presence are primary. Context is evidence with source, time, confidence, and expiry. Pi is execution harness; product owns identity and task truth.",
+    "tags": ["yishu", "奕枢", "product"],
+    "source": "seed",
+    "createdAt": "2026-08-06T00:00:00.000Z"
+  }
+]

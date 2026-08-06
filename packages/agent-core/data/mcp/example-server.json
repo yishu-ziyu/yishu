@@ -1,0 +1,29 @@
+{
+  "name": "example",
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Echo back a message (offline MCP demo).",
+      "category": "execution",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Text to echo"
+          }
+        },
+        "required": ["message"]
+      }
+    },
+    {
+      "name": "time_now",
+      "description": "Return a fixed offline clock reading (no live clock).",
+      "category": "perception",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}

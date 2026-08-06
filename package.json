@@ -1,0 +1,37 @@
+{
+  "name": "yishu",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "packageManager": "pnpm@10.26.2",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "check": "pnpm -r check",
+    "test": "pnpm -r test",
+    "agent": "pnpm --filter @yishu/agent-core cli",
+    "agent:test": "pnpm --filter @yishu/agent-core test",
+    "agent:eval": "pnpm --filter @yishu/agent-core cli -- eval",
+    "agent:demo": "pnpm --filter @yishu/agent-core cli -- demo",
+    "agent:evolve": "pnpm --filter @yishu/agent-core cli -- evolve",
+    "agent:judge": "pnpm --filter @yishu/agent-core cli -- judge-eval",
+    "agent:mcp": "pnpm --filter @yishu/agent-core cli -- mcp-list",
+    "agent:heartbeat": "pnpm --filter @yishu/agent-core cli -- heartbeat-demo",
+    "agent:experience": "pnpm --filter @yishu/agent-core cli -- experience",
+    "agent:status": "pnpm --filter @yishu/agent-core cli -- status"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ],
+    "overrides": {
+      "brace-expansion": "5.0.9",
+      "undici": "8.10.0"
+    }
+  }
+}

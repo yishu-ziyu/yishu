@@ -1,0 +1,35 @@
+[
+  {
+    "time": "2026-08-06T12:40:30.963Z",
+    "version": 2,
+    "decision": "promote",
+    "baselineMean": 0.5,
+    "candidateMean": 1,
+    "summary": "Add durable team report convention to identity/INSTRUCTIONS.md",
+    "carrier": "instruction",
+    "candidateId": "fc493bd9-ab48-41ed-b8f3-b43006bc122a",
+    "snapshotId": "0316c070-c11f-477b-b2e3-4ee734045af5"
+  },
+  {
+    "time": "2026-08-06T12:44:53.946Z",
+    "version": 1,
+    "decision": "rollback",
+    "baselineMean": 1,
+    "candidateMean": 1,
+    "summary": "Add durable team report convention to identity/INSTRUCTIONS.md",
+    "carrier": "instruction",
+    "candidateId": "b57cbfe4-af24-4a96-9642-a2afd95f627b",
+    "snapshotId": "35878bee-9e74-4459-91dd-35b01a8728bd"
+  },
+  {
+    "time": "2026-08-06T12:58:00.622Z",
+    "version": 1,
+    "decision": "rollback",
+    "baselineMean": 1,
+    "candidateMean": 1,
+    "summary": "Add durable team report convention to identity/INSTRUCTIONS.md",
+    "carrier": "instruction",
+    "candidateId": "c5cf75d1-7160-4e3b-b753-9f31f0561fd9",
+    "snapshotId": "56ed76f1-7e22-4a7c-a01d-cfd966ebb353"
+  }
+]
