@@ -7,7 +7,8 @@ struct YishuApplication {
         let application = NSApplication.shared
         let coordinator = YishuCoordinator()
         application.delegate = coordinator
-        application.setActivationPolicy(.accessory)
+        let isHeadlessVerification = ProcessInfo.processInfo.environment["YISHU_HEADLESS_VERIFY"] == "1"
+        application.setActivationPolicy(isHeadlessVerification ? .prohibited : .accessory)
         application.run()
     }
 }

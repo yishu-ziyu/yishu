@@ -53,7 +53,31 @@ test("assistant output replay remains safe when protocol markers split across de
 test("direct click utterances are identified for buffer-until-result presentation", () => {
   assert.equal(isDirectComputerActionUtterance("帮我点一下旁边那个任务"), true);
   assert.equal(isDirectComputerActionUtterance("去点那个"), true);
+  assert.equal(isDirectComputerActionUtterance("去点击左上角的新对话"), true);
+  assert.equal(isDirectComputerActionUtterance("帮我点一下那个"), true);
+  assert.equal(isDirectComputerActionUtterance("点击新对话"), true);
+  assert.equal(isDirectComputerActionUtterance("click the New conversation button"), true);
+  assert.equal(isDirectComputerActionUtterance("click New Thread"), true);
   assert.equal(isDirectComputerActionUtterance("解释一下这个按钮为什么灰了"), false);
+});
+
+test("multi-step click utterances stay on the normal multi-action path", () => {
+  assert.equal(isDirectComputerActionUtterance("先点击 A，再点击 B"), false);
+  assert.equal(isDirectComputerActionUtterance("点击 A，然后按回车"), false);
+  assert.equal(isDirectComputerActionUtterance("点击 A 接着选择 B"), false);
+  assert.equal(isDirectComputerActionUtterance("click A and then click B"), false);
+  assert.equal(isDirectComputerActionUtterance("click A then confirm the dialog"), false);
+  assert.equal(isDirectComputerActionUtterance("click A and press Enter"), false);
+  assert.equal(isDirectComputerActionUtterance("点击新对话并输入 hello"), false);
+  assert.equal(isDirectComputerActionUtterance("click New Thread and type hello"), false);
+});
+
+test("explanation and question utterances never enable direct-click max-once", () => {
+  assert.equal(isDirectComputerActionUtterance("解释为什么点击这个按钮"), false);
+  assert.equal(isDirectComputerActionUtterance("为什么点击这个按钮"), false);
+  assert.equal(isDirectComputerActionUtterance("这是什么意思，click New Thread?"), false);
+  assert.equal(isDirectComputerActionUtterance("how do I click New Thread?"), false);
+  assert.equal(isDirectComputerActionUtterance("why click this button?"), false);
 });
 
 test("direct click replay turns a legacy POINT response into an action instead of asking the user to click", () => {

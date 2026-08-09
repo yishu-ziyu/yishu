@@ -69,4 +69,58 @@ final class ContextFrameTests: XCTestCase {
             XCTAssertEqual(error as? ContextFrameValidationError, .expired)
         }
     }
+
+    func testValidationCoversEveryObservedConfidence() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let point = ScreenPoint(x: 0, y: 0, coordinateSpace: .globalTopLeft)
+        let frame = ContextFrame(
+            capturedAt: now,
+            expiresAt: now.addingTimeInterval(15),
+            cursor: ObservedValue(value: point, source: "test", capturedAt: now, confidence: 1),
+            pointerTrail: [],
+            frontmostApplication: ObservedValue(
+                value: ApplicationContext(name: "Notes", bundleIdentifier: nil, processIdentifier: 42),
+                source: "test",
+                capturedAt: now,
+                confidence: 1.1
+            ),
+            activeWindow: nil,
+            elementUnderCursor: nil,
+            screenshots: [],
+            warnings: []
+        )
+
+        XCTAssertThrowsError(try frame.validate(referenceDate: now)) { error in
+            XCTAssertEqual(error as? ContextFrameValidationError, .invalidConfidence(1.1))
+        }
+    }
+
+    func testValidationRejectsNonPositiveScreenshotDimensions() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let point = ScreenPoint(x: 0, y: 0, coordinateSpace: .globalTopLeft)
+        let frame = ContextFrame(
+            capturedAt: now,
+            expiresAt: now.addingTimeInterval(15),
+            cursor: ObservedValue(value: point, source: "test", capturedAt: now, confidence: 1),
+            pointerTrail: [],
+            frontmostApplication: nil,
+            activeWindow: nil,
+            elementUnderCursor: nil,
+            screenshots: [
+                ScreenshotContext(
+                    label: "invalid",
+                    base64Data: "anBlZw==",
+                    displayWidthPoints: 0,
+                    displayHeightPoints: 982,
+                    screenshotWidthPixels: 1280,
+                    screenshotHeightPixels: 831
+                ),
+            ],
+            warnings: []
+        )
+
+        XCTAssertThrowsError(try frame.validate(referenceDate: now)) { error in
+            XCTAssertEqual(error as? ContextFrameValidationError, .invalidScreenshot)
+        }
+    }
 }

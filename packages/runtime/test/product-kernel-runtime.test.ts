@@ -1,0 +1,1789 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+import { createYishuKernel } from "@yishu/kernel";
+import { MockAgentRuntime } from "../src/mock-runtime.js";
+import { ProductKernelRuntime } from "../src/product-kernel-runtime.js";
+import type { ComputerUsePort } from "../src/computer-use-port.js";
+import {
+  PROTOCOL_VERSION,
+  runtimeEvent,
+  type RuntimeEvent,
+  type TurnCancelCommand,
+  type TurnStartCommand,
+  type TurnSteerCommand,
+} from "../src/protocol.js";
+import type { AgentRuntime, RuntimeEventSink } from "../src/runtime-port.js";
+import { makeTurnStartCommand } from "./fixtures.js";
+
+function makeCommand(utterance: string, overrides?: Partial<TurnStartCommand["payload"]["contextFrame"]>): TurnStartCommand {
+  const base = makeTurnStartCommand();
+  return {
+    ...base,
+    payload: {
+      ...base.payload,
+      utterance,
+      contextFrame: {
+        ...base.payload.contextFrame,
+        ...overrides,
+        frameId: randomUUID(),
+        capturedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    },
+  };
+}
+
+function waitForGateOrAbort(gate: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => finish();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void gate.then(finish, fail);
+  });
+}
+
+test("product kernel short-circuits remember on voice utterance", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const events: RuntimeEvent[] = [];
+
+  await runtime.startTurn(makeCommand("记住：这个项目准备基于 Pi"), (e) => {
+    events.push(e);
+  });
+
+  assert.ok(events.some((e) => e.type === "product.action.completed"));
+  assert.ok(events.some((e) => e.type === "response.completed"));
+  const completed = events.find((e) => e.type === "response.completed");
+  assert.match(String((completed?.payload as { text?: string })?.text ?? ""), /记住/);
+  assert.equal((await kernel.store.searchMemory("Pi")).length, 1);
+});
+
+test("project turns overwrite ambient global memory scope and stay isolated", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const projectA = {
+    kind: "project" as const,
+    projectId: "11111111-1111-4111-8111-111111111111",
+    projectLabel: "项目 A",
+  };
+  const projectB = {
+    kind: "project" as const,
+    projectId: "22222222-2222-4222-8222-222222222222",
+    projectLabel: "项目 B",
+  };
+  const commandA = makeCommand("记住：发布策略使用蓝色通道");
+  commandA.payload.conversationId = randomUUID();
+  commandA.payload.sessionScope = projectA;
+  const commandB = makeCommand("记住：发布策略使用绿色通道");
+  commandB.payload.conversationId = randomUUID();
+  commandB.payload.sessionScope = projectB;
+
+  await runtime.startTurn(commandA, () => undefined);
+  await runtime.startTurn(commandB, () => undefined);
+
+  assert.equal((await kernel.store.searchMemory("发布策略", { scope: `project:${projectA.projectId}` })).length, 1);
+  assert.equal((await kernel.store.searchMemory("发布策略", { scope: `project:${projectB.projectId}` })).length, 1);
+  assert.equal((await kernel.store.searchMemory("发布策略", { scope: "global" })).length, 0);
+  assert.deepEqual((await kernel.store.getConversation(commandA.payload.conversationId))?.sessionScope, projectA);
+  assert.deepEqual((await kernel.store.getConversation(commandB.payload.conversationId))?.sessionScope, projectB);
+});
+
+test("duplicate product-action request ids are rejected before a second write", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const command = makeCommand("记住：同一个 request 只能写一次");
+  const first = runtime.startTurn(command, () => undefined);
+  const duplicateEvents: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => duplicateEvents.push(event));
+  await first;
+
+  assert.equal(duplicateEvents[0]?.type, "turn.failed");
+  assert.equal(duplicateEvents[0]?.payload.code, "duplicate_request");
+  assert.equal(duplicateEvents[0]?.conversationId, command.payload.conversationId ?? command.requestId);
+  assert.equal((await kernel.store.searchMemory("只能写一次")).length, 1);
+});
+
+test("ordinary utterances still reach the inner mock runtime", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const events: RuntimeEvent[] = [];
+
+  await runtime.startTurn(makeCommand("这个按钮为什么是灰色的？"), (e) => {
+    events.push(e);
+  });
+
+  assert.ok(!events.some((e) => e.type === "product.action.completed"));
+  assert.ok(events.some((e) => e.type === "response.completed"));
+  // Trail still received the frame.
+  assert.ok(kernel.trail.size() >= 1);
+  assert.deepEqual(await kernel.store.listTasks(), []);
+});
+
+test("Finder Back uses one typed port request, preserves the trail, and never starts Pi", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const actions: Array<{ action: unknown; context: unknown }> = [];
+  const port: ComputerUsePort = {
+    async perform(action, context) {
+      actions.push({ action, context });
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: "ax_press",
+        message: "Finder returned to the expected location.",
+        evidence: "target_app=Finder;press_count=1",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  let innerStarts = 0;
+  const inner: AgentRuntime = {
+    async startTurn() { innerStarts += 1; },
+    async steerTurn() {},
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const runtime = new ProductKernelRuntime(inner, kernel, port);
+  const command = makeCommand("点击左上角的返回按钮");
+  command.payload.contextFrame.frontmostApplication = {
+    value: {
+      name: "Finder",
+      bundleIdentifier: "com.apple.finder",
+      processIdentifier: 4242,
+    },
+    source: "NSWorkspace",
+    capturedAt: command.payload.contextFrame.capturedAt,
+    confidence: 1,
+  };
+  const events: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(innerStarts, 0);
+  assert.equal(actions.length, 1);
+  assert.deepEqual(actions[0]?.action, {
+    action: "finder_history_back",
+    x: 0,
+    y: 0,
+    targetBundleId: "com.apple.finder",
+    targetPid: 4242,
+  });
+  const context = actions[0]?.context as { requestId?: string; traceId?: string; intentId?: string; attemptId?: string; basisFrameId?: string; effectClass?: string };
+  assert.equal(context.requestId, command.requestId);
+  assert.equal(context.traceId, command.traceId);
+  assert.equal(context.basisFrameId, command.payload.contextFrame.frameId);
+  assert.ok(context.intentId);
+  assert.ok(context.attemptId);
+  assert.equal(context.effectClass, "navigation");
+  assert.ok(kernel.trail.size() >= 1);
+  assert.ok(events.some((event) => event.type === "product.action.completed"));
+  assert.equal(events.find((event) => event.type === "response.completed")?.payload.verified, true);
+  assert.match(String(events.find((event) => event.type === "response.completed")?.payload.text), /回到/);
+});
+
+test("unverified Finder Back is reported without a second dispatch or completion claim", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  let dispatches = 0;
+  const port: ComputerUsePort = {
+    async perform() {
+      dispatches += 1;
+      return {
+        succeeded: true,
+        verified: false,
+        status: "unverified",
+        code: "ax_press_unverified",
+        method: "ax_press",
+        message: "Finder Back was delivered but not verified.",
+        evidence: "target_app=Finder;press_count=1",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel, port);
+  const command = makeCommand("点击返回按钮");
+  command.payload.contextFrame.frontmostApplication = {
+    value: {
+      name: "Finder",
+      bundleIdentifier: "com.apple.finder",
+      processIdentifier: 4242,
+    },
+    source: "NSWorkspace",
+    capturedAt: command.payload.contextFrame.capturedAt,
+    confidence: 1,
+  };
+  const events: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(dispatches, 1);
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed?.payload.verified, false);
+  assert.match(String(completed?.payload.text), /不会重复点击/);
+  const productReceipt = events.find((event) => event.type === "product.action.completed");
+  assert.equal(productReceipt?.payload.status, "failed");
+  assert.equal(productReceipt?.payload.succeeded, true);
+  assert.equal(productReceipt?.payload.verified, false);
+  assert.equal("evidence" in (productReceipt?.payload ?? {}), false);
+});
+
+class ScriptedExecutionRuntime implements AgentRuntime {
+  constructor(
+    private readonly verified: boolean,
+    private readonly terminal: "completed" | "failed" = "completed",
+    private readonly progressEvents = 1,
+  ) {}
+
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    emit(runtimeEvent("turn.started", command.requestId, command.traceId, {
+      runtime: "scripted",
+    }));
+    emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
+      toolName: "computer_control",
+      secretArgument: "must-not-be-persisted",
+    }));
+    for (let index = 0; index < this.progressEvents; index += 1) {
+      emit(runtimeEvent("tool.completed", command.requestId, command.traceId, {
+        toolName: `safe_tool_${index}`,
+        isError: false,
+        rawOutput: "private tool output must-not-be-persisted",
+      }));
+    }
+    if (this.terminal === "failed") {
+      emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
+        code: "scripted_failure",
+        message: "private failure details must-not-be-persisted",
+      }));
+      return;
+    }
+    emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+      text: "private assistant response must-not-be-persisted",
+      verified: this.verified,
+      verifier: "scripted",
+    }));
+    emit(runtimeEvent("runtime.status", command.requestId, command.traceId, {
+      status: "late_summary_after_completion",
+    }));
+  }
+
+  async steerTurn(_command: TurnSteerCommand, _emit: RuntimeEventSink): Promise<void> {}
+  async cancelTurn(_command: TurnCancelCommand, _emit: RuntimeEventSink): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+test("private turns execute live but leave no ledger, task, trail, or memory", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new ScriptedExecutionRuntime(true);
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const privateTurn = makeCommand("执行一个私密操作");
+  privateTurn.payload.conversationId = randomUUID();
+  privateTurn.payload.sessionScope = { kind: "private" };
+  const visible: RuntimeEvent[] = [];
+
+  await runtime.startTurn(privateTurn, (event) => visible.push(event));
+
+  assert.ok(visible.some((event) => event.type === "response.completed"));
+  assert.deepEqual(kernel.store.getSnapshot().conversations, []);
+  assert.deepEqual(kernel.store.getSnapshot().turns, []);
+  assert.deepEqual(kernel.store.getSnapshot().events, []);
+  assert.deepEqual(await kernel.store.listTasks(), []);
+  assert.equal(kernel.trail.size(), 0);
+
+  const privateRemember = makeCommand("记住：这条私密信息不能留下");
+  privateRemember.payload.conversationId = randomUUID();
+  privateRemember.payload.sessionScope = { kind: "private" };
+  const blocked: RuntimeEvent[] = [];
+  await runtime.startTurn(privateRemember, (event) => blocked.push(event));
+  assert.equal((await kernel.store.searchMemory("私密信息")).length, 0);
+  assert.match(String(blocked.find((event) => event.type === "response.completed")?.payload.text), /私密会话/);
+});
+
+test("one conversation id cannot be replayed under another project scope", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const conversationId = randomUUID();
+  const first = makeCommand("项目 A 的普通问题");
+  first.payload.conversationId = conversationId;
+  first.payload.sessionScope = {
+    kind: "project",
+    projectId: "11111111-1111-4111-8111-111111111111",
+  };
+  await runtime.startTurn(first, () => undefined);
+
+  const conflicting = makeCommand("项目 B 的普通问题");
+  conflicting.payload.conversationId = conversationId;
+  conflicting.payload.sessionScope = {
+    kind: "project",
+    projectId: "22222222-2222-4222-8222-222222222222",
+  };
+  const visible: RuntimeEvent[] = [];
+  await runtime.startTurn(conflicting, (event) => visible.push(event));
+
+  assert.equal(visible[0]?.type, "turn.failed");
+  assert.equal(visible[0]?.payload.code, "request_reuse_conflict");
+  assert.equal((await kernel.store.listConversationTurns(conversationId)).length, 1);
+});
+
+test("execution events project verified progress into Kernel TaskTruth", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(
+    new ScriptedExecutionRuntime(true, "completed", 70),
+    kernel,
+  );
+  const command = makeCommand(`  打开 Safari\n${"并验证 ".repeat(40)}  `);
+  const projectScope = {
+    kind: "project" as const,
+    projectId: "33333333-3333-4333-8333-333333333333",
+  };
+  command.payload.sessionScope = projectScope;
+
+  await runtime.startTurn(command, () => undefined);
+
+  const [task] = await kernel.store.listTasks();
+  assert.equal(task?.id, command.requestId);
+  assert.equal(task?.status, "done");
+  assert.deepEqual(task?.sessionScope, projectScope);
+  assert.equal((await kernel.store.listTasks({ sessionScope: { kind: "personal" } })).length, 0);
+  assert.ok((task?.title.length ?? 0) <= 160);
+  assert.ok(!task?.title.includes("\n"));
+  assert.ok((task?.evidence.length ?? 0) <= 64);
+  const persisted = JSON.stringify(task);
+  assert.doesNotMatch(persisted, /must-not-be-persisted|private assistant response/);
+  assert.match(persisted, /tool\.started/);
+  assert.match(persisted, /response\.completed/);
+});
+
+test("unverified execution completion remains blocked", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(
+    new ScriptedExecutionRuntime(false),
+    kernel,
+  );
+
+  await runtime.startTurn(makeCommand("执行并验证这个操作"), () => undefined);
+
+  assert.equal((await kernel.store.listTasks())[0]?.status, "blocked");
+});
+
+test("failed execution turn persists failed TaskTruth", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(
+    new ScriptedExecutionRuntime(false, "failed"),
+    kernel,
+  );
+
+  await runtime.startTurn(makeCommand("执行会失败的操作"), () => undefined);
+
+  assert.equal((await kernel.store.listTasks())[0]?.status, "failed");
+});
+
+class CancelRaceRuntime implements AgentRuntime {
+  private releaseStart!: () => void;
+  private markExecutionStarted!: () => void;
+  readonly executionStarted = new Promise<void>((resolve) => {
+    this.markExecutionStarted = resolve;
+  });
+  private readonly release = new Promise<void>((resolve) => {
+    this.releaseStart = resolve;
+  });
+
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
+      toolName: "computer_control",
+    }));
+    this.markExecutionStarted();
+    await this.release;
+    emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
+      code: "late_failure_after_cancel",
+    }));
+  }
+
+  async cancelTurn(command: TurnCancelCommand, emit: RuntimeEventSink): Promise<void> {
+    emit(runtimeEvent("turn.cancelled", command.requestId, command.traceId, {
+      reason: command.payload.reason ?? "user_cancelled",
+    }));
+    this.releaseStart();
+  }
+
+  async steerTurn(_command: TurnSteerCommand, _emit: RuntimeEventSink): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+test("cancelled TaskTruth is not overwritten by a late runtime failure", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new CancelRaceRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("取消这个正在执行的操作");
+  const start = runtime.startTurn(command, () => undefined);
+  await inner.executionStarted;
+
+  const duplicateEvents: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => duplicateEvents.push(event));
+  assert.equal(duplicateEvents[0]?.type, "turn.failed");
+  assert.equal(duplicateEvents[0]?.payload.code, "duplicate_request");
+
+  await runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined);
+  await start;
+
+  assert.equal((await kernel.store.listTasks())[0]?.status, "cancelled");
+});
+
+class DelayedExecutionAfterCancelRuntime implements AgentRuntime {
+  private releaseStart!: () => void;
+  private readonly release = new Promise<void>((resolve) => {
+    this.releaseStart = resolve;
+  });
+
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    await this.release;
+    emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
+      toolName: "late_tool",
+    }));
+    emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+      text: "late completion",
+      verified: true,
+    }));
+  }
+
+  async cancelTurn(command: TurnCancelCommand, emit: RuntimeEventSink): Promise<void> {
+    emit(runtimeEvent("turn.cancelled", command.requestId, command.traceId, {
+      reason: command.payload.reason ?? "user_cancelled",
+    }));
+    this.releaseStart();
+  }
+
+  async steerTurn(_command: TurnSteerCommand, _emit: RuntimeEventSink): Promise<void> {}
+  async dispose(): Promise<void> {
+    this.releaseStart();
+  }
+}
+
+test("pre-execution cancellation blocks delayed events from manufacturing a task", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new DelayedExecutionAfterCancelRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("取消初始化中的执行");
+  const start = runtime.startTurn(command, () => undefined);
+
+  await runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined);
+  await start;
+
+  assert.deepEqual(await kernel.store.listTasks(), []);
+  assert.equal((await kernel.store.listConversationTurns(command.requestId))[0]?.status, "cancelled");
+});
+
+class DisposeSettledRuntime implements AgentRuntime {
+  private releaseStart!: () => void;
+  private readonly release = new Promise<void>((resolve) => {
+    this.releaseStart = resolve;
+  });
+
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
+      toolName: "dispose_test",
+    }));
+    await this.release;
+    emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+      text: "settled before dispose returns",
+      verified: true,
+    }));
+  }
+
+  async steerTurn(_command: TurnSteerCommand, _emit: RuntimeEventSink): Promise<void> {}
+  async cancelTurn(_command: TurnCancelCommand, _emit: RuntimeEventSink): Promise<void> {}
+  async dispose(): Promise<void> {
+    this.releaseStart();
+  }
+}
+
+test("dispose waits for active event producers before the final TaskTruth flush", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new DisposeSettledRuntime(), kernel);
+  const command = makeCommand("完成后再关闭 runtime");
+  const start = runtime.startTurn(command, () => undefined);
+
+  await runtime.dispose();
+  await start;
+
+  assert.equal((await kernel.store.listTasks())[0]?.status, "done");
+  assert.equal((await kernel.store.listConversationTurns(command.requestId))[0]?.status, "completed");
+});
+
+test("trail.observe appends without a full turn", () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const frame = makeTurnStartCommand().payload.contextFrame;
+  const events: RuntimeEvent[] = [];
+
+  runtime.observeTrail(
+    {
+      schemaVersion: PROTOCOL_VERSION,
+      type: "trail.observe",
+      requestId: randomUUID(),
+      traceId: randomUUID(),
+      sentAt: new Date().toISOString(),
+      payload: { contextFrame: { ...frame, screenshots: [] } },
+    },
+    (e) => events.push(e),
+  );
+
+  assert.equal(kernel.trail.size(), 1);
+  assert.equal(events[0]?.type, "trail.appended");
+});
+
+test("remember_how promotes multi-app trail after replay verify", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const t0 = Date.now();
+
+  // Seed trail via observe
+  const seed = (appName: string, title: string, offsetMs: number) => {
+    const cmd = makeCommand("x");
+    runtime.observeTrail(
+      {
+        schemaVersion: PROTOCOL_VERSION,
+        type: "trail.observe",
+        requestId: randomUUID(),
+        traceId: randomUUID(),
+        sentAt: new Date(t0 + offsetMs).toISOString(),
+        payload: {
+          contextFrame: {
+            ...cmd.payload.contextFrame,
+            frameId: randomUUID(),
+            capturedAt: new Date(t0 + offsetMs).toISOString(),
+            expiresAt: new Date(t0 + offsetMs + 60_000).toISOString(),
+            frontmostApplication: {
+              value: {
+                name: appName,
+                bundleIdentifier: "test",
+                processIdentifier: 1,
+              },
+              source: "test",
+              capturedAt: new Date(t0 + offsetMs).toISOString(),
+              confidence: 1,
+            },
+            activeWindow: {
+              value: {
+                title,
+                ownerName: appName,
+                processIdentifier: 1,
+                bounds: null,
+              },
+              source: "test",
+              capturedAt: new Date(t0 + offsetMs).toISOString(),
+              confidence: 1,
+            },
+            screenshots: [],
+          },
+        },
+      },
+      () => undefined,
+    );
+  };
+
+  seed("Chrome", "github.com/yishu", 0);
+  seed("Chrome", "branch main", 30_000);
+  seed("Codex", "yishu session", 60_000);
+
+  const events: RuntimeEvent[] = [];
+  await runtime.startTurn(makeCommand("记住刚才这个流程"), (e) => events.push(e));
+
+  assert.ok(events.some((e) => e.type === "product.action.completed"));
+  const skills = await kernel.store.listVerifiedSkills();
+  const candidates = await kernel.store.listSkillCandidates();
+  // Either promoted or candidate kept - multi-app trail should usually promote.
+  assert.ok(skills.length + candidates.length >= 1);
+});
+
+test("durable conversation projection keeps one turn truth and drops deltas/secrets", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const command = makeCommand("请解释这个按钮");
+  const conversationId = randomUUID();
+  command.payload.conversationId = conversationId;
+  const events: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  const turns = await kernel.store.listConversationTurns(conversationId);
+  const ledgerEvents = await kernel.store.listConversationEvents(conversationId);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]?.id, command.requestId);
+  assert.equal(turns[0]?.status, "completed");
+  assert.equal(turns[0]?.traceId, command.traceId);
+  assert.deepEqual(ledgerEvents.slice(0, 2).map((event) => event.type), ["turn.started", "turn.user_input"]);
+  assert.ok(ledgerEvents.some((event) => event.type === "turn.user_input"));
+  assert.ok(ledgerEvents.some((event) => event.type === "turn.assistant_output"));
+  assert.ok(ledgerEvents.some((event) => event.type === "turn.completed"));
+  assert.ok(!ledgerEvents.some((event) => event.type === "response.delta"));
+  assert.doesNotMatch(JSON.stringify(ledgerEvents), /c2NyZWVu|base64|screenshot/i);
+  assert.ok(events.every((event) => event.conversationId === conversationId));
+});
+
+test("product actions use the same conversation ledger and safe action receipt", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const command = makeCommand("记住：不要把私密参数写入账本");
+  command.payload.conversationId = randomUUID();
+  await runtime.startTurn(command, () => undefined);
+
+  const events = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.ok(events.some((event) => event.type === "action.completed"));
+  assert.ok(events.some((event) => event.type === "turn.completed"));
+  const action = events.find((event) => event.type === "action.completed");
+  assert.equal("output" in (action?.payload ?? {}), false);
+  assert.equal("message" in (action?.payload ?? {}), false);
+  assert.doesNotMatch(JSON.stringify(action), /capsuleJson|screenshot|base64/i);
+});
+
+test("live share_context action receipt exposes only capsule metadata", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const command = makeCommand("把当前上下文交给 Codex；private diagnosis=SECRET_VISIBLE");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => visible.push(event));
+
+  const action = visible.find((event) => event.type === "product.action.completed");
+  assert.ok(action);
+  const serialized = JSON.stringify(action);
+  assert.doesNotMatch(serialized, /result\.json|capsuleJson|selectedText|userIntent|private diagnosis|SECRET_VISIBLE/i);
+  assert.equal(typeof action.payload.capsuleId, "string");
+  assert.equal(typeof action.payload.expiresAt, "string");
+  assert.equal(typeof action.payload.trailEntryCount, "number");
+  assert.equal("output" in action.payload, false);
+  assert.equal("capsule" in action.payload, false);
+});
+
+test("terminal live events allowlist failure code and sanitize visible completion text", async () => {
+  class MaliciousTerminalRuntime implements AgentRuntime {
+    constructor(private readonly failed: boolean) {}
+
+    async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+      if (this.failed) {
+        emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
+          code: "password=SECRET_VISIBLE",
+          message: "private diagnosis password=SECRET_VISIBLE",
+          details: { selectedText: "secret diagnosis" },
+        }));
+        return;
+      }
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "可见结果 password=SECRET_VISIBLE",
+        verified: true,
+        verifier: "private verifier",
+        details: { selectedText: "secret diagnosis" },
+      }));
+    }
+
+    async steerTurn(_command: TurnSteerCommand, _emit: RuntimeEventSink): Promise<void> {}
+    async cancelTurn(_command: TurnCancelCommand, _emit: RuntimeEventSink): Promise<void> {}
+    async dispose(): Promise<void> {}
+  }
+
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const failedRuntime = new ProductKernelRuntime(new MaliciousTerminalRuntime(true), kernel);
+  const failedCommand = makeCommand("恶意失败终态");
+  failedCommand.payload.conversationId = randomUUID();
+  const failedVisible: RuntimeEvent[] = [];
+  await failedRuntime.startTurn(failedCommand, (event) => failedVisible.push(event));
+  assert.doesNotMatch(JSON.stringify(failedVisible), /SECRET_VISIBLE|private diagnosis|selectedText|message/);
+  assert.deepEqual(
+    failedVisible.find((event) => event.type === "turn.failed")?.payload,
+    { code: "runtime_operation_failed" },
+  );
+
+  const completedRuntime = new ProductKernelRuntime(new MaliciousTerminalRuntime(false), kernel);
+  const completedCommand = makeCommand("恶意完成终态");
+  completedCommand.payload.conversationId = randomUUID();
+  const completedVisible: RuntimeEvent[] = [];
+  await completedRuntime.startTurn(completedCommand, (event) => completedVisible.push(event));
+  const completed = completedVisible.find((event) => event.type === "response.completed");
+  assert.ok(completed);
+  assert.doesNotMatch(JSON.stringify(completed), /SECRET_VISIBLE|private verifier|selectedText|details/);
+  assert.match(String(completed.payload.text), /\[redacted\]/);
+  assert.deepEqual(Object.keys(completed.payload).sort(), ["text", "verified"]);
+});
+
+test("cancelling a product action closes the gate before a slow registry result can speak success", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const originalInvoke = kernel.registry.invoke.bind(kernel.registry);
+  let release!: () => void;
+  let markStarted!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const invoked = new Promise<void>((resolve) => { markStarted = resolve; });
+  (kernel.registry as unknown as {
+    invoke: typeof kernel.registry.invoke;
+  }).invoke = async (...args: Parameters<typeof kernel.registry.invoke>) => {
+    markStarted();
+    await waitForGateOrAbort(gate, args[1].signal);
+    return originalInvoke(...args);
+  };
+
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const command = makeCommand("记住：这个动作会被取消");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await invoked;
+  await runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined);
+  release();
+  await start;
+
+  const turns = await kernel.store.listConversationTurns(command.payload.conversationId);
+  const ledgerEvents = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(turns[0]?.status, "cancelled");
+  assert.ok(ledgerEvents.some((event) => event.type === "turn.cancelled"));
+  assert.ok(!ledgerEvents.some((event) => event.type === "action.completed"));
+  assert.ok(!visible.some((event) => event.type === "response.completed"));
+  assert.equal((await kernel.store.searchMemory("这个动作会被取消")).length, 0);
+});
+
+test("a stop after a product action commits records the receipt and fails the turn truthfully", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const originalInvoke = kernel.registry.invoke.bind(kernel.registry);
+  let markReceiptReady!: () => void;
+  const receiptReady = new Promise<void>((resolve) => { markReceiptReady = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  (kernel.registry as unknown as {
+    invoke: typeof kernel.registry.invoke;
+  }).invoke = async (...args: Parameters<typeof kernel.registry.invoke>) => {
+    const receipt = await originalInvoke(...args);
+    // The remember action has already committed the MemoryClaim by the time
+    // its receipt resolves.  Hold that receipt so cancel can race the return
+    // path without erasing the real side effect.
+    markReceiptReady();
+    await waitForGateOrAbort(gate, args[1].signal);
+    return receipt;
+  };
+
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const command = makeCommand("记住：这个动作已经提交");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await receiptReady;
+  assert.equal((await kernel.store.searchMemory("这个动作已经提交")).length, 1);
+
+  await runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined);
+  // The abort signal releases the wrapped receipt; keep this explicit for a
+  // wrapper that may later choose to ignore signals.
+  release();
+  await start;
+
+  const turns = await kernel.store.listConversationTurns(command.payload.conversationId);
+  const ledgerEvents = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(turns[0]?.status, "failed");
+  const action = ledgerEvents.find((event) => event.type === "action.completed");
+  assert.ok(action);
+  assert.equal(action.payload.status, "verified");
+  const failed = ledgerEvents.find((event) => event.type === "turn.failed");
+  assert.equal(failed?.payload.code, "action_committed_after_cancel");
+  assert.ok(!ledgerEvents.some((event) => event.type === "turn.cancelled"));
+  assert.ok(!visible.some((event) => event.type === "response.completed"));
+  assert.ok(visible.some((event) => event.type === "product.action.completed"));
+  assert.ok(visible.some((event) => event.type === "turn.failed" && event.payload.code === "action_committed_after_cancel"));
+  assert.equal((await kernel.store.searchMemory("这个动作已经提交")).length, 1);
+});
+
+test("a registry cancelled receipt becomes a cancelled turn without action success events", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const originalInvoke = kernel.registry.invoke.bind(kernel.registry);
+  (kernel.registry as unknown as {
+    invoke: typeof kernel.registry.invoke;
+  }).invoke = async (...args: Parameters<typeof kernel.registry.invoke>) => {
+    const controller = new AbortController();
+    controller.abort("internal cancellation detail must not escape");
+    return originalInvoke(args[0], { ...args[1], signal: controller.signal }, args[2]);
+  };
+
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const command = makeCommand("记住：内部取消也不能写入");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => visible.push(event));
+
+  const turns = await kernel.store.listConversationTurns(command.payload.conversationId);
+  const events = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(turns[0]?.status, "cancelled");
+  assert.ok(events.some((event) => event.type === "turn.cancelled"));
+  assert.ok(!events.some((event) => event.type === "action.completed"));
+  assert.ok(!visible.some((event) => event.type === "response.completed"));
+  assert.equal((await kernel.store.searchMemory("内部取消也不能写入")).length, 0);
+});
+
+test("dispose aborts an active product action before waiting for turn operations", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const originalInvoke = kernel.registry.invoke.bind(kernel.registry);
+  let markStarted!: () => void;
+  const invoked = new Promise<void>((resolve) => { markStarted = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  (kernel.registry as unknown as {
+    invoke: typeof kernel.registry.invoke;
+  }).invoke = async (...args: Parameters<typeof kernel.registry.invoke>) => {
+    markStarted();
+    await waitForGateOrAbort(gate, args[1].signal);
+    return originalInvoke(...args);
+  };
+
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const command = makeCommand("记住：dispose 时不能落记忆");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await invoked;
+
+  await runtime.dispose();
+  await start;
+
+  const turns = await kernel.store.listConversationTurns(command.payload.conversationId);
+  const events = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(turns[0]?.status, "cancelled");
+  assert.ok(events.some((event) => event.type === "turn.cancelled"));
+  assert.ok(!events.some((event) => event.type === "action.completed"));
+  assert.ok(!visible.some((event) => event.type === "response.completed"));
+  assert.equal((await kernel.store.searchMemory("dispose 时不能落记忆")).length, 0);
+  // The signal abort resolves the gate; this assignment is only a defensive
+  // cleanup if the test implementation is ever changed to ignore signals.
+  release();
+});
+
+class CountingRuntime implements AgentRuntime {
+  starts = 0;
+  cancels = 0;
+  steers = 0;
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    this.starts += 1;
+    emit(runtimeEvent("turn.started", command.requestId, command.traceId, { runtime: "counting" }));
+    emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+      text: "可回放的最终回答",
+      verified: false,
+    }));
+  }
+  async steerTurn(_command: TurnSteerCommand, _emit: RuntimeEventSink): Promise<void> {
+    this.steers += 1;
+  }
+  async cancelTurn(_command: TurnCancelCommand, _emit: RuntimeEventSink): Promise<void> {
+    this.cancels += 1;
+  }
+  async dispose(): Promise<void> {}
+}
+
+test("terminal turn is replayed durably instead of executing the inner runtime twice", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new CountingRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("只执行一次");
+  command.payload.conversationId = randomUUID();
+
+  await runtime.startTurn(command, () => undefined);
+  const replayEvents: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => replayEvents.push(event));
+
+  assert.equal(inner.starts, 1);
+  assert.ok(replayEvents.some((event) => event.type === "response.completed"));
+  assert.equal((await kernel.store.listConversationTurns(command.payload.conversationId)).length, 1);
+});
+
+test("terminal replay latches before a concurrent cancel can append a late terminal", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const command = makeCommand("回放时取消不能改写结果");
+  command.payload.conversationId = randomUUID();
+  const seed = new ProductKernelRuntime(new CountingRuntime(), kernel);
+  await seed.startTurn(command, () => undefined);
+
+  let releaseEvents!: () => void;
+  let markEventsRead!: () => void;
+  const eventsGate = new Promise<void>((resolve) => { releaseEvents = resolve; });
+  const eventsRead = new Promise<void>((resolve) => { markEventsRead = resolve; });
+  const originalList = kernel.store.listConversationEvents.bind(kernel.store);
+  const store = kernel.store as unknown as {
+    listConversationEvents: typeof kernel.store.listConversationEvents;
+  };
+  store.listConversationEvents = async (conversationId: string) => {
+    markEventsRead();
+    await eventsGate;
+    return originalList(conversationId);
+  };
+
+  const inner = new CountingRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const visible: RuntimeEvent[] = [];
+  const replay = runtime.startTurn(command, (event) => visible.push(event));
+  await eventsRead;
+  const cancel = runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "late_cancel" },
+  }, () => undefined);
+
+  releaseEvents();
+  store.listConversationEvents = originalList;
+  await Promise.all([replay, cancel]);
+
+  const ledgerEvents = await originalList(command.payload.conversationId);
+  assert.equal(inner.starts, 0);
+  assert.equal(inner.cancels, 0);
+  assert.equal(ledgerEvents.filter((event) => event.type === "turn.cancelled").length, 0);
+  assert.equal(
+    visible.filter((event) => ["response.completed", "turn.cancelled", "turn.failed"].includes(event.type)).length,
+    1,
+  );
+  assert.equal(visible.find((event) => event.type === "response.completed")?.payload.replayed, true);
+});
+
+test("terminal replay latches before a concurrent steer can append input or call inner", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const command = makeCommand("回放时转向不能改写结果");
+  command.payload.conversationId = randomUUID();
+  const seed = new ProductKernelRuntime(new CountingRuntime(), kernel);
+  await seed.startTurn(command, () => undefined);
+
+  let releaseEvents!: () => void;
+  let markEventsRead!: () => void;
+  const eventsGate = new Promise<void>((resolve) => { releaseEvents = resolve; });
+  const eventsRead = new Promise<void>((resolve) => { markEventsRead = resolve; });
+  const originalList = kernel.store.listConversationEvents.bind(kernel.store);
+  const store = kernel.store as unknown as {
+    listConversationEvents: typeof kernel.store.listConversationEvents;
+  };
+  store.listConversationEvents = async (conversationId: string) => {
+    markEventsRead();
+    await eventsGate;
+    return originalList(conversationId);
+  };
+
+  const inner = new CountingRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const visible: RuntimeEvent[] = [];
+  const replay = runtime.startTurn(command, (event) => visible.push(event));
+  await eventsRead;
+  const steer = runtime.steerTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.steer",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { message: "late steer" },
+  }, () => undefined);
+
+  releaseEvents();
+  store.listConversationEvents = originalList;
+  await Promise.all([replay, steer]);
+
+  const ledgerEvents = await originalList(command.payload.conversationId);
+  assert.equal(inner.starts, 0);
+  assert.equal(inner.steers, 0);
+  assert.equal(
+    ledgerEvents.some((event) => event.type === "turn.user_input" && event.payload.channel === "steer"),
+    false,
+  );
+  assert.equal(
+    visible.filter((event) => ["response.completed", "turn.cancelled", "turn.failed"].includes(event.type)).length,
+    1,
+  );
+  assert.equal(visible.find((event) => event.type === "response.completed")?.payload.replayed, true);
+});
+
+test("open turn recovery fails closed and never re-enters the inner runtime", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const conversationId = randomUUID();
+  const command = makeCommand("恢复这个遗留 turn");
+  command.payload.conversationId = conversationId;
+  await kernel.store.upsertConversation({ id: conversationId, status: "active" });
+  await kernel.store.upsertConversationTurn({
+    id: command.requestId,
+    conversationId,
+    status: "open",
+    traceId: command.traceId,
+    userInput: command.payload.utterance,
+  });
+  const inner = new CountingRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const events: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(inner.starts, 0);
+  assert.equal((await kernel.store.listConversationTurns(conversationId))[0]?.status, "failed");
+  assert.equal(events.find((event) => event.type === "turn.failed")?.payload.code, "recovery_required");
+});
+
+test("a failed initial ledger write blocks the inner runtime and emits no private error", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new CountingRuntime();
+  (kernel.store as unknown as {
+    upsertConversation: (input: unknown) => Promise<unknown>;
+  }).upsertConversation = async () => {
+    throw new Error("provider password=private-secret");
+  };
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("账本写入失败时不能执行");
+  command.payload.conversationId = randomUUID();
+  const events: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(inner.starts, 0);
+  assert.equal(events.find((event) => event.type === "turn.failed")?.payload.code, "conversation_ledger_unavailable");
+  assert.doesNotMatch(JSON.stringify(events), /private-secret|password/);
+});
+
+test("TaskTruth flush failure downgrades a pending completion before it is spoken", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  (kernel.taskTruth as unknown as { flush: () => Promise<void> }).flush = async () => {
+    throw new Error("private task persistence failure");
+  };
+  const runtime = new ProductKernelRuntime(new CountingRuntime(), kernel);
+  const command = makeCommand("任务状态写不进去");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => visible.push(event));
+
+  assert.ok(!visible.some((event) => event.type === "response.completed"));
+  assert.equal(visible.find((event) => event.type === "turn.failed")?.payload.code, "task_truth_unavailable");
+  assert.equal((await kernel.store.listConversationTurns(command.payload.conversationId))[0]?.status, "failed");
+});
+
+test("event projection is idempotent, ordered, and excludes tool parameters", async () => {
+  class DuplicateEventRuntime implements AgentRuntime {
+    async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+      const started = runtimeEvent("tool.started", command.requestId, command.traceId, {
+        toolName: "password=SECRET",
+        secretArgument: "do-not-store",
+      });
+      emit(started);
+      emit(started);
+      emit(runtimeEvent("runtime.status", command.requestId, command.traceId, {
+        status: "token=SECRET",
+      }));
+      emit(runtimeEvent("response.delta", command.requestId, command.traceId, {
+        text: "stream only",
+      }));
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "最后结果",
+        verified: true,
+      }));
+    }
+    async steerTurn(_command: TurnSteerCommand, _emit: RuntimeEventSink): Promise<void> {}
+    async cancelTurn(_command: TurnCancelCommand, _emit: RuntimeEventSink): Promise<void> {}
+    async dispose(): Promise<void> {}
+  }
+
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new DuplicateEventRuntime(), kernel);
+  const command = makeCommand("投影安全事件");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => visible.push(event));
+
+  const ledgerEvents = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(ledgerEvents.filter((event) => event.type === "tool.started").length, 1);
+  assert.ok(!ledgerEvents.some((event) => event.type === "response.delta"));
+  assert.doesNotMatch(JSON.stringify(ledgerEvents), /do-not-store|secretArgument|SECRET/);
+  assert.equal(
+    ledgerEvents.find((event) => event.type === "tool.started")?.payload.toolName,
+    "redacted",
+  );
+  assert.doesNotMatch(JSON.stringify(visible), /do-not-store|SECRET|secretArgument/);
+  const visibleTool = visible.find((event) => event.type === "tool.started");
+  assert.equal(visibleTool?.payload.toolName, "redacted");
+  const visibleStatus = visible.find((event) => event.type === "runtime.status");
+  assert.equal(visibleStatus?.payload.status, "unknown");
+  assert.deepEqual(
+    ledgerEvents.map((event) => event.sequence),
+    [...ledgerEvents].map((event) => event.sequence).sort((a, b) => a - b),
+  );
+});
+
+test("steer is recorded as a user-visible event on the same turn", async () => {
+  class WaitingRuntime implements AgentRuntime {
+    private release!: () => void;
+    private readonly gate = new Promise<void>((resolve) => { this.release = resolve; });
+    async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+      emit(runtimeEvent("turn.started", command.requestId, command.traceId, { runtime: "waiting" }));
+      await this.gate;
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "收到转向",
+        verified: false,
+      }));
+    }
+    async steerTurn(command: TurnSteerCommand, emit: RuntimeEventSink): Promise<void> {
+      emit(runtimeEvent("runtime.status", command.requestId, command.traceId, { status: "steering_received" }));
+      this.release();
+    }
+    async cancelTurn(_command: TurnCancelCommand, _emit: RuntimeEventSink): Promise<void> {}
+    async dispose(): Promise<void> { this.release(); }
+  }
+
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new WaitingRuntime(), kernel);
+  const command = makeCommand("先做第一步");
+  command.payload.conversationId = randomUUID();
+  const start = runtime.startTurn(command, () => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await runtime.steerTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.steer",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { message: "改成第二步" },
+  }, () => undefined);
+  await start;
+
+  const ledgerEvents = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.ok(ledgerEvents.some((event) => event.type === "turn.user_input" && event.payload.channel === "steer"));
+});
+
+test("legacy turns fall back to request id as conversation id and enrich events", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const command = makeCommand("旧客户端请求");
+  const events: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  const turns = await kernel.store.listConversationTurns(command.requestId);
+  assert.equal(turns[0]?.id, command.requestId);
+  assert.ok(events.every((event) => event.conversationId === command.requestId));
+});
+
+test("SQLite ledger survives runtime restart, preserves turn order, and replays old turns", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "yishu-runtime-ledger-"));
+  const sqlitePath = path.join(root, "ledger.sqlite");
+  const conversationId = randomUUID();
+  const projectScope = {
+    kind: "project" as const,
+    projectId: "44444444-4444-4444-8444-444444444444",
+    projectLabel: "SQLite 项目",
+  };
+  const command1 = makeCommand("第一轮持久对话");
+  command1.payload.conversationId = conversationId;
+  command1.payload.sessionScope = projectScope;
+  const command2 = makeCommand("第二轮持久对话");
+  command2.payload.conversationId = conversationId;
+  command2.payload.sessionScope = projectScope;
+
+  try {
+    const kernel1 = createYishuKernel({ storeBackend: "sqlite", sqlitePath });
+    const runtime1 = new ProductKernelRuntime(new CountingRuntime(), kernel1);
+    await runtime1.startTurn(command1, () => undefined);
+    await runtime1.dispose();
+    (kernel1.store as { close?: () => void }).close?.();
+
+    const kernel2 = createYishuKernel({ storeBackend: "sqlite", sqlitePath });
+    const runtime2 = new ProductKernelRuntime(new CountingRuntime(), kernel2);
+    await runtime2.startTurn(command2, () => undefined);
+    await runtime2.dispose();
+    (kernel2.store as { close?: () => void }).close?.();
+
+    const kernel3 = createYishuKernel({ storeBackend: "sqlite", sqlitePath });
+    const replayInner = new CountingRuntime();
+    const runtime3 = new ProductKernelRuntime(replayInner, kernel3);
+    const replayEvents: RuntimeEvent[] = [];
+    await runtime3.startTurn(command1, (event) => replayEvents.push(event));
+
+    const turns = await kernel3.store.listConversationTurns(conversationId);
+    assert.deepEqual(turns.map((turn) => turn.sequence), [0, 1]);
+    assert.equal(turns[0]?.assistantOutput, "可回放的最终回答");
+    assert.equal(turns[1]?.assistantOutput, "可回放的最终回答");
+    assert.ok(turns.every((turn) => JSON.stringify(turn.sessionScope) === JSON.stringify(projectScope)));
+    assert.deepEqual((await kernel3.store.getConversation(conversationId))?.sessionScope, projectScope);
+    assert.equal(replayInner.starts, 0);
+    assert.ok(replayEvents.some((event) => event.type === "response.completed"));
+    const events = await kernel3.store.listConversationEvents(conversationId);
+    assert.ok(events.some((event) => event.type === "turn.assistant_output"));
+    assert.ok(!events.some((event) => event.type === "response.delta"));
+    (kernel3.store as { close?: () => void }).close?.();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("history.list returns personal rows only, newest first, with open restore", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+
+  const olderId = randomUUID();
+  const newerId = randomUUID();
+  const projectId = "55555555-5555-4555-8555-555555555555";
+  const projectConversationId = randomUUID();
+
+  await kernel.store.upsertConversation({
+    id: olderId,
+    createdAt: "2026-08-08T04:00:00.000Z",
+    updatedAt: "2026-08-08T04:00:00.000Z",
+    sessionScope: { kind: "personal" },
+    title: "旧对话标题",
+  });
+  await kernel.store.upsertConversationTurn({
+    id: randomUUID(),
+    conversationId: olderId,
+    userInput: "旧话题",
+    assistantOutput: "旧回复",
+    status: "completed",
+    sessionScope: { kind: "personal" },
+  });
+  await kernel.store.upsertConversation({
+    id: olderId,
+    updatedAt: "2026-08-08T04:00:05.000Z",
+    sessionScope: { kind: "personal" },
+  });
+
+  await kernel.store.upsertConversation({
+    id: newerId,
+    createdAt: "2026-08-08T05:00:00.000Z",
+    updatedAt: "2026-08-08T05:10:00.000Z",
+    sessionScope: { kind: "personal" },
+  });
+  await kernel.store.upsertConversationTurn({
+    id: randomUUID(),
+    conversationId: newerId,
+    userInput: "新话题",
+    assistantOutput: "新回复",
+    status: "completed",
+    sessionScope: { kind: "personal" },
+  });
+
+  await kernel.store.upsertConversation({
+    id: projectConversationId,
+    createdAt: "2026-08-08T06:00:00.000Z",
+    updatedAt: "2026-08-08T06:00:00.000Z",
+    sessionScope: { kind: "project", projectId, projectLabel: "项目A" },
+    title: "项目对话",
+  });
+
+  const listRequestId = randomUUID();
+  const listEvents: RuntimeEvent[] = [];
+  await runtime.listHistory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "history.list",
+    requestId: listRequestId,
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { sessionScope: { kind: "personal" }, limit: 30 },
+  }, (event) => listEvents.push(event));
+
+  const listed = listEvents.find((event) => event.type === "history.listed");
+  assert.ok(listed);
+  const items = (listed?.payload as { items?: Array<{ id: string; title: string; summary: string }> })?.items ?? [];
+  assert.deepEqual(items.map((item) => item.id), [newerId, olderId]);
+  assert.equal(items.some((item) => item.id === projectConversationId), false);
+  assert.ok((items[0]?.title.length ?? 0) > 0);
+  assert.ok((items[0]?.summary.length ?? 0) > 0);
+
+  const openRequestId = randomUUID();
+  const openEvents: RuntimeEvent[] = [];
+  await runtime.openHistory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "history.open",
+    requestId: openRequestId,
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { conversationId: olderId, sessionScope: { kind: "personal" } },
+  }, (event) => openEvents.push(event));
+
+  const opened = openEvents.find((event) => event.type === "history.opened");
+  assert.ok(opened);
+  assert.equal(opened?.conversationId, olderId);
+  const turns = (opened?.payload as {
+    turns?: Array<{ userInput?: string; assistantOutput?: string }>;
+  })?.turns ?? [];
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]?.userInput, "旧话题");
+  assert.equal(turns[0]?.assistantOutput, "旧回复");
+
+  const mismatchEvents: RuntimeEvent[] = [];
+  await runtime.openHistory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "history.open",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      conversationId: projectConversationId,
+      sessionScope: { kind: "personal" },
+    },
+  }, (event) => mismatchEvents.push(event));
+  assert.ok(mismatchEvents.some((event) => event.type === "history.failed"));
+  const failed = mismatchEvents.find((event) => event.type === "history.failed");
+  assert.equal((failed?.payload as { code?: string })?.code, "scope_mismatch");
+});
+
+test("history.delete archives personal row, hides from list, and rejects open", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const keepId = randomUUID();
+  const deleteId = randomUUID();
+
+  await kernel.store.upsertConversation({
+    id: keepId,
+    sessionScope: { kind: "personal" },
+    title: "保留对话",
+  });
+  await kernel.store.upsertConversationTurn({
+    id: randomUUID(),
+    conversationId: keepId,
+    userInput: "保留",
+    assistantOutput: "还在",
+    status: "completed",
+    sessionScope: { kind: "personal" },
+  });
+  await kernel.store.upsertConversation({
+    id: deleteId,
+    sessionScope: { kind: "personal" },
+    title: "待删对话",
+  });
+  await kernel.store.upsertConversationTurn({
+    id: randomUUID(),
+    conversationId: deleteId,
+    userInput: "要删",
+    assistantOutput: "会归档",
+    status: "completed",
+    sessionScope: { kind: "personal" },
+  });
+
+  const deleteEvents: RuntimeEvent[] = [];
+  await runtime.deleteHistory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "history.delete",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { conversationId: deleteId, sessionScope: { kind: "personal" } },
+  }, (event) => deleteEvents.push(event));
+
+  const deleted = deleteEvents.find((event) => event.type === "history.deleted");
+  assert.ok(deleted);
+  assert.equal((deleted?.payload as { conversationId?: string })?.conversationId, deleteId);
+  assert.equal((deleted?.payload as { status?: string })?.status, "archived");
+
+  // Soft-delete: row still readable via get, status archived, body turns remain.
+  const archived = await kernel.store.getConversation(deleteId);
+  assert.equal(archived?.status, "archived");
+  const turns = await kernel.store.listConversationTurns(deleteId);
+  assert.equal(turns.length, 1);
+
+  const listEvents: RuntimeEvent[] = [];
+  await runtime.listHistory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "history.list",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { sessionScope: { kind: "personal" }, limit: 30 },
+  }, (event) => listEvents.push(event));
+  const listed = listEvents.find((event) => event.type === "history.listed");
+  const items = (listed?.payload as { items?: Array<{ id: string }> })?.items ?? [];
+  assert.deepEqual(items.map((item) => item.id), [keepId]);
+
+  const openEvents: RuntimeEvent[] = [];
+  await runtime.openHistory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "history.open",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { conversationId: deleteId, sessionScope: { kind: "personal" } },
+  }, (event) => openEvents.push(event));
+  const openFailed = openEvents.find((event) => event.type === "history.failed");
+  assert.equal((openFailed?.payload as { code?: string })?.code, "conversation_archived");
+
+  // Idempotent second delete
+  const again: RuntimeEvent[] = [];
+  await runtime.deleteHistory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "history.delete",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { conversationId: deleteId, sessionScope: { kind: "personal" } },
+  }, (event) => again.push(event));
+  assert.ok(again.some((event) => event.type === "history.deleted"));
+
+  // Project cannot be deleted via personal path
+  const projectId = "66666666-6666-4666-8666-666666666666";
+  const projectConversationId = randomUUID();
+  await kernel.store.upsertConversation({
+    id: projectConversationId,
+    sessionScope: { kind: "project", projectId, projectLabel: "项目" },
+    title: "项目",
+  });
+  const projectEvents: RuntimeEvent[] = [];
+  await runtime.deleteHistory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "history.delete",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      conversationId: projectConversationId,
+      sessionScope: { kind: "personal" },
+    },
+  }, (event) => projectEvents.push(event));
+  assert.ok(projectEvents.some((event) => event.type === "history.failed"));
+  const projectStill = await kernel.store.getConversation(projectConversationId);
+  assert.equal(projectStill?.status, "active");
+});
+
+test("memory.list returns personal only; memory.forget hard-deletes and rejects project", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const now = new Date().toISOString();
+  const personal = await kernel.store.addMemory({
+    claim: "验收用个人偏好：回答先给结论",
+    source: "conversation",
+    capturedAt: now,
+    scope: "personal",
+    confidence: 0.95,
+    lastConfirmedAt: now,
+    supersedes: null,
+    tags: [],
+  });
+  const projectId = "77777777-7777-4777-8777-777777777777";
+  const project = await kernel.store.addMemory({
+    claim: "项目记忆",
+    source: "conversation",
+    capturedAt: now,
+    scope: `project:${projectId}`,
+    confidence: 0.9,
+    lastConfirmedAt: now,
+    supersedes: null,
+    tags: [],
+  });
+
+  const listEvents: RuntimeEvent[] = [];
+  await runtime.listMemories({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "memory.list",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { sessionScope: { kind: "personal" }, limit: 50 },
+  }, (event) => listEvents.push(event));
+  const listed = listEvents.find((event) => event.type === "memory.listed");
+  const items = (listed?.payload as { items?: Array<{ id: string; summary: string }> })?.items ?? [];
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.id, personal.id);
+  assert.match(items[0]?.summary ?? "", /回答先给结论/);
+
+  const projectList: RuntimeEvent[] = [];
+  await runtime.listMemories({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "memory.list",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      sessionScope: { kind: "project", projectId, projectLabel: "P" },
+      limit: 50,
+    },
+  }, (event) => projectList.push(event));
+  assert.ok(projectList.some((event) => event.type === "memory.failed"));
+
+  const forgetEvents: RuntimeEvent[] = [];
+  await runtime.forgetMemory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "memory.forget",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { memoryId: personal.id, sessionScope: { kind: "personal" } },
+  }, (event) => forgetEvents.push(event));
+  assert.ok(forgetEvents.some((event) => event.type === "memory.forgotten"));
+  assert.equal(
+    (await kernel.store.searchMemory("", { scope: "personal" })).length,
+    0,
+  );
+  assert.equal(
+    kernel.store.getSnapshot().memories.some((m) => m.id === personal.id),
+    false,
+  );
+
+  // Stable re-forget
+  const again: RuntimeEvent[] = [];
+  await runtime.forgetMemory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "memory.forget",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { memoryId: personal.id, sessionScope: { kind: "personal" } },
+  }, (event) => again.push(event));
+  const againPayload = again.find((e) => e.type === "memory.forgotten")
+    ?.payload as { alreadyGone?: boolean } | undefined;
+  assert.equal(againPayload?.alreadyGone, true);
+
+  // Cannot forget project via personal path
+  const projectForget: RuntimeEvent[] = [];
+  await runtime.forgetMemory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "memory.forget",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { memoryId: project.id, sessionScope: { kind: "personal" } },
+  }, (event) => projectForget.push(event));
+  assert.ok(projectForget.some((event) => event.type === "memory.failed"));
+  assert.equal(
+    (await kernel.store.searchMemory("", { scope: `project:${projectId}` })).length,
+    1,
+  );
+});
+
+class CapturingRuntime implements AgentRuntime {
+  lastCommand: TurnStartCommand | undefined;
+
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    this.lastCommand = command;
+    emit(runtimeEvent("turn.started", command.requestId, command.traceId, { runtime: "capture" }));
+    emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+      text: `echo:${command.payload.utterance}`,
+      verified: true,
+    }));
+  }
+
+  async steerTurn(): Promise<void> {}
+  async cancelTurn(command: TurnCancelCommand, emit: RuntimeEventSink): Promise<void> {
+    emit(runtimeEvent("turn.cancelled", command.requestId, command.traceId, {
+      reason: command.payload.reason ?? "user_cancelled",
+    }));
+  }
+  async dispose(): Promise<void> {}
+}
+
+test("ordinary personal turn recalls related memory, emits memory.used, injects prompt", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const now = "2026-08-08T12:00:00.000Z";
+  const memory = await kernel.store.addMemory({
+    claim: "验收回答先给结论",
+    source: "conversation",
+    capturedAt: now,
+    scope: "personal",
+    confidence: 0.95,
+    lastConfirmedAt: now,
+    supersedes: null,
+    tags: ["style"],
+  });
+
+  const capturing = new CapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  const events: RuntimeEvent[] = [];
+  const command = makeCommand("我希望你怎么回答？");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "personal" };
+
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  const used = events.find((event) => event.type === "memory.used");
+  assert.ok(used, "memory.used must fire when a related claim is applied");
+  assert.equal(used?.payload.count, 1);
+  assert.equal(used?.payload.memoryId1, memory.id);
+  assert.match(String(used?.payload.summary1 ?? ""), /验收回答先给结论/);
+  assert.equal(used?.payload.source1, "conversation");
+  assert.equal(used?.payload.capturedAt1, now);
+  assert.equal(used?.payload.scope1, "personal");
+
+  const attached = capturing.lastCommand as TurnStartCommand & {
+    payload: { __yishuRecalledMemories?: Array<{ id: string; claim: string }> };
+  };
+  assert.equal(attached.payload.__yishuRecalledMemories?.length, 1);
+  assert.equal(attached.payload.__yishuRecalledMemories?.[0]?.id, memory.id);
+  // User-visible utterance is unchanged (ledger / history must not swallow memory block).
+  assert.equal(attached.payload.utterance, "我希望你怎么回答？");
+});
+
+test("unrelated ordinary turn does not emit memory.used", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const now = "2026-08-08T12:00:00.000Z";
+  await kernel.store.addMemory({
+    claim: "验收回答先给结论",
+    source: "conversation",
+    capturedAt: now,
+    scope: "personal",
+    confidence: 0.95,
+    lastConfirmedAt: now,
+    supersedes: null,
+    tags: [],
+  });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const events: RuntimeEvent[] = [];
+  const command = makeCommand("今天北京的天气怎么样？");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "personal" };
+  await runtime.startTurn(command, (event) => events.push(event));
+  assert.ok(!events.some((event) => event.type === "memory.used"));
+  assert.ok(events.some((event) => event.type === "response.completed"));
+});
+
+test("private sessions never read or write long-term memory", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const now = "2026-08-08T12:00:00.000Z";
+  await kernel.store.addMemory({
+    claim: "验收回答先给结论",
+    source: "conversation",
+    capturedAt: now,
+    scope: "personal",
+    confidence: 0.95,
+    lastConfirmedAt: now,
+    supersedes: null,
+    tags: [],
+  });
+  const capturing = new CapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  const events: RuntimeEvent[] = [];
+  const command = makeCommand("我希望你怎么回答？");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "private" };
+  await runtime.startTurn(command, (event) => events.push(event));
+  assert.ok(!events.some((event) => event.type === "memory.used"));
+  const attached = capturing.lastCommand as TurnStartCommand & {
+    payload: { __yishuRecalledMemories?: unknown[] };
+  };
+  assert.equal(attached.payload.__yishuRecalledMemories, undefined);
+});
+
+test("project scope does not read personal memories", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const now = "2026-08-08T12:00:00.000Z";
+  await kernel.store.addMemory({
+    claim: "验收回答先给结论",
+    source: "conversation",
+    capturedAt: now,
+    scope: "personal",
+    confidence: 0.95,
+    lastConfirmedAt: now,
+    supersedes: null,
+    tags: [],
+  });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const events: RuntimeEvent[] = [];
+  const command = makeCommand("我希望你怎么回答？");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = {
+    kind: "project",
+    projectId: "33333333-3333-4333-8333-333333333333",
+    projectLabel: "隔离项目",
+  };
+  await runtime.startTurn(command, (event) => events.push(event));
+  assert.ok(!events.some((event) => event.type === "memory.used"));
+});
+
+test("retired memory is not recalled on ordinary turns", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const now = "2026-08-08T12:00:00.000Z";
+  const memory = await kernel.store.addMemory({
+    claim: "验收回答先给结论",
+    source: "conversation",
+    capturedAt: now,
+    scope: "personal",
+    confidence: 0.95,
+    lastConfirmedAt: now,
+    supersedes: null,
+    tags: [],
+  });
+  await kernel.store.retireMemory(memory.id);
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const events: RuntimeEvent[] = [];
+  const command = makeCommand("我希望你怎么回答？");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "personal" };
+  await runtime.startTurn(command, (event) => events.push(event));
+  assert.ok(!events.some((event) => event.type === "memory.used"));
+});
+
+test("memory search failure degrades without faking memory.used", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const original = kernel.store.searchMemory.bind(kernel.store);
+  kernel.store.searchMemory = async () => {
+    throw new Error("simulated search failure");
+  };
+  try {
+    const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+    const events: RuntimeEvent[] = [];
+    const command = makeCommand("我希望你怎么回答？");
+    command.payload.conversationId = randomUUID();
+    command.payload.sessionScope = { kind: "personal" };
+    await runtime.startTurn(command, (event) => events.push(event));
+    assert.ok(!events.some((event) => event.type === "memory.used"));
+    assert.ok(events.some((event) => event.type === "response.completed"));
+  } finally {
+    kernel.store.searchMemory = original;
+  }
+});
+
+test("remember speech only after durable verify success", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const events: RuntimeEvent[] = [];
+  const command = makeCommand("请记住：验收回答先给结论");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "personal" };
+  await runtime.startTurn(command, (event) => events.push(event));
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.match(String(completed?.payload.text ?? ""), /好，我记住了/);
+  const hits = await kernel.store.searchMemory("验收回答先给结论", { scope: "personal" });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.source, "conversation");
+  assert.equal(hits[0]?.scope, "personal");
+});

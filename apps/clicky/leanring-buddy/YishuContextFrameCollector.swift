@@ -1,0 +1,272 @@
+import AppKit
+import ApplicationServices
+import CoreGraphics
+import Foundation
+import YishuContext
+
+struct YishuCapturedContext {
+    let frame: YishuContextFrame
+    let screenCaptures: [CompanionScreenCapture]
+}
+
+@MainActor
+final class YishuContextFrameCollector {
+    private let pointerMonitor: YishuPointerTrailMonitor
+
+    init(pointerMonitor: YishuPointerTrailMonitor) {
+        self.pointerMonitor = pointerMonitor
+    }
+
+    func capture() async -> YishuCapturedContext {
+        let snapshot = captureMetadata(includePointerTrail: true)
+        var warnings = snapshot.warnings
+        var screenCaptures: [CompanionScreenCapture] = []
+        do {
+            screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+        } catch {
+            warnings.append("screen-capture-unavailable:\(compactError(error))")
+        }
+
+        let screenshots = screenCaptures.prefix(4).map { capture in
+            YishuScreenshotContext(
+                label: capture.label,
+                mediaType: "image/jpeg",
+                base64Data: capture.imageData.base64EncodedString(),
+                displayWidthPoints: capture.displayWidthInPoints,
+                displayHeightPoints: capture.displayHeightInPoints,
+                screenshotWidthPixels: capture.screenshotWidthInPixels,
+                screenshotHeightPixels: capture.screenshotHeightInPixels
+            )
+        }
+
+        let frame = YishuContextFrame(
+            capturedAt: snapshot.capturedAt,
+            expiresAt: snapshot.capturedAt.addingTimeInterval(30),
+            cursor: snapshot.cursor,
+            pointerTrail: snapshot.pointerTrail,
+            frontmostApplication: snapshot.frontmostApplication,
+            activeWindow: snapshot.activeWindow,
+            elementUnderCursor: snapshot.elementUnderCursor,
+            screenshots: screenshots,
+            warnings: warnings
+        )
+
+        do {
+            try frame.validate(referenceDate: snapshot.capturedAt)
+            return YishuCapturedContext(frame: frame, screenCaptures: screenCaptures)
+        } catch {
+            let safeFrame = YishuContextFrame(
+                capturedAt: snapshot.capturedAt,
+                expiresAt: snapshot.capturedAt.addingTimeInterval(30),
+                cursor: snapshot.cursor,
+                pointerTrail: [],
+                frontmostApplication: snapshot.frontmostApplication,
+                activeWindow: snapshot.activeWindow,
+                elementUnderCursor: snapshot.elementUnderCursor,
+                screenshots: [],
+                warnings: warnings + ["context-validation-failed:\(compactError(error))"]
+            )
+            return YishuCapturedContext(frame: safeFrame, screenCaptures: screenCaptures)
+        }
+    }
+
+    /// Metadata-only capture for ContextTrail background sampling.
+    /// Omits screenshot bytes so trail.observe stays cheap and private by default.
+    func captureTrailSample() -> YishuContextFrame {
+        let snapshot = captureMetadata(includePointerTrail: false)
+        let frame = YishuContextFrame(
+            capturedAt: snapshot.capturedAt,
+            expiresAt: snapshot.capturedAt.addingTimeInterval(30),
+            cursor: snapshot.cursor,
+            pointerTrail: snapshot.pointerTrail,
+            frontmostApplication: snapshot.frontmostApplication,
+            activeWindow: snapshot.activeWindow,
+            elementUnderCursor: snapshot.elementUnderCursor,
+            screenshots: [],
+            warnings: snapshot.warnings + ["trail-sample:no-screenshot"]
+        )
+        return frame
+    }
+
+    private struct MetadataSnapshot {
+        let capturedAt: Date
+        let cursor: YishuObservedValue<YishuScreenPoint>
+        let pointerTrail: [YishuPointerSample]
+        let frontmostApplication: YishuObservedValue<YishuApplicationContext>?
+        let activeWindow: YishuObservedValue<YishuWindowContext>?
+        let elementUnderCursor: YishuObservedValue<YishuAccessibilityElementContext>?
+        let warnings: [String]
+    }
+
+    private func captureMetadata(includePointerTrail: Bool) -> MetadataSnapshot {
+        let capturedAt = Date()
+        let cursorLocation = YishuPointerTrailMonitor.currentGlobalPoint()
+        let cursor = YishuObservedValue(
+            value: YishuScreenPoint(
+                x: cursorLocation.x,
+                y: cursorLocation.y,
+                coordinateSpace: .globalTopLeft
+            ),
+            source: "cg-event-location",
+            capturedAt: capturedAt,
+            confidence: 1
+        )
+
+        var warnings: [String] = []
+        let application = frontmostApplication(capturedAt: capturedAt)
+        let window = application.flatMap {
+            activeWindow(processIdentifier: $0.value.processIdentifier, capturedAt: capturedAt)
+        }
+        let accessibility = accessibilityElement(
+            at: cursorLocation,
+            capturedAt: capturedAt,
+            warnings: &warnings
+        )
+        let trail = includePointerTrail
+            ? pointerMonitor.recentSamples(since: capturedAt.addingTimeInterval(-2.5))
+            : []
+
+        return MetadataSnapshot(
+            capturedAt: capturedAt,
+            cursor: cursor,
+            pointerTrail: trail,
+            frontmostApplication: application,
+            activeWindow: window,
+            elementUnderCursor: accessibility,
+            warnings: warnings
+        )
+    }
+
+    private func frontmostApplication(
+        capturedAt: Date
+    ) -> YishuObservedValue<YishuApplicationContext>? {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.processIdentifier > 0 else {
+            return nil
+        }
+
+        return YishuObservedValue(
+            value: YishuApplicationContext(
+                name: application.localizedName ?? "Unknown application",
+                bundleIdentifier: application.bundleIdentifier,
+                processIdentifier: Int(application.processIdentifier)
+            ),
+            source: "ns-workspace",
+            capturedAt: capturedAt,
+            confidence: 1
+        )
+    }
+
+    private func activeWindow(
+        processIdentifier: Int,
+        capturedAt: Date
+    ) -> YishuObservedValue<YishuWindowContext>? {
+        guard let rawWindows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]],
+        let window = rawWindows.first(where: { item in
+            let ownerPID = item[kCGWindowOwnerPID as String] as? Int
+            let layer = item[kCGWindowLayer as String] as? Int
+            return ownerPID == processIdentifier && layer == 0
+        }) else {
+            return nil
+        }
+
+        var bounds: YishuWindowBounds?
+        if let boundsDictionary = window[kCGWindowBounds as String] as? NSDictionary,
+           let rect = CGRect(dictionaryRepresentation: boundsDictionary) {
+            bounds = YishuWindowBounds(
+                x: rect.origin.x,
+                y: rect.origin.y,
+                width: rect.width,
+                height: rect.height
+            )
+        }
+
+        let rawTitle = window[kCGWindowName as String] as? String
+        let title = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return YishuObservedValue(
+            value: YishuWindowContext(
+                title: title?.isEmpty == false ? truncated(title, length: 240) : nil,
+                ownerName: (window[kCGWindowOwnerName as String] as? String) ?? "Unknown application",
+                processIdentifier: processIdentifier,
+                bounds: bounds
+            ),
+            source: "cg-window-list",
+            capturedAt: capturedAt,
+            confidence: 0.94
+        )
+    }
+
+    private func accessibilityElement(
+        at point: CGPoint,
+        capturedAt: Date,
+        warnings: inout [String]
+    ) -> YishuObservedValue<YishuAccessibilityElementContext>? {
+        guard AXIsProcessTrusted() else {
+            warnings.append("accessibility-permission-required")
+            return nil
+        }
+
+        let system = AXUIElementCreateSystemWide()
+        var rawElement: AXUIElement?
+        let result = AXUIElementCopyElementAtPosition(
+            system,
+            Float(point.x),
+            Float(point.y),
+            &rawElement
+        )
+        guard result == .success, let element = rawElement else {
+            warnings.append("accessibility-element-unavailable:\(result.rawValue)")
+            return nil
+        }
+
+        let role = stringAttribute(kAXRoleAttribute, from: element)
+        let subrole = stringAttribute(kAXSubroleAttribute, from: element)
+        let isSecure = subrole == "AXSecureTextField"
+        return YishuObservedValue(
+            value: YishuAccessibilityElementContext(
+                role: role,
+                subrole: subrole,
+                title: truncated(stringAttribute(kAXTitleAttribute, from: element), length: 240),
+                description: truncated(stringAttribute(kAXDescriptionAttribute, from: element), length: 240),
+                valuePreview: isSecure
+                    ? nil
+                    : truncated(stringAttribute(kAXValueAttribute, from: element), length: 240)
+            ),
+            source: "macos-accessibility",
+            capturedAt: capturedAt,
+            confidence: 0.92
+        )
+    }
+
+    private func stringAttribute(_ attribute: String, from element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value else {
+            return nil
+        }
+        if let string = value as? String {
+            return string
+        }
+        if let number = value as? NSNumber {
+            return number.stringValue
+        }
+        return nil
+    }
+
+    private func truncated(_ value: String?, length: Int) -> String? {
+        guard let value else { return nil }
+        let collapsed = value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        guard collapsed.count > length else { return collapsed }
+        return String(collapsed.prefix(length)) + "…"
+    }
+
+    private func compactError(_ error: Error) -> String {
+        String(describing: error)
+            .replacingOccurrences(of: "\n", with: " ")
+            .prefix(180)
+            .description
+    }
+}
