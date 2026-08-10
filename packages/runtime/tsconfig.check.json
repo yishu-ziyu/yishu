@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@yishu/kernel": ["../kernel/src/index.ts"],
+      "@yishu/agent-core": ["../agent-core/src/index.ts"]
+    },
+    "rootDir": "../.."
+  }
+}

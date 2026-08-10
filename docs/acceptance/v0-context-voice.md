@@ -2,7 +2,9 @@
 
 ## User path
 
-1. Launch the Yishu development harness and see a 16-point floating `✿` presence without the current app losing focus. The canonical Clicky app remains the shipping interaction shell.
+1. Launch the Yishu development harness explicitly when testing that historical
+   surface. Normal `--verify` runs headlessly and must not show its `✿` presence
+   beside the canonical Clicky app.
 2. Move the pointer over a visible interface element.
 3. Hold Control+Option after authorizing Input Monitoring, or choose “开始说话” from the menu-bar `✿`, then say a phrase containing “这个” or “这里”.
 4. Release the shortcut or choose “停止并发送”.

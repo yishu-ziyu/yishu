@@ -20,7 +20,8 @@
     "agent:mcp": "pnpm --filter @yishu/agent-core cli -- mcp-list",
     "agent:heartbeat": "pnpm --filter @yishu/agent-core cli -- heartbeat-demo",
     "agent:experience": "pnpm --filter @yishu/agent-core cli -- experience",
-    "agent:status": "pnpm --filter @yishu/agent-core cli -- status"
+    "agent:status": "pnpm --filter @yishu/agent-core cli -- status",
+    "kernel:test": "pnpm --filter @yishu/kernel test"
   },
   "engines": {
     "node": ">=22.19.0"
