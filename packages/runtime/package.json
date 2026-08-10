@@ -6,7 +6,7 @@
   "exports": "./dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.check.json --noEmit",
     "dev": "tsx src/stdio-server.ts",
     "start": "node dist/stdio-server.js",
     "pretest": "pnpm --filter @yishu/agent-core build && pnpm --filter @yishu/kernel build",
