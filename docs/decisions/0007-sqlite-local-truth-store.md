@@ -32,5 +32,5 @@ Accepted
 ## Consequences
 
 - `engines` 钉 Node ≥ 22.19（`node:sqlite` 可用性）。
-- 非 additive 迁移需版本化框架（debt 待登记）。
+- 非 additive 迁移需版本化框架；若未来出现该需求，届时单独建立 migration design / debt，当前不登记。
 - 多实例并发限制已知：ledger 尚非分布式执行租约。
