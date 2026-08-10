@@ -43,12 +43,12 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 - revisit trigger: 需要上游新能力或安全修复时；升级必须附 conformance 结果。
 - severity: medium
 
-## debt-005: 死代码（AssemblyAI / OpenAIAPI / ElementLocationDetector）
+## debt-005: 死代码（OpenAIAPI / ElementLocationDetector）
 
-- what: `AssemblyAIStreamingTranscriptionProvider`（占位 worker URL）、`OpenAIAPI.swift`、`ElementLocationDetector.swift` 无调用点。
+- what: `OpenAIAPI`（vision analysis helper）与 `ElementLocationDetector` 两个 class 无调用点。
 - why deferred: 删除零风险但零收益，排队待清理。
-- evidence: `apps/clicky/leanring-buddy/` 下三文件，无调用点（2026-08-10 全库 grep）
-- revisit trigger: 任何触及语音识别或元素定位路径的 PR。
+- evidence: `apps/clicky/leanring-buddy/OpenAIAPI.swift:9` `OpenAIAPI`、`apps/clicky/leanring-buddy/ElementLocationDetector.swift:22` `ElementLocationDetector`，无外部调用点（2026-08-10 全库 grep）
+- revisit trigger: 任何触及 OpenAI 集成或元素定位路径的 PR。
 - severity: low
 
 ## debt-006: 命名债（ElevenLabsTTSClient / ClaudeAPI）
@@ -95,7 +95,7 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 - what: `cancelTurn` 不校验 requestId 是否存在，统一发 `turn.cancelled`。
 - why deferred: 行为对调用方无害，修正属语义收紧，需评估兼容性。
-- evidence: `packages/runtime/src/pi-runtime-adapter.ts`
+- evidence: `packages/runtime/src/pi-runtime-adapter.ts:411` `cancelTurn()`——`hasActiveRequest` 检查仅控制 `cancelledRequestIds` 登记，`turn.cancelled` 事件于 :422 无条件 emit。
 - revisit trigger: 有调用方依赖取消幂等语义，或协议 schemaVersion 演进时。
 - severity: low
 
@@ -103,7 +103,7 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 - what: `response.completed` 要求 `streamedText` 非空，纯工具回合（无文本输出）会被判 failed——隐性规则未显式表达。
 - why deferred: 修正涉及 TaskTruth 语义，需与产品确认"纯工具回合"的终态定义。
-- evidence: `packages/runtime/src/pi-runtime-adapter.ts`
+- evidence: `packages/runtime/src/pi-runtime-adapter.ts:367` `runTurn()`——`streamedText` 为空即 `throw "Pi completed the turn without a user-visible response."`，纯工具回合落入 failed 路径。
 - revisit trigger: 出现纯工具回合误报，或定义任务终态语义时。
 - severity: medium
 
@@ -121,4 +121,12 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 - why deferred: 纳入测试目录需先修既有类型错误，工作量单列。
 - evidence: `packages/runtime/tsconfig.json`（`include: ["src/**/*.ts"]`）、`packages/runtime/tsconfig.check.json`
 - revisit trigger: 测试因类型错误失效，或统一收紧各包 tsconfig 时。
+- severity: low
+
+## debt-015: AssemblyAI provider 集成未完成
+
+- what: `AssemblyAIStreamingTranscriptionProvider` 被 `BuddyTranscriptionProvider.resolveProvider()` 的 `.assemblyAI` 分支实例化并使用，不是无调用点死代码；真正的问题是 token proxy URL 仍为模板值，集成未完成。
+- why deferred: 需要"完成集成"或"完整移除"的明确决策；移除需同时处理 `PreferredProvider` enum、`resolveProvider()` 的 `.assemblyAI` 分支与相关配置路径，超出本轮范围。
+- evidence: `apps/clicky/leanring-buddy/BuddyTranscriptionProvider.swift:72` `resolveProvider()`（实例化调用点）、`apps/clicky/leanring-buddy/AssemblyAIStreamingTranscriptionProvider.swift:22` `tokenProxyURL`（模板值 `your-worker-name.your-subdomain.workers.dev`）；`isConfigured` 恒 true（同文件 :27），配置 `VoiceTranscriptionProvider=assemblyai` 即可选择该路径。
+- revisit trigger: 触及语音转写 provider 选择路径，或决定启用 / 移除 AssemblyAI 时。
 - severity: low
