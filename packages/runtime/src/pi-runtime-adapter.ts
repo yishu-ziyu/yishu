@@ -115,9 +115,21 @@ export function piSessionCacheKey(
   return `${capabilityProfile}:${preference.provider}:${generation}:${preference.model}:${conversationId}`;
 }
 
+/**
+ * Optional injection seam for tests.  Both members default to the exact
+ * production wiring: a product-owned local `ModelRuntime` and Pi's
+ * `createAgentSession`.  Callers that inject a model runtime still pass
+ * through the OAuth provider policy install below.
+ */
+export interface PiRuntimeAdapterOptions {
+  modelRuntimePromise?: Promise<ModelRuntime>;
+  createSession?: typeof createAgentSession;
+}
+
 export class PiRuntimeAdapter implements AgentRuntime {
   private readonly workingDirectory: string;
   private readonly modelRuntimePromise: Promise<ModelRuntime>;
+  private readonly createSession: typeof createAgentSession;
   readonly authService: YishuAuthService;
   private readonly sessions = new Map<string, AgentSession>();
   private readonly activeSessionByRequestId = new Map<string, AgentSession>();
@@ -134,12 +146,14 @@ export class PiRuntimeAdapter implements AgentRuntime {
   constructor(
     workingDirectory = process.cwd(),
     private readonly computerUsePort: ComputerUsePort = new UnavailableComputerUsePort(),
+    options: PiRuntimeAdapterOptions = {},
   ) {
     this.workingDirectory = workingDirectory;
+    this.createSession = options.createSession ?? createAgentSession;
     // Keep provider/model state in this process. In particular, do not read or
     // write the user's global ~/.pi/agent models.json/auth.json. OAuth state is
     // product-owned under Yishu/Auth/auth.json instead.
-    const modelRuntimePromise = ModelRuntime.create({
+    const modelRuntimePromise = options.modelRuntimePromise ?? ModelRuntime.create({
       modelsPath: null,
       allowModelNetwork: false,
       credentials: createYishuCredentialStore(),
@@ -582,7 +596,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.ensureProviderAvailable(preference.provider);
 
     const capabilityConfiguration = PI_CAPABILITY_PROFILES[capabilityProfile];
-    const { session } = await createAgentSession({
+    const { session } = await this.createSession({
       cwd: this.workingDirectory,
       modelRuntime,
       model,
