@@ -1,3 +1,4 @@
+import { highRiskReminder, scanForInjection, wrapUntrustedContent } from "@yishu/agent-core";
 import type { ContextFrame, TurnStartCommand } from "./protocol.js";
 
 /** Controlled memory snippet injected into a single ordinary turn prompt. */
@@ -65,15 +66,22 @@ function formatMemoryBlock(memories: readonly PromptMemorySnippet[]): string[] {
 export function buildGroundedPrompt(command: TurnStartCommand): string {
   const groundedContext = contextWithoutImageBytes(command.payload.contextFrame);
   const memories = memoriesFromCommand(command);
+  const contextJson = JSON.stringify(groundedContext, null, 2);
+  // Screen-derived context is untrusted: scan it, and when risky wrap it as
+  // data (never stripped) plus prepend a reminder. Low risk stays byte-identical.
+  const scan = scanForInjection(contextJson);
+  const contextLines =
+    scan.risk === "low"
+      ? ["<context_frame>", contextJson, "</context_frame>"]
+      : [wrapUntrustedContent("context_frame", contextJson)];
 
   return [
+    ...(scan.risk === "low" ? [] : [highRiskReminder(scan)]),
     "The user is speaking while sharing the following fresh computer context.",
     "Treat observations as evidence with confidence and timestamps, not as infallible facts.",
     "",
     ...formatMemoryBlock(memories),
-    "<context_frame>",
-    JSON.stringify(groundedContext, null, 2),
-    "</context_frame>",
+    ...contextLines,
     "",
     "<user_utterance>",
     command.payload.utterance,
