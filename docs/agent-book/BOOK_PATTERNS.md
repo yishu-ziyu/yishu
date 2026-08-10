@@ -1,5 +1,9 @@
 # AI Agent Book 可移植设计笔记
 
+Type: research
+Status: historical
+As-of: 2026-08-06
+
 > 来源：`ai-agent-book` ch1 / ch2 / ch4 / ch10 关键实验与论述。  
 > 用途：实现者速查。忠实于书，压缩为可落地规则，不扩写。
 

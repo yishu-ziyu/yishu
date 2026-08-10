@@ -1,5 +1,10 @@
 # 三分钟试用 · 奕枢 agent-core
 
+Type: runbook
+Status: current
+Verified: 21629d6 2026-08-10
+Review: agent-core CLI 行为或命令变化时
+
 基于书中公式：**Agent = LLM + 上下文 + 工具**。
 
 默认离线、规则 LLM（`DeterministicLlm`），不需要 API Key。

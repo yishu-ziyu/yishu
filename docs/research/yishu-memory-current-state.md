@@ -1,5 +1,10 @@
 # 奕枢当前记忆、轨迹与上下文实现审计
 
+Type: research
+Status: historical
+As-of: 2026-08-08
+> 注：mind suggestion learning/recall 已经 PR #1（21629d6）合入 main，本文缺口清单部分关闭。
+
 审计日期：2026-08-08
 范围：`apps/clicky`、`packages/kernel`、`packages/runtime`、`packages/agent-core` 及其产品/Agent Book 文档。本文只描述当前工作树中能从源码、数据文件和文档直接核对的事实。
 

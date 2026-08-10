@@ -1,5 +1,9 @@
 # Clicky presence research
 
+Type: research
+Status: historical
+As-of: 2026-08-06
+
 Source inspected read-only: `/Users/mahaoxuan/clicky-upstream`.
 
 ## Confirmed active implementation
