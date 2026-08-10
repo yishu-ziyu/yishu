@@ -194,10 +194,23 @@ public struct ContextFrame: Codable, Sendable {
         guard expiresAt > referenceDate else {
             throw ContextFrameValidationError.expired
         }
-        guard (0...1).contains(cursor.confidence) else {
-            throw ContextFrameValidationError.invalidConfidence(cursor.confidence)
+        let confidences = [
+            cursor.confidence,
+            frontmostApplication?.confidence,
+            activeWindow?.confidence,
+            elementUnderCursor?.confidence,
+        ].compactMap { $0 }
+        if let invalidConfidence = confidences.first(where: { !(0...1).contains($0) }) {
+            throw ContextFrameValidationError.invalidConfidence(invalidConfidence)
         }
-        guard screenshots.allSatisfy({ $0.mediaType == "image/jpeg" && !$0.base64Data.isEmpty }) else {
+        guard screenshots.allSatisfy({
+            $0.mediaType == "image/jpeg" &&
+                !$0.base64Data.isEmpty &&
+                $0.displayWidthPoints > 0 &&
+                $0.displayHeightPoints > 0 &&
+                $0.screenshotWidthPixels > 0 &&
+                $0.screenshotHeightPixels > 0
+        }) else {
             throw ContextFrameValidationError.invalidScreenshot
         }
     }

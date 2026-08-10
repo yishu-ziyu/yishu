@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { YishuAgent } from "@yishu/agent-core";
+import { YishuAgent, type TrajectoryStep } from "@yishu/agent-core";
 import type { AgentRuntime, RuntimeEventSink } from "./runtime-port.js";
 import {
   runtimeEvent,
@@ -58,6 +58,18 @@ export function summarizeContextFrame(frame: ContextFrame): string {
 export function buildAgentCoreTask(command: TurnStartCommand): string {
   const summary = summarizeContextFrame(command.payload.contextFrame);
   return `${command.payload.utterance}\n\n[context: ${summary}]`;
+}
+
+function toolStepData(step: TrajectoryStep): {
+  name?: string;
+  ok?: boolean;
+} {
+  if (typeof step.data !== "object" || step.data === null) return {};
+  const data = step.data as Record<string, unknown>;
+  return {
+    ...(typeof data.name === "string" ? { name: data.name } : {}),
+    ...(typeof data.ok === "boolean" ? { ok: data.ok } : {}),
+  };
 }
 
 /**
@@ -143,7 +155,22 @@ export class AgentCoreRuntime implements AgentRuntime {
       }
 
       const task = buildAgentCoreTask(command);
-      const result = await agent.run(task);
+      const result = await agent.run(task, (step) => {
+        const data = toolStepData(step);
+        if (step.kind === "tool_call" && data.name) {
+          emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
+            toolName: data.name,
+            runtime: "agent-core",
+          }));
+        }
+        if (step.kind === "tool_result" && data.name) {
+          emit(runtimeEvent("tool.completed", command.requestId, command.traceId, {
+            toolName: data.name,
+            isError: data.ok !== true,
+            runtime: "agent-core",
+          }));
+        }
+      });
 
       if (this.cancelled) {
         emit(runtimeEvent("turn.cancelled", command.requestId, command.traceId, {

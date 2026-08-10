@@ -1,4 +1,8 @@
 export * from "./agent-core-runtime.js";
+export * from "./auth-protocol.js";
+export * from "./auth-service.js";
+export * from "./auth-store.js";
+export * from "./auth-watchdog.js";
 export * from "./capability-profiles.js";
 export * from "./assistant-output.js";
 export * from "./computer-control-tool.js";
@@ -7,6 +11,7 @@ export * from "./context-prompt.js";
 export * from "./mock-runtime.js";
 export * from "./persona.js";
 export * from "./pi-runtime-adapter.js";
+export * from "./product-kernel-runtime.js";
 export * from "./protocol.js";
 export * from "./runtime-factory.js";
 export * from "./runtime-port.js";

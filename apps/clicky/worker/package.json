@@ -1,0 +1,13 @@
+{
+  "name": "yishu-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node local-server.mjs",
+    "dev:wrangler": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

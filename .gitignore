@@ -29,7 +29,19 @@ packages/agent-core/test/**/.tmp*/
 
 # Local tooling
 .codex/
+.work/
 .env
 .env.*
 !.env.example
 *.log
+
+# Formal Clicky shell: local secrets and generated Xcode/Node state
+apps/clicky/**/xcuserdata/
+apps/clicky/**/.codegraph/
+apps/clicky/**/.dev.vars
+apps/clicky/**/node_modules/
+apps/clicky/**/.wrangler/
+apps/clicky/**/DerivedData/
+apps/clicky/**/*.xcuserstate
+# Canonical Yishu Clicky build output (also used by run-local.sh)
+.build/clicky-derived-data/

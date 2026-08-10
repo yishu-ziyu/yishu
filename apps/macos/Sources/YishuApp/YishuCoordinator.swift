@@ -14,13 +14,14 @@ final class YishuCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private let logger = Logger(subsystem: "com.yishu.yishu-lab", category: "lifecycle")
+    private let isHeadlessVerification = ProcessInfo.processInfo.environment["YISHU_HEADLESS_VERIFY"] == "1"
     private let pointerMonitor = PointerTrailMonitor()
     private let shortcutMonitor = GlobalPushToTalkMonitor()
-    private let presence = PresenceController()
+    private lazy var presence = PresenceController()
     private let transcriber = AppleSpeechTranscriber()
     private let speechOutput = SpeechOutput()
     private let runtime = YishuRuntimeClient()
-    private let menuBar = MenuBarController()
+    private lazy var menuBar = MenuBarController()
     private lazy var contextCollector = ContextCollector(pointerMonitor: pointerMonitor)
 
     private var phase: Phase = .idle
@@ -30,6 +31,17 @@ final class YishuCoordinator: NSObject, NSApplicationDelegate {
     private var didAutorunDemo = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if isHeadlessVerification {
+            do {
+                try runtime.start()
+                logger.info("headless runtime verification launched")
+            } catch {
+                logger.error("headless runtime verification failed")
+                NSApp.terminate(nil)
+            }
+            return
+        }
+
         NSApp.setActivationPolicy(.accessory)
         pointerMonitor.start()
         presence.show()
@@ -68,7 +80,9 @@ final class YishuCoordinator: NSObject, NSApplicationDelegate {
         shortcutMonitor.stop()
         pointerMonitor.stop()
         runtime.stop()
-        presence.hide()
+        if !isHeadlessVerification {
+            presence.hide()
+        }
     }
 
     private func toggleListening() {

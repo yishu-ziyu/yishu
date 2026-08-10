@@ -14,6 +14,11 @@ export interface AssistantOutputProjection {
 const computerControlBlockPattern = /<computer_control\b[^>]*>([\s\S]*?)<\/computer_control\s*>/gi;
 const fencedBlockPattern = /```[^\n]*\n?[\s\S]*?```/g;
 const pointDirectivePattern = /\[POINT:\s*(?:none|(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$/gi;
+const directActionTriggerPattern = /(?:点击|点开|点选|点一下|点(?:这个|那个)|按一下|按下|选中|\b(?:click|press|tap)\b)/gi;
+const directActionTriggerSearchPattern = new RegExp(directActionTriggerPattern.source, "i");
+const sequenceConnectorPattern = /(?:然后|再|接着|之后|随后|并且|并|且|and then|after that|\band\b|then|next)/i;
+const followUpActionPattern = /(?:打开|选择|输入|填写|确认|提交|发送|拖动|滚动|关闭|删除|按(?:回车|enter)|\b(?:select|open|type|enter|submit|send|confirm|drag|scroll|close|delete)\b)/i;
+const explanationOrQuestionPattern = /(?:解释|为什么|是什么意思|怎么|如何|\b(?:why|what|how)\b)/i;
 
 function parameterValue(block: string, name: string): string | undefined {
   const pattern = new RegExp(
@@ -156,5 +161,24 @@ export class AssistantOutputStreamProjector {
 
 export function isDirectComputerActionUtterance(utterance: string): boolean {
   const normalized = utterance.trim().toLowerCase();
-  return /(?:点一下|点击|点开|点选|按一下|按下|选中|(?:帮我|替我|给我|请|去)点(?:这个|那个)?)|\b(?:click|press|tap)\b/i.test(normalized);
+  if (explanationOrQuestionPattern.test(normalized)) return false;
+
+  const actionTriggerCount = [...normalized.matchAll(directActionTriggerPattern)].length;
+  if (actionTriggerCount !== 1) return false;
+
+  // A single click may be followed by an explanation or other non-action
+  // response. Once the utterance clearly sequences a second computer action,
+  // leave it on the normal multi-step path instead of enabling max-once.
+  const sequenceParts = normalized.split(sequenceConnectorPattern);
+  if (sequenceParts.length > 1) {
+    const firstPart = sequenceParts.at(0) ?? "";
+    const firstPartHasAction = directActionTriggerSearchPattern.test(firstPart)
+      || followUpActionPattern.test(firstPart);
+    const laterPartHasAction = sequenceParts.slice(1).some((part) => (
+      directActionTriggerSearchPattern.test(part) || followUpActionPattern.test(part)
+    ));
+    if (firstPartHasAction && laterPartHasAction) return false;
+  }
+
+  return true;
 }

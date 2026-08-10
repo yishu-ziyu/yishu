@@ -1,0 +1,3004 @@
+//
+//  CompanionManager.swift
+//  leanring-buddy
+//
+//  Central state manager for the companion voice mode. Owns the push-to-talk
+//  pipeline (dictation manager + global shortcut monitor + overlay) and
+//  exposes observable voice state for the panel UI.
+//
+
+import AVFoundation
+import Combine
+import Foundation
+import os.log
+import ScreenCaptureKit
+import SwiftUI
+import YishuContext
+
+enum CompanionVoiceState {
+    case idle
+    case listening
+    case processing
+    case responding
+}
+
+private enum DirectClickFastPathOutcome {
+    case handled(YishuComputerActionResult)
+    case miss(DirectClickFastPathMissReason)
+}
+
+private enum DirectClickFastPathMissReason: String {
+    case intentNotDirect = "intent_not_direct"
+    case cancelled = "cancelled"
+    case screenCaptureFailed = "screen_capture_failed"
+    case ocrNoMatch = "ocr_no_match"
+}
+
+private struct VoiceTurnOrigin {
+    let traceID: String
+    let releaseAt: UInt64?
+}
+
+private struct DirectClickPrewarmCache {
+    let resolutionKey: String
+    let screenCaptures: [CompanionScreenCapture]
+    let match: YishuDirectClickMatch
+    let capturedAtUptimeNanoseconds: UInt64
+    let frontmostProcessIdentifier: pid_t?
+    let displayFingerprint: String
+    let traceID: String
+}
+
+/// Keeps the latency story observable without retaining transcripts, labels,
+/// screenshots, or other private content. The trace origin is created on PTT
+/// press; this timing object is created when final ASR text arrives and starts
+/// at the recorded release timestamp when that origin is valid.
+@MainActor
+private final class VoiceTurnTiming {
+    private let startedAt: UInt64
+    private var previousAt: UInt64
+    private let traceID: String
+    private let hasValidReleaseOrigin: Bool
+
+    init(origin: VoiceTurnOrigin?) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        traceID = origin?.traceID ?? "unknown"
+        if let releaseAt = origin?.releaseAt, releaseAt <= now {
+            startedAt = releaseAt
+            previousAt = releaseAt
+            hasValidReleaseOrigin = true
+        } else {
+            startedAt = now
+            previousAt = now
+            hasValidReleaseOrigin = false
+        }
+    }
+
+    func mark(
+        _ phase: String,
+        reason: String,
+        sourceDimensions: String? = nil,
+        receiptID: String? = nil
+    ) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let deltaMS = Double(now - previousAt) / 1_000_000.0
+        let totalMS = Double(now - startedAt) / 1_000_000.0
+        let loggedReason = phase == "asr_complete" && !hasValidReleaseOrigin
+            ? "unknown_origin"
+            : reason
+        CompanionManager.logVoicePhase(
+            turnID: traceID,
+            phase: phase,
+            deltaMS: deltaMS,
+            totalMS: totalMS,
+            reason: loggedReason,
+            sourceDimensions: sourceDimensions,
+            receiptID: receiptID
+        )
+        previousAt = now
+    }
+}
+
+@MainActor
+final class CompanionManager: ObservableObject {
+    private static let computerActionLogger = Logger(
+        subsystem: "com.yishu.yishu-buddy",
+        category: "computer-action"
+    )
+
+    @Published private(set) var voiceState: CompanionVoiceState = .idle
+    @Published private(set) var lastTranscript: String?
+    @Published private(set) var livePartialTranscript = ""
+    @Published private(set) var currentAudioPowerLevel: CGFloat = 0
+    @Published private(set) var hasAccessibilityPermission = false
+    @Published private(set) var hasScreenRecordingPermission = false
+    @Published private(set) var hasMicrophonePermission = false
+    @Published private(set) var hasScreenContentPermission = false
+    @Published private(set) var sessionScope: YishuSessionScope = .personal
+    @Published var projectScopeDraft = ""
+    @Published private(set) var sessionScopeNotice: String?
+    /// Personal history rows for the "我的" entry (never project/private).
+    @Published private(set) var personalHistoryItems: [YishuHistoryListItem] = []
+    @Published private(set) var personalHistoryLoading = false
+    @Published private(set) var personalHistoryEmpty = false
+    @Published private(set) var historyNotice: String?
+    /// Personal memory rows for the "我的" entry (never project/private).
+    @Published private(set) var personalMemoryItems: [YishuMemoryListItem] = []
+    @Published private(set) var personalMemoryLoading = false
+    @Published private(set) var personalMemoryEmpty = false
+    @Published private(set) var memoryNotice: String?
+    /// Visible source line for the **current** answer only. Must clear on any
+    /// conversation/scope switch, cancel, or failure so a stale line cannot
+    /// imply the new context still used that memory.
+    @Published private(set) var memorySourceNotice: String?
+    /// Pending delete confirmation target (title shown in confirm UI).
+    @Published private(set) var historyDeleteCandidate: YishuHistoryListItem?
+    @Published private(set) var historyDeleteInFlight = false
+    /// Pending forget confirmation for one personal memory row.
+    @Published private(set) var memoryForgetCandidate: YishuMemoryListItem?
+    @Published private(set) var memoryForgetInFlight = false
+    /// Local 8787 voice proxy health. Panel "在线" requires this ready.
+    @Published private(set) var voiceProxyAvailability: YishuVoiceProxyAvailability = .stopped
+
+    /// Screen location (global AppKit coords) of a detected UI element the
+    /// buddy should fly to and point at. Parsed from Claude's response;
+    /// observed by BlueCursorView to trigger the flight animation.
+    @Published var detectedElementScreenLocation: CGPoint?
+    /// The display frame (global AppKit coords) of the screen the detected
+    /// element is on, so BlueCursorView knows which screen overlay should animate.
+    @Published var detectedElementDisplayFrame: CGRect?
+    /// Custom speech bubble text for the pointing animation. When set,
+    /// BlueCursorView uses this instead of a random pointer phrase.
+    @Published var detectedElementBubbleText: String?
+
+    // MARK: - Onboarding Video State (shared across all screen overlays)
+
+    @Published var onboardingVideoPlayer: AVPlayer?
+    @Published var showOnboardingVideo: Bool = false
+    @Published var onboardingVideoOpacity: Double = 0.0
+    private var onboardingVideoEndObserver: NSObjectProtocol?
+    private var onboardingDemoTimeObserver: Any?
+
+    // MARK: - Onboarding Prompt Bubble
+
+    /// Text streamed character-by-character on the cursor after the onboarding video ends.
+    @Published var onboardingPromptText: String = ""
+    @Published var onboardingPromptOpacity: Double = 0.0
+    @Published var showOnboardingPrompt: Bool = false
+
+    // MARK: - Onboarding Music
+
+    private var onboardingMusicPlayer: AVAudioPlayer?
+    private var onboardingMusicFadeTimer: Timer?
+
+    let buddyDictationManager = BuddyDictationManager()
+    let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
+    let overlayWindowManager = OverlayWindowManager()
+    private let responseOverlayManager = CompanionResponseOverlayManager()
+    var responseOverlayViewModel: CompanionResponseOverlayViewModel {
+        responseOverlayManager.viewModel
+    }
+    private let yishuPointerTrailMonitor = YishuPointerTrailMonitor()
+    private lazy var yishuContextFrameCollector = YishuContextFrameCollector(
+        pointerMonitor: yishuPointerTrailMonitor
+    )
+    private let yishuAgentRuntimeClient = YishuAgentRuntimeClient()
+    private let voiceProxySupervisor = YishuVoiceProxySupervisor.shared
+    private var voiceProxyAvailabilityCancellable: AnyCancellable?
+    lazy var providerAccountsViewModel = ProviderAccountsViewModel(
+        runtimeClient: yishuAgentRuntimeClient
+    )
+    /// Background ContextTrail sampling (metadata only, no screenshot bytes).
+    private var trailSampleTask: Task<Void, Never>?
+    private let trailSampleIntervalNanoseconds: UInt64 = 15_000_000_000
+
+    /// Base URL for the local 奕枢 proxy. All voice API requests route through
+    /// this so keys never ship in the app binary. Lifecycle is owned by
+    /// `YishuVoiceProxySupervisor`.
+    private static let workerBaseURL = "http://127.0.0.1:8787"
+
+    private lazy var claudeAPI: ClaudeAPI = {
+        let fallbackModel = selectedModelProvider == YishuConversationModelCatalog.localProvider
+            ? selectedModel
+            : Self.defaultChatModel
+        return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: fallbackModel)
+    }()
+
+    private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
+        return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
+    }()
+
+    /// Conversation history so Claude remembers prior exchanges within a session.
+    /// Each entry is the user's transcript and Claude's response.
+    private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
+
+    /// The currently running AI response task, if any. Cancelled when the user
+    /// speaks again so a new response can begin immediately.
+    private var currentResponseTask: Task<Void, Never>?
+    private var activeVoiceTurnToken: UUID?
+    private var activeRuntimeRequestId: UUID?
+    /// At most one computer action may be consumed for a voice turn. A Pi
+    /// response can still contain a point tag after its action event; that tag
+    /// must not replay the same click in `presentVoiceResponse`.
+    private var activeTurnConsumedComputerAction = false
+    private var activeTurnLastComputerActionResult: YishuComputerActionResult?
+    private var directClickPrewarmTask: Task<Void, Never>?
+    private var directClickPrewarmCache: DirectClickPrewarmCache?
+    private var directClickPrewarmTraceID: String?
+    private var didAttemptDirectClickPrewarm = false
+    private var partialTranscriptCount = 0
+    private var firstPartialTranscriptAt: UInt64?
+    /// Origin for the next keyboard PTT transcript. The trace ID is created
+    /// on press; the monotonic release timestamp is filled on release and the
+    /// origin is consumed exactly once when final ASR text is submitted.
+    private var pendingVoiceTurnOrigin: VoiceTurnOrigin?
+
+    private var shortcutTransitionCancellable: AnyCancellable?
+    private var voiceStateCancellable: AnyCancellable?
+    private var audioPowerCancellable: AnyCancellable?
+    private var accessibilityCheckTimer: Timer?
+    private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
+    /// True while Control+Option (or configured PTT) is physically held.
+    private var isPushToTalkKeyHeld = false
+    /// Scheduled hide for transient cursor mode — cancelled if the user
+    /// speaks again before the delay elapses.
+    private var transientHideTask: Task<Void, Never>?
+
+    /// True when all three required permissions (accessibility, screen recording,
+    /// microphone) are granted. Used by the panel to show a single "all good" state.
+    var allPermissionsGranted: Bool {
+        hasAccessibilityPermission && hasScreenRecordingPermission && hasMicrophonePermission && hasScreenContentPermission
+    }
+
+    var canSwitchSessionScope: Bool {
+        activeRuntimeRequestId == nil && voiceState == .idle && !yishuAgentRuntimeClient.hasActiveTurn
+    }
+
+    var canChangeConversation: Bool {
+        canSwitchSessionScope
+    }
+
+    /// Current durable conversation id owned by the runtime client.
+    var currentConversationId: UUID {
+        yishuAgentRuntimeClient.currentConversationId
+    }
+
+    var sessionScopeLabel: String {
+        switch sessionScope.kind {
+        case .personal:
+            return "我的"
+        case .project:
+            return sessionScope.projectLabel ?? "项目"
+        case .privateSession:
+            return "不保存"
+        }
+    }
+
+    /// A scope change always creates a new conversation and drops Clicky's
+    /// fallback cache, so neither Pi nor the local fallback can retain another
+    /// project's/private session's text.
+    func activateSessionScope(_ kind: YishuSessionScopeKind) {
+        guard canSwitchSessionScope else {
+            sessionScopeNotice = "请等当前回答结束后再切换。"
+            return
+        }
+
+        let nextScope: YishuSessionScope
+        switch kind {
+        case .personal:
+            nextScope = .personal
+        case .privateSession:
+            nextScope = .privateSession
+        case .project:
+            let normalized = projectScopeDraft
+                .split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+            let rememberedProject = yishuAgentRuntimeClient.lastProjectScope
+            let reusableProjectID = sessionScope.kind == .project
+                ? sessionScope.projectId
+                : (rememberedProject?.projectLabel == normalized ? rememberedProject?.projectId : nil)
+            guard let project = YishuSessionScope.project(
+                id: reusableProjectID ?? UUID(),
+                label: normalized
+            ) else {
+                sessionScopeNotice = "先填写项目名称。"
+                return
+            }
+            nextScope = project
+        }
+
+        if nextScope == sessionScope {
+            sessionScopeNotice = nil
+            return
+        }
+        guard yishuAgentRuntimeClient.beginNewConversation(scope: nextScope) else {
+            sessionScopeNotice = "当前会话仍在执行，暂时不能切换。"
+            return
+        }
+        conversationHistory.removeAll(keepingCapacity: false)
+        clearMemorySourceNotice()
+        sessionScope = nextScope
+        projectScopeDraft = nextScope.projectLabel ?? projectScopeDraft
+        sessionScopeNotice = nextScope.kind == .privateSession
+            ? "这次内容不会保存，也不会用于以后的回答。"
+            : "已切换到「\(sessionScopeLabel)」。"
+        historyNotice = nil
+        memoryNotice = nil
+        if nextScope.kind == .personal {
+            refreshPersonalHistory()
+            refreshPersonalMemories()
+        } else {
+            personalHistoryItems = []
+            personalHistoryEmpty = false
+            personalMemoryItems = []
+            personalMemoryEmpty = false
+            memoryForgetCandidate = nil
+        }
+    }
+
+    /// Reload "我的" durable history. No fake rows on empty or failure.
+    /// - Parameter clearNotice: When true (default), drop any prior notice so
+    ///   a manual refresh does not leave stale success text. New-conversation
+    ///   sets its notice first and passes false so "已开始新对话。" stays visible.
+    func refreshPersonalHistory(clearNotice: Bool = true) {
+        guard sessionScope.kind == .personal else {
+            personalHistoryItems = []
+            personalHistoryEmpty = false
+            return
+        }
+        guard yishuAgentRuntimeClient.isRunning else {
+            historyNotice = "运行时尚未就绪，稍后再看历史。"
+            return
+        }
+        personalHistoryLoading = true
+        if clearNotice {
+            historyNotice = nil
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.personalHistoryLoading = false }
+            do {
+                let items = try await self.yishuAgentRuntimeClient.listHistory(
+                    scope: .personal,
+                    limit: 30
+                )
+                self.personalHistoryItems = items
+                self.personalHistoryEmpty = items.isEmpty
+            } catch {
+                self.personalHistoryItems = []
+                self.personalHistoryEmpty = false
+                self.historyNotice = error.localizedDescription
+            }
+        }
+    }
+
+    /// Reload "我的" personal memories. No fake rows on empty or failure.
+    func refreshPersonalMemories(clearNotice: Bool = true) {
+        guard sessionScope.kind == .personal else {
+            personalMemoryItems = []
+            personalMemoryEmpty = false
+            memoryForgetCandidate = nil
+            return
+        }
+        guard yishuAgentRuntimeClient.isRunning else {
+            memoryNotice = "运行时尚未就绪，稍后再看记忆。"
+            return
+        }
+        personalMemoryLoading = true
+        if clearNotice {
+            memoryNotice = nil
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.personalMemoryLoading = false }
+            do {
+                let items = try await self.yishuAgentRuntimeClient.listMemories(
+                    scope: .personal,
+                    limit: 50
+                )
+                self.personalMemoryItems = items
+                self.personalMemoryEmpty = items.isEmpty
+            } catch {
+                self.personalMemoryItems = []
+                self.personalMemoryEmpty = false
+                self.memoryNotice = error.localizedDescription
+            }
+        }
+    }
+
+    /// User actively selected an old personal conversation to continue.
+    func continuePersonalHistory(_ item: YishuHistoryListItem) {
+        guard canChangeConversation else {
+            historyNotice = "请等当前回答结束后再切换对话。"
+            return
+        }
+        guard sessionScope.kind == .personal else {
+            historyNotice = "先切到「我的」再打开个人历史。"
+            return
+        }
+        guard yishuAgentRuntimeClient.isRunning else {
+            historyNotice = "运行时尚未就绪。"
+            return
+        }
+        historyNotice = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let opened = try await self.yishuAgentRuntimeClient.openHistory(
+                    conversationId: item.id,
+                    scope: .personal
+                )
+                guard self.canChangeConversation else {
+                    self.historyNotice = "请等当前回答结束后再切换对话。"
+                    return
+                }
+                guard self.yishuAgentRuntimeClient.selectConversation(
+                    id: opened.conversationId,
+                    scope: .personal
+                ) else {
+                    self.historyNotice = "当前会话仍在执行，暂时不能切换。"
+                    return
+                }
+                // Restore only visible user/assistant pairs — no events/screenshots.
+                self.conversationHistory = opened.turns.compactMap { turn in
+                    let user = turn.userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let assistant = turn.assistantOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !user.isEmpty || !assistant.isEmpty else { return nil }
+                    return (userTranscript: user, assistantResponse: assistant)
+                }
+                if self.conversationHistory.count > 10 {
+                    self.conversationHistory = Array(self.conversationHistory.suffix(10))
+                }
+                // Continuing another conversation must not inherit the prior
+                // turn's memory source line (Codex PROOF-1b residual).
+                self.clearMemorySourceNotice()
+                self.sessionScope = .personal
+                self.historyNotice = "已继续「\(item.title)」。"
+            } catch {
+                self.historyNotice = error.localizedDescription
+            }
+        }
+    }
+
+    /// Create a clean personal conversation with no prior local context.
+    func beginNewPersonalConversation() {
+        guard canChangeConversation else {
+            historyNotice = "请等当前回答结束后再新建对话。"
+            return
+        }
+        guard yishuAgentRuntimeClient.beginNewConversation(scope: .personal) else {
+            historyNotice = "当前会话仍在执行，暂时不能新建。"
+            return
+        }
+        conversationHistory.removeAll(keepingCapacity: false)
+        clearMemorySourceNotice()
+        sessionScope = .personal
+        historyNotice = "已开始新对话。"
+        // Keep the success notice; a plain refresh would wipe it immediately.
+        refreshPersonalHistory(clearNotice: false)
+        refreshPersonalMemories(clearNotice: false)
+    }
+
+    /// Ask the user to confirm soft-delete of one personal history row.
+    func requestDeletePersonalHistory(_ item: YishuHistoryListItem) {
+        guard canChangeConversation else {
+            historyNotice = "请等当前回答结束后再删除对话。"
+            return
+        }
+        guard sessionScope.kind == .personal else {
+            historyNotice = "先切到「我的」再删除个人历史。"
+            return
+        }
+        guard !historyDeleteInFlight else { return }
+        historyDeleteCandidate = item
+        historyNotice = nil
+    }
+
+    /// Cancel pending delete confirmation without touching storage or list.
+    func cancelDeletePersonalHistory() {
+        historyDeleteCandidate = nil
+    }
+
+    /// Confirm soft-delete. Only removes from UI after storage succeeds.
+    /// If the deleted row is the current conversation, rotates to a new clean ID.
+    func confirmDeletePersonalHistory() {
+        guard let item = historyDeleteCandidate else { return }
+        guard canChangeConversation else {
+            historyNotice = "请等当前回答结束后再删除对话。"
+            historyDeleteCandidate = nil
+            return
+        }
+        guard sessionScope.kind == .personal else {
+            historyNotice = "先切到「我的」再删除个人历史。"
+            historyDeleteCandidate = nil
+            return
+        }
+        guard yishuAgentRuntimeClient.isRunning else {
+            historyNotice = "运行时尚未就绪，删除未执行。"
+            historyDeleteCandidate = nil
+            return
+        }
+        guard !historyDeleteInFlight else { return }
+        historyDeleteInFlight = true
+        let deletingCurrent = yishuAgentRuntimeClient.currentConversationId == item.id
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.historyDeleteInFlight = false
+                self.historyDeleteCandidate = nil
+            }
+            do {
+                let deleted = try await self.yishuAgentRuntimeClient.deleteHistory(
+                    conversationId: item.id,
+                    scope: .personal
+                )
+                guard deleted.status == "archived" else {
+                    self.historyNotice = "删除失败，原对话仍保留。"
+                    return
+                }
+                // Only drop the row after store confirmed archive.
+                self.personalHistoryItems.removeAll { $0.id == item.id }
+                self.personalHistoryEmpty = self.personalHistoryItems.isEmpty
+                if deletingCurrent {
+                    guard self.yishuAgentRuntimeClient.beginNewConversation(scope: .personal) else {
+                        self.historyNotice = "已删除，但当前会话仍在执行，稍后请手动新建。"
+                        return
+                    }
+                    self.conversationHistory.removeAll(keepingCapacity: false)
+                    self.clearMemorySourceNotice()
+                    self.sessionScope = .personal
+                    self.historyNotice = "已删除「\(item.title)」，已开始新对话。"
+                } else {
+                    self.historyNotice = "已删除「\(item.title)」。"
+                }
+            } catch {
+                // Keep the original row on any failure.
+                self.historyNotice = error.localizedDescription.isEmpty
+                    ? "删除失败，原对话仍保留。"
+                    : error.localizedDescription
+            }
+        }
+    }
+
+    /// Ask the user to confirm forget of one personal memory row.
+    func requestForgetPersonalMemory(_ item: YishuMemoryListItem) {
+        guard canChangeConversation else {
+            // Policy: busy answer refuses without store writes or list mutation.
+            if !YishuMemoryForgetUIPolicy.shouldMutateStoreWhenBusy {
+                memoryNotice = YishuMemoryForgetUIPolicy.busyRefuseNotice
+            }
+            return
+        }
+        guard sessionScope.kind == .personal else {
+            memoryNotice = "先切到「我的」再管理个人记忆。"
+            return
+        }
+        guard !memoryForgetInFlight else { return }
+        memoryForgetCandidate = item
+        memoryNotice = nil
+    }
+
+    /// Cancel pending forget without touching storage or list.
+    func cancelForgetPersonalMemory() {
+        // Policy: cancel never writes the store or drops list rows.
+        if !YishuMemoryForgetUIPolicy.shouldMutateStoreOnCancel {
+            memoryForgetCandidate = nil
+        }
+    }
+
+    /// Confirm forget. Only removes from UI after storage succeeds.
+    func confirmForgetPersonalMemory() {
+        guard let item = memoryForgetCandidate else { return }
+        guard canChangeConversation else {
+            memoryNotice = YishuMemoryForgetUIPolicy.busyRefuseNotice
+            memoryForgetCandidate = nil
+            return
+        }
+        guard sessionScope.kind == .personal else {
+            memoryNotice = "先切到「我的」再管理个人记忆。"
+            memoryForgetCandidate = nil
+            return
+        }
+        guard yishuAgentRuntimeClient.isRunning else {
+            memoryNotice = "运行时尚未就绪，忘记未执行。"
+            memoryForgetCandidate = nil
+            return
+        }
+        guard !memoryForgetInFlight else { return }
+        memoryForgetInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.memoryForgetInFlight = false
+                self.memoryForgetCandidate = nil
+            }
+            do {
+                let forgotten = try await self.yishuAgentRuntimeClient.forgetMemory(
+                    memoryId: item.id,
+                    scope: .personal
+                )
+                // Policy: only drop the row after store confirmed hard delete.
+                if YishuMemoryForgetUIPolicy.shouldRemoveRowOnlyAfterStoreSuccess {
+                    self.personalMemoryItems.removeAll {
+                        $0.id == forgotten.memoryId || $0.id == item.id
+                    }
+                    self.personalMemoryEmpty = self.personalMemoryItems.isEmpty
+                }
+                self.memoryNotice = forgotten.alreadyGone
+                    ? "这条记忆本来就不在列表里。"
+                    : "已忘记「\(item.summary)」。"
+            } catch {
+                // Keep the original row on any failure (do not remove).
+                self.memoryNotice = error.localizedDescription.isEmpty
+                    ? "忘记失败，原记忆仍保留。"
+                    : error.localizedDescription
+            }
+        }
+    }
+
+    /// Whether the blue cursor overlay is currently visible on screen.
+    /// Used by the panel to show accurate status text ("Active" vs "Ready").
+    @Published private(set) var isOverlayVisible: Bool = false
+
+    private static let defaultChatModel = "grok-4.5"
+    private static let selectedModelDefaultsKey = "selectedClaudeModel"
+    private static let selectedModelProviderDefaultsKey = "selectedModelProvider"
+
+    @Published private(set) var selectedModelProvider: String = {
+        let stored = UserDefaults.standard.string(
+            forKey: CompanionManager.selectedModelProviderDefaultsKey
+        )
+        let supported = Set([
+            YishuConversationModelCatalog.localProvider,
+            YishuAuthProvider.openAICodex.rawValue,
+            YishuAuthProvider.xAI.rawValue,
+        ])
+        return stored.flatMap { supported.contains($0) ? $0 : nil }
+            ?? YishuConversationModelCatalog.localProvider
+    }()
+
+    @Published private(set) var selectedModel: String = {
+        let stored = UserDefaults.standard.string(forKey: CompanionManager.selectedModelDefaultsKey)
+        let candidate = (stored?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+            ?? CompanionManager.defaultChatModel
+        // Migrate hard-locked StepFun default to Grok when user never chose otherwise.
+        if candidate == "step-3.7-flash",
+           UserDefaults.standard.object(forKey: "clicky.chatModel.userPicked.v1") == nil {
+            return CompanionManager.defaultChatModel
+        }
+        return candidate
+    }()
+
+    var availableConversationModels: [YishuConversationModelOption] {
+        let authModels = YishuAuthProvider.allCases.flatMap { provider -> [YishuAuthModel] in
+            let state = providerAccountsViewModel.state(for: provider)
+            return state.isConfigured ? state.models : []
+        }
+        return YishuConversationModelCatalog.available(authModels: authModels)
+    }
+
+    var selectedModelLabel: String {
+        availableConversationModels.first(where: {
+            $0.provider == selectedModelProvider && $0.model == selectedModel
+        })?.label ?? "\(selectedModel) · 需登录"
+    }
+
+    func setSelectedModel(_ option: YishuConversationModelOption) {
+        guard availableConversationModels.contains(option) else { return }
+        selectedModelProvider = option.provider
+        selectedModel = option.model
+        UserDefaults.standard.set(option.provider, forKey: Self.selectedModelProviderDefaultsKey)
+        UserDefaults.standard.set(option.model, forKey: Self.selectedModelDefaultsKey)
+        UserDefaults.standard.set(true, forKey: "clicky.chatModel.userPicked.v1")
+        if option.provider == YishuConversationModelCatalog.localProvider {
+            claudeAPI.model = option.model
+        }
+        print("🧠 奕枢 model → \(option.provider)/\(option.model)")
+    }
+
+    /// User preference for whether the Clicky cursor should be shown.
+    /// When toggled off, the overlay is hidden and push-to-talk is disabled.
+    /// Persisted to UserDefaults so the choice survives app restarts.
+    @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
+
+    /// Spoken reply rate for MiniMax TTS (0.5…2.0). Default 1.0. Not a secret.
+    @Published var speechSpeed: Double = YishuSpeechSpeed.load()
+
+    private var speechSpeedPreviewTask: Task<Void, Never>?
+
+    func setClickyCursorEnabled(_ enabled: Bool) {
+        isClickyCursorEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isClickyCursorEnabled")
+        transientHideTask?.cancel()
+        transientHideTask = nil
+
+        if enabled {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        } else {
+            overlayWindowManager.hideOverlay()
+            isOverlayVisible = false
+        }
+    }
+
+    func setSpeechSpeed(_ raw: Double) {
+        let clamped = YishuSpeechSpeed.clamp(raw)
+        speechSpeed = clamped
+        YishuSpeechSpeed.store(clamped)
+    }
+
+    func resetSpeechSpeedToDefault() {
+        setSpeechSpeed(YishuSpeechSpeed.defaultValue)
+    }
+
+    /// Fixed non-private sample so the user can hear the current rate.
+    func previewSpeechSpeed() {
+        speechSpeedPreviewTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        let speed = speechSpeed
+        speechSpeedPreviewTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.elevenLabsTTSClient.speakText(
+                    YishuSpeechSpeed.previewUtterance,
+                    speed: speed
+                )
+            } catch {
+                print("⚠️ 奕枢 TTS preview failed")
+            }
+        }
+    }
+
+    func stopSpeechPlayback() {
+        speechSpeedPreviewTask?.cancel()
+        speechSpeedPreviewTask = nil
+        elevenLabsTTSClient.stopPlayback()
+    }
+
+    /// Whether the user has completed onboarding at least once. Persisted
+    /// to UserDefaults so the Start button only appears on first launch.
+    var hasCompletedOnboarding: Bool {
+        get { UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") }
+        set { UserDefaults.standard.set(newValue, forKey: "hasCompletedOnboarding") }
+    }
+
+    /// Personal fork: email gate disabled (always treated as submitted).
+    @Published var hasSubmittedEmail: Bool = true
+
+    /// Kept for UI compatibility. No network submit on the personal fork.
+    func submitEmail(_ email: String) {
+        hasSubmittedEmail = true
+        UserDefaults.standard.set(true, forKey: "hasSubmittedEmail")
+        print("📩 奕枢: skip remote email submit")
+    }
+
+    func start() {
+        sessionScope = yishuAgentRuntimeClient.currentSessionScope
+        projectScopeDraft = sessionScope.projectLabel
+            ?? yishuAgentRuntimeClient.lastProjectScope?.projectLabel
+            ?? ""
+        refreshAllPermissions()
+        print("🔑 奕枢 start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
+        startPermissionPolling()
+        bindVoiceStateObservation()
+        bindAudioPowerLevel()
+        bindShortcutTransitions()
+        bindVoiceProxyAvailability()
+        yishuPointerTrailMonitor.start()
+        yishuAgentRuntimeClient.onLifecycleEvent = { [weak self] event in
+            switch event {
+            case let .ready(mode):
+                print("🧠 奕枢 Runtime ready (\(mode))")
+                Task { @MainActor in
+                    if self?.sessionScope.kind == .personal {
+                        self?.refreshPersonalHistory()
+                    }
+                }
+            case let .stopped(exitCode):
+                print("⚠️ 奕枢 Runtime stopped (\(exitCode))")
+            }
+        }
+        // Local voice proxy (8787) must be ready before the panel claims online.
+        Task { @MainActor [weak self] in
+            await self?.voiceProxySupervisor.ensureStarted()
+        }
+        do {
+            try yishuAgentRuntimeClient.start()
+            startContextTrailSampling()
+        } catch {
+            // A voice turn will retry once, then use the credential-isolated
+            // direct Grok fallback so push-to-talk never becomes silent.
+            print("⚠️ 奕枢 Runtime unavailable; voice fallback remains available")
+        }
+        // Eagerly touch the Claude API so its TLS warmup handshake completes
+        // well before the onboarding demo fires at ~40s into the video.
+        _ = claudeAPI
+
+        // If the user already completed onboarding AND all permissions are
+        // still granted, show the cursor overlay immediately. If permissions
+        // were revoked (e.g. signing change), don't show the cursor — the
+        // panel will show the permissions UI instead.
+        if hasCompletedOnboarding && allPermissionsGranted && isClickyCursorEnabled {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+
+        #if DEBUG
+        presentPresenceVisualDemoIfRequested()
+        #endif
+
+    }
+
+    /// Panel retry control when the local voice proxy is down.
+    func retryVoiceProxy() {
+        voiceProxySupervisor.retry()
+    }
+
+    private func bindVoiceProxyAvailability() {
+        voiceProxyAvailability = voiceProxySupervisor.availability
+        voiceProxyAvailabilityCancellable = voiceProxySupervisor.$availability
+            .receive(on: RunLoop.main)
+            .sink { [weak self] availability in
+                self?.voiceProxyAvailability = availability
+            }
+    }
+
+    #if DEBUG
+    /// Deterministic visual state for installed-app screenshot acceptance.
+    /// It is reachable only from a task-specific launch environment variable.
+    private func presentPresenceVisualDemoIfRequested() {
+        guard let requestedDemo = ProcessInfo.processInfo.environment["YISHU_PRESENCE_VISUAL_DEMO"] else {
+            return
+        }
+
+        ensureOverlayVisibleForVoiceFeedback()
+        switch requestedDemo {
+        case "response":
+            voiceState = .responding
+            responseOverlayManager.showOverlayAndBeginStreaming()
+            Task { [weak self] in
+                let demoResponse = Array("你好，我在听。你说。")
+                var accumulatedResponse = ""
+                try? await Task.sleep(nanoseconds: 280_000_000)
+                for character in demoResponse {
+                    accumulatedResponse.append(character)
+                    self?.responseOverlayManager.updateStreamingText(accumulatedResponse)
+                    try? await Task.sleep(nanoseconds: 72_000_000)
+                }
+            }
+        case "listening":
+            responseOverlayManager.hideOverlay()
+            isPushToTalkKeyHeld = true
+            currentAudioPowerLevel = 0.64
+            voiceState = .listening
+        default:
+            break
+        }
+    }
+    #endif
+
+    /// Called by BlueCursorView after the buddy finishes its pointing
+    /// animation and returns to cursor-following mode.
+    /// Triggers the onboarding sequence — dismisses the panel and restarts
+    /// the overlay so the welcome animation and intro video play.
+    func triggerOnboarding() {
+        // Post notification so the panel manager can dismiss the panel
+        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+
+        // Mark onboarding as completed so the Start button won't appear
+        // again on future launches — the cursor will auto-show instead
+        hasCompletedOnboarding = true
+
+        ClickyAnalytics.trackOnboardingStarted()
+
+        // Play Besaid theme at 60% volume, fade out after 1m 30s
+        startOnboardingMusic()
+
+        // Show the overlay for the first time — isFirstAppearance triggers
+        // the welcome animation and onboarding video
+        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+        isOverlayVisible = true
+    }
+
+    /// Replays the onboarding experience from the "Watch Onboarding Again"
+    /// footer link. Same flow as triggerOnboarding but the cursor overlay
+    /// is already visible so we just restart the welcome animation and video.
+    func replayOnboarding() {
+        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+        ClickyAnalytics.trackOnboardingReplayed()
+        startOnboardingMusic()
+        // Tear down any existing overlays and recreate with isFirstAppearance = true
+        overlayWindowManager.hasShownOverlayBefore = false
+        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+        isOverlayVisible = true
+    }
+
+    private func stopOnboardingMusic() {
+        onboardingMusicFadeTimer?.invalidate()
+        onboardingMusicFadeTimer = nil
+        onboardingMusicPlayer?.stop()
+        onboardingMusicPlayer = nil
+    }
+
+    private func startOnboardingMusic() {
+        stopOnboardingMusic()
+        guard let musicURL = Bundle.main.url(forResource: "ff", withExtension: "mp3") else {
+            print("⚠️ Clicky: ff.mp3 not found in bundle")
+            return
+        }
+
+        do {
+            let player = try AVAudioPlayer(contentsOf: musicURL)
+            player.volume = 0.3
+            player.play()
+            self.onboardingMusicPlayer = player
+
+            // After 1m 30s, fade the music out over 3s
+            onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: 90.0, repeats: false) { [weak self] _ in
+                self?.fadeOutOnboardingMusic()
+            }
+        } catch {
+            print("⚠️ Clicky: Failed to play onboarding music: \(error)")
+        }
+    }
+
+    private func fadeOutOnboardingMusic() {
+        guard let player = onboardingMusicPlayer else { return }
+
+        let fadeSteps = 30
+        let fadeDuration: Double = 3.0
+        let stepInterval = fadeDuration / Double(fadeSteps)
+        let volumeDecrement = player.volume / Float(fadeSteps)
+        var stepsRemaining = fadeSteps
+
+        onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: stepInterval, repeats: true) { [weak self] timer in
+            stepsRemaining -= 1
+            player.volume -= volumeDecrement
+
+            if stepsRemaining <= 0 {
+                timer.invalidate()
+                player.stop()
+                self?.onboardingMusicPlayer = nil
+                self?.onboardingMusicFadeTimer = nil
+            }
+        }
+    }
+
+    func clearDetectedElementLocation() {
+        detectedElementScreenLocation = nil
+        detectedElementDisplayFrame = nil
+        detectedElementBubbleText = nil
+    }
+
+    func stop() {
+        globalPushToTalkShortcutMonitor.stop()
+        buddyDictationManager.cancelCurrentDictation()
+        directClickPrewarmTask?.cancel()
+        directClickPrewarmTask = nil
+        directClickPrewarmCache = nil
+        directClickPrewarmTraceID = nil
+        overlayWindowManager.hideOverlay()
+        transientHideTask?.cancel()
+        trailSampleTask?.cancel()
+        trailSampleTask = nil
+
+        pendingVoiceTurnOrigin = nil
+        currentResponseTask?.cancel()
+        currentResponseTask = nil
+        cancelActiveRuntimeTurn(reason: "application-stopping")
+        yishuAgentRuntimeClient.stop()
+        voiceProxySupervisor.stop()
+        voiceProxyAvailabilityCancellable?.cancel()
+        voiceProxyAvailabilityCancellable = nil
+        yishuPointerTrailMonitor.stop()
+        responseOverlayManager.hideOverlay()
+        speechSpeedPreviewTask?.cancel()
+        speechSpeedPreviewTask = nil
+        elevenLabsTTSClient.stopPlayback()
+        shortcutTransitionCancellable?.cancel()
+        voiceStateCancellable?.cancel()
+        audioPowerCancellable?.cancel()
+        accessibilityCheckTimer?.invalidate()
+        accessibilityCheckTimer = nil
+    }
+
+    func refreshAllPermissions() {
+        let previouslyHadAccessibility = hasAccessibilityPermission
+        let previouslyHadScreenRecording = hasScreenRecordingPermission
+        let previouslyHadMicrophone = hasMicrophonePermission
+        let previouslyHadAll = allPermissionsGranted
+
+        let currentlyHasAccessibility = WindowPositionManager.hasAccessibilityPermission()
+        hasAccessibilityPermission = currentlyHasAccessibility
+
+        if currentlyHasAccessibility {
+            globalPushToTalkShortcutMonitor.start()
+        } else {
+            globalPushToTalkShortcutMonitor.stop()
+        }
+
+        hasScreenRecordingPermission = WindowPositionManager.hasScreenRecordingPermission()
+
+        let micAuthStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        hasMicrophonePermission = micAuthStatus == .authorized
+
+        // Debug: log permission state on changes
+        if previouslyHadAccessibility != hasAccessibilityPermission
+            || previouslyHadScreenRecording != hasScreenRecordingPermission
+            || previouslyHadMicrophone != hasMicrophonePermission {
+            print("🔑 Permissions — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission)")
+        }
+
+        // Track individual permission grants as they happen
+        if !previouslyHadAccessibility && hasAccessibilityPermission {
+            ClickyAnalytics.trackPermissionGranted(permission: "accessibility")
+        }
+        if !previouslyHadScreenRecording && hasScreenRecordingPermission {
+            ClickyAnalytics.trackPermissionGranted(permission: "screen_recording")
+        }
+        if !previouslyHadMicrophone && hasMicrophonePermission {
+            ClickyAnalytics.trackPermissionGranted(permission: "microphone")
+        }
+        // Screen content permission is persisted — once the user has approved the
+        // SCShareableContent picker, we don't need to re-check it.
+        if !hasScreenContentPermission {
+            hasScreenContentPermission = UserDefaults.standard.bool(forKey: "hasScreenContentPermission")
+        }
+
+        if !previouslyHadAll && allPermissionsGranted {
+            ClickyAnalytics.trackAllPermissionsGranted()
+        }
+    }
+
+    /// Triggers the macOS screen content picker by performing a dummy
+    /// screenshot capture. Once the user approves, we persist the grant
+    /// so they're never asked again during onboarding.
+    @Published private(set) var isRequestingScreenContent = false
+
+    func requestScreenContentPermission() {
+        guard !isRequestingScreenContent else { return }
+        isRequestingScreenContent = true
+        Task {
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                guard let display = content.displays.first else {
+                    await MainActor.run { isRequestingScreenContent = false }
+                    return
+                }
+                let filter = SCContentFilter(display: display, excludingWindows: [])
+                let config = SCStreamConfiguration()
+                config.width = 320
+                config.height = 240
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                // Verify the capture actually returned real content — a 0x0 or
+                // fully-empty image means the user denied the prompt.
+                let didCapture = image.width > 0 && image.height > 0
+                print("🔑 Screen content capture result — width: \(image.width), height: \(image.height), didCapture: \(didCapture)")
+                await MainActor.run {
+                    isRequestingScreenContent = false
+                    guard didCapture else { return }
+                    hasScreenContentPermission = true
+                    UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
+                    ClickyAnalytics.trackPermissionGranted(permission: "screen_content")
+
+                    // If onboarding was already completed, show the cursor overlay now
+                    if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isClickyCursorEnabled {
+                        overlayWindowManager.hasShownOverlayBefore = true
+                        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+                        isOverlayVisible = true
+                    }
+                }
+            } catch {
+                print("⚠️ Screen content permission request failed: \(error)")
+                await MainActor.run { isRequestingScreenContent = false }
+            }
+        }
+    }
+
+    // MARK: - Private
+
+    /// Triggers the system microphone prompt if the user has never been asked.
+    /// Once granted/denied the status sticks and polling picks it up.
+    private func promptForMicrophoneIfNotDetermined() {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else { return }
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            Task { @MainActor [weak self] in
+                self?.hasMicrophonePermission = granted
+            }
+        }
+    }
+
+    /// Polls all permissions frequently so the UI updates live after the
+    /// user grants them in System Settings. Screen Recording is the exception —
+    /// macOS requires an app restart for that one to take effect.
+    private func startPermissionPolling() {
+        accessibilityCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshAllPermissions()
+            }
+        }
+    }
+
+    private func bindAudioPowerLevel() {
+        audioPowerCancellable = buddyDictationManager.$currentAudioPowerLevel
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] powerLevel in
+                self?.currentAudioPowerLevel = powerLevel
+            }
+    }
+
+    private func bindVoiceStateObservation() {
+        voiceStateCancellable = buddyDictationManager.$isRecordingFromKeyboardShortcut
+            .combineLatest(
+                buddyDictationManager.$isFinalizingTranscript,
+                buddyDictationManager.$isPreparingToRecord
+            )
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isRecording, isFinalizing, isPreparing in
+                guard let self else { return }
+                // Don't override .responding — the AI response pipeline
+                // manages that state directly until streaming finishes.
+                guard self.voiceState != .responding else { return }
+
+                if isFinalizing {
+                    self.voiceState = .processing
+                } else if isRecording {
+                    self.voiceState = .listening
+                } else if isPreparing || self.isPushToTalkKeyHeld {
+                    // Keep waveform from key-down through session start / hold.
+                    self.voiceState = .listening
+                } else {
+                    self.voiceState = .idle
+                    // If the user pressed and released the hotkey without
+                    // saying anything, no response task runs — schedule the
+                    // transient hide here so the overlay doesn't get stuck.
+                    // Only do this when no response is in flight, otherwise
+                    // the brief idle gap between recording and processing
+                    // would prematurely hide the overlay.
+                    if self.currentResponseTask == nil {
+                        self.scheduleTransientHideIfNeeded()
+                    }
+                }
+            }
+    }
+
+    /// Mount (or remount) the cursor overlay so waveform/spinner can show.
+    private func ensureOverlayVisibleForVoiceFeedback() {
+        if isOverlayVisible, overlayWindowManager.isShowingOverlay() {
+            // Already up — still re-order front so it is not buried.
+            overlayWindowManager.orderOverlaysFront()
+            return
+        }
+        overlayWindowManager.hasShownOverlayBefore = true
+        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+        isOverlayVisible = true
+    }
+
+    private func bindShortcutTransitions() {
+        shortcutTransitionCancellable = globalPushToTalkShortcutMonitor
+            .shortcutTransitionPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] transition in
+                self?.handleShortcutTransition(transition)
+            }
+    }
+
+    private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
+        switch transition {
+        case .pressed:
+            guard !buddyDictationManager.isDictationInProgress else { return }
+            // Don't register push-to-talk while the onboarding video is playing
+            guard !showOnboardingVideo else { return }
+
+            // A new press starts a new trace. Any origin left by an interrupted
+            // or silent session must not be attached to this transcript.
+            let voiceTurnTraceID = Self.newVoiceTurnTraceID()
+            pendingVoiceTurnOrigin = VoiceTurnOrigin(
+                traceID: voiceTurnTraceID,
+                releaseAt: nil
+            )
+            directClickPrewarmTask?.cancel()
+            directClickPrewarmTask = nil
+            directClickPrewarmCache = nil
+            directClickPrewarmTraceID = voiceTurnTraceID
+            didAttemptDirectClickPrewarm = false
+            partialTranscriptCount = 0
+            firstPartialTranscriptAt = nil
+            Self.logVoicePhase(
+                turnID: voiceTurnTraceID,
+                phase: "ptt_press",
+                deltaMS: 0,
+                totalMS: 0,
+                reason: "shortcut_pressed"
+            )
+            isPushToTalkKeyHeld = true
+
+            // Cancel any pending transient hide so the overlay stays visible
+            transientHideTask?.cancel()
+            transientHideTask = nil
+
+            // Always surface the buddy for PTT feedback (waveform/spinner).
+            // Previously only restored when cursor preference was OFF — if the
+            // preference was ON but overlay never mounted (permission race,
+            // multi-space, ad-hoc re-sign), hold-to-talk had no UI at all.
+            ensureOverlayVisibleForVoiceFeedback()
+
+            // Immediate state so the waveform appears on key-down, not after
+            // the async permission/session start hop.
+            if voiceState != .responding {
+                voiceState = .listening
+            }
+            livePartialTranscript = ""
+
+            // Dismiss the menu bar panel so it doesn't cover the screen
+            NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+
+            // Cancel any in-progress response and TTS from a previous utterance
+            currentResponseTask?.cancel()
+            currentResponseTask = nil
+            cancelActiveRuntimeTurn(reason: "user-interrupted")
+            responseOverlayManager.hideOverlay()
+            elevenLabsTTSClient.stopPlayback()
+            clearDetectedElementLocation()
+
+            // Dismiss the onboarding prompt if it's showing
+            if showOnboardingPrompt {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    onboardingPromptOpacity = 0.0
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    self.showOnboardingPrompt = false
+                    self.onboardingPromptText = ""
+                }
+            }
+
+
+            ClickyAnalytics.trackPushToTalkStarted()
+
+            pendingKeyboardShortcutStartTask?.cancel()
+            pendingKeyboardShortcutStartTask = Task { [weak self] in
+                await buddyDictationManager.startPushToTalkFromKeyboardShortcut(
+                    currentDraftText: "",
+                    updateDraftText: { [weak self] partialText in
+                        guard let self else { return }
+                        guard self.voiceState == .listening else { return }
+                        // Apple Speech shadow partials are display/prewarm input
+                        // only; they never submit, actuate, or enter Pi/TTS.
+                        self.livePartialTranscript = partialText
+                        self.recordShadowPartial(traceID: voiceTurnTraceID)
+                        self.startDirectClickPrewarmIfEligible(
+                            partialText,
+                            traceID: voiceTurnTraceID
+                        )
+                    },
+                    submitDraftText: { [weak self] finalTranscript in
+                        guard let self else { return }
+                        self.livePartialTranscript = ""
+                        let trimmed = finalTranscript
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty {
+                            // Unclear / blank capture: visible failure only.
+                            // No runtime turn, no store write, no TTS success.
+                            self.presentUnclearHearingFailure(traceID: voiceTurnTraceID)
+                            return
+                        }
+                        self.lastTranscript = trimmed
+                        print("🗣️ 奕枢 received transcript (\(trimmed.count) characters)")
+                        ClickyAnalytics.trackUserMessageSent(transcript: trimmed)
+                        let origin = self.consumeVoiceTurnOrigin(for: voiceTurnTraceID)
+                        self.runVoiceTurnTask(
+                            transcript: trimmed,
+                            origin: origin
+                        )
+                    }
+                )
+            }
+        case .released:
+            // Cancel the pending start task in case the user released the shortcut
+            // before the async startPushToTalk had a chance to begin recording.
+            // Without this, a quick press-and-release drops the release event and
+            // leaves the waveform overlay stuck on screen indefinitely.
+            let releaseAt = DispatchTime.now().uptimeNanoseconds
+            let releasedOrigin = pendingVoiceTurnOrigin
+            if let releasedOrigin {
+                pendingVoiceTurnOrigin = VoiceTurnOrigin(
+                    traceID: releasedOrigin.traceID,
+                    releaseAt: releaseAt
+                )
+            }
+            ClickyAnalytics.trackPushToTalkReleased()
+            isPushToTalkKeyHeld = false
+            pendingKeyboardShortcutStartTask?.cancel()
+            pendingKeyboardShortcutStartTask = nil
+            buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
+            Self.logVoicePhase(
+                turnID: releasedOrigin?.traceID ?? "unknown",
+                phase: "ptt_release",
+                deltaMS: 0,
+                totalMS: 0,
+                reason: releasedOrigin == nil
+                    ? "shortcut_released_unknown_origin"
+                    : "shortcut_released"
+            )
+        case .none:
+            break
+        }
+    }
+
+    // MARK: - Companion Prompt
+
+    private static let companionVoiceResponseSystemPrompt = """
+    你是「奕枢」，住在用户 macOS 菜单栏旁的中文屏幕伙伴。用户用按住说话（Control+Option）跟你交流，你能看到当前屏幕截图。你的回复会用语音读出来，所以要用口语写，不要书面腔。这是一段连续对话，你要记住之前说过的内容。
+
+    规则：
+    - 默认一到两句，直接、信息密度高。用户要求展开、细讲、深入时，再详细说，不限长度。
+    - 使用自然中文口语。不要 emoji，不要 markdown，不要列表和编号。
+    - 为耳朵写：短句，避免难读的缩写和符号。小数可以说成口语。
+    - 问题如果和屏幕有关，点名你看到的具体界面、按钮、文字。
+    - 截图无关时，直接回答问题即可。
+    - 可帮写代码、写作、常识、 brainstorm。不要念完整大段代码，用口语说明改哪里、为什么。
+    - 不要说「简单」「只需要」这类空话。
+    - 少用「要不要我继续讲」这种死胡同是非问。说完如果合适，可以补一句值得继续想的方向；答完也可以直接停。
+    - 多屏时，标注为 primary focus 的是光标所在屏，优先参考，其他屏有关也要提。
+
+    指点元素：
+    你有一个蓝色小三角光标，可以飞到屏幕元素上指给用户看。当用户问怎么操作、找菜单、找按钮、导航界面时，尽量指出具体位置。纯常识问题或与屏幕无关时不要硬指。
+
+    需要指点时，在口播正文之后、回复最末尾追加坐标标签。截图带有像素尺寸，坐标原点是图像左上角，x 向右、y 向下。
+
+    当用户明确要求点击或按下时，坐标标签会被执行层转成真实动作。正文不要说“你自己点”或“我已经点好”，只需给出目标坐标，完成语由执行层根据验证结果生成。
+
+    格式：`[POINT:x,y:标签]`。标签用 1-4 个中文词或英文短词。如果元素在别的屏幕，追加 `:screenN`（N 来自截图标签里的屏幕号）。不需要指点时写 `[POINT:none]`。
+
+    例子：
+    - 用户问 Final Cut 怎么调色：先口语说步骤，再 `[POINT:1100,42:调色检查器]`
+    - 用户问什么是 HTML：口语解释，再 `[POINT:none]`
+    - 元素在第二屏：`[POINT:400,300:终端:screen2]`
+    """
+
+    // MARK: - AI Response Pipeline
+
+    private func consumeVoiceTurnOrigin(for traceID: String) -> VoiceTurnOrigin? {
+        guard let origin = pendingVoiceTurnOrigin,
+              origin.traceID == traceID else {
+            return nil
+        }
+        pendingVoiceTurnOrigin = nil
+        return origin
+    }
+
+    private static func newVoiceTurnTraceID() -> String {
+        let compactUUID = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        return String(compactUUID.prefix(12)).lowercased()
+    }
+
+    /// User held PTT but ASR produced no usable text.
+    /// Show a short failure on the cursor overlay; do not write a completed
+    /// assistant answer, do not start TTS, do not call the runtime.
+    private func presentUnclearHearingFailure(traceID: String) {
+        currentResponseTask?.cancel()
+        currentResponseTask = nil
+        cancelActiveRuntimeTurn(reason: "unclear-hearing")
+        elevenLabsTTSClient.stopPlayback()
+        clearMemorySourceNotice()
+
+        Self.logVoicePhase(
+            turnID: traceID,
+            phase: "asr_complete",
+            deltaMS: 0,
+            totalMS: 0,
+            reason: "empty_transcript"
+        )
+        Self.logVoicePhase(
+            turnID: traceID,
+            phase: "asr_failed",
+            deltaMS: 0,
+            totalMS: 0,
+            reason: "unclear_no_speech"
+        )
+
+        ensureOverlayVisibleForVoiceFeedback()
+        responseOverlayManager.showStaticMessage("没听清，请再说一次。")
+        voiceState = .idle
+        scheduleTransientHideIfNeeded()
+    }
+
+    /// Captures the cursor-grounded ContextFrame, sends it to the Pi runtime,
+    /// streams the reply beside the small cursor presence, and hands the final
+    /// spoken text to the existing MiniMax-backed TTS client.
+    private func runVoiceTurnTask(
+        transcript: String,
+        origin: VoiceTurnOrigin?
+    ) {
+        currentResponseTask?.cancel()
+        cancelActiveRuntimeTurn(reason: "superseded")
+        elevenLabsTTSClient.stopPlayback()
+
+        let turnToken = UUID()
+        activeVoiceTurnToken = turnToken
+        activeTurnConsumedComputerAction = false
+        activeTurnLastComputerActionResult = nil
+        currentResponseTask = Task { [weak self] in
+            guard let self else { return }
+            let timing = VoiceTurnTiming(origin: origin)
+            let partialCount = partialTranscriptCount
+            timing.mark(
+                "asr_complete",
+                reason: "final_transcript_partial_count_\(partialCount)"
+            )
+            let directIntent = YishuDirectClickResolver.isDirectClickIntent(transcript)
+            timing.mark(
+                "intent_classified",
+                reason: directIntent ? "direct_click" : "general_turn"
+            )
+            defer {
+                if directClickPrewarmTraceID == origin?.traceID {
+                    directClickPrewarmTask?.cancel()
+                    directClickPrewarmTask = nil
+                    directClickPrewarmCache = nil
+                    directClickPrewarmTraceID = nil
+                }
+                if activeVoiceTurnToken == turnToken {
+                    activeVoiceTurnToken = nil
+                    currentResponseTask = nil
+                }
+                if !Task.isCancelled && activeVoiceTurnToken == nil {
+                    voiceState = .idle
+                    scheduleTransientHideIfNeeded()
+                }
+            }
+            voiceState = .processing
+            if directIntent {
+                await waitForDirectClickPrewarm()
+            }
+            switch await performDirectClickFastPathIfPossible(
+                transcript: transcript,
+                intentIsDirect: directIntent,
+                timing: timing,
+                traceID: origin?.traceID
+            ) {
+            case .handled:
+                return
+            case let .miss(reason):
+                timing.mark("fastpath_miss", reason: reason.rawValue)
+                guard !Task.isCancelled else {
+                    timing.mark("cancelled", reason: "before_runtime_fallback")
+                    return
+                }
+                timing.mark("runtime_fallback_start", reason: reason.rawValue)
+            }
+            let capturedContext = await yishuContextFrameCollector.capture()
+            timing.mark(
+                "context_capture",
+                reason: "ok",
+                sourceDimensions: Self.telemetryDimensions(for: capturedContext.screenCaptures)
+            )
+            // ContextTrail append happens in Node ProductKernelRuntime on turn.start
+            // (screenshot bytes stripped). Background samples use trail.observe.
+
+            guard !Task.isCancelled else { return }
+            do {
+                let response = try await respondThroughYishuRuntime(
+                    transcript: transcript,
+                    contextFrame: capturedContext.frame,
+                    screenCaptures: capturedContext.screenCaptures,
+                    timing: timing
+                )
+                try Task.checkCancellation()
+                try await presentVoiceResponse(
+                    response,
+                    transcript: transcript,
+                    screenCaptures: capturedContext.screenCaptures,
+                    timing: timing
+                )
+            } catch is CancellationError {
+                clearMemorySourceNotice()
+                responseOverlayManager.hideOverlay()
+            } catch {
+                clearMemorySourceNotice()
+                guard !Task.isCancelled else { return }
+                if activeVoiceTurnToken == turnToken,
+                   let actionResult = activeTurnLastComputerActionResult,
+                   Self.shouldUseDirectActionResultAfterTurnFailure(
+                       transcript: transcript,
+                       actionResult: actionResult
+                   ) {
+                    // A direct action was already consumed. Do not spend a
+                    // second model turn after Pi failed around its result.
+                    activeTurnConsumedComputerAction = true
+                    responseOverlayManager.showOverlayAndBeginStreaming()
+                    do {
+                        try await presentVoiceResponse(
+                            Self.directClickConfirmation(for: actionResult),
+                            transcript: transcript,
+                            screenCaptures: capturedContext.screenCaptures,
+                            timing: timing
+                        )
+                    } catch is CancellationError {
+                        clearMemorySourceNotice()
+                        responseOverlayManager.hideOverlay()
+                    } catch {
+                        clearMemorySourceNotice()
+                        responseOverlayManager.hideOverlay()
+                    }
+                    return
+                }
+                responseOverlayManager.hideOverlay()
+                print("⚠️ Pi Runtime turn failed; using local Grok fallback")
+                do {
+                    try await respondLocally(
+                        transcript: transcript,
+                        screenCaptures: capturedContext.screenCaptures,
+                        timing: timing
+                    )
+                } catch is CancellationError {
+                    responseOverlayManager.hideOverlay()
+                } catch {
+                    ClickyAnalytics.trackResponseError(error: error.localizedDescription)
+                    print("⚠️ 奕枢 voice response failed")
+                    speakCreditsErrorFallback()
+                }
+            }
+
+        }
+    }
+
+    /// Handles an explicit, visually named click without paying the latency of
+    /// a full Pi/vision-model turn. Local Vision OCR resolves the label and the
+    /// existing Accessibility actuator performs and verifies the press.
+    private func recordShadowPartial(traceID: String) {
+        partialTranscriptCount += 1
+        let now = DispatchTime.now().uptimeNanoseconds
+        if firstPartialTranscriptAt == nil {
+            firstPartialTranscriptAt = now
+        }
+        let totalMS = firstPartialTranscriptAt.map {
+            Double(now - $0) / 1_000_000.0
+        } ?? 0
+        Self.logVoicePhase(
+            turnID: traceID,
+            phase: "asr_partial",
+            deltaMS: 0,
+            totalMS: totalMS,
+            reason: "shadow_partial_count_\(partialTranscriptCount)"
+        )
+    }
+
+    private func startDirectClickPrewarmIfEligible(_ partialText: String, traceID: String) {
+        guard !didAttemptDirectClickPrewarm,
+              YishuDirectClickResolver.isDirectClickIntent(partialText),
+              let resolutionKey = YishuDirectClickResolver.resolutionKey(for: partialText) else {
+            return
+        }
+
+        didAttemptDirectClickPrewarm = true
+        directClickPrewarmTraceID = traceID
+        directClickPrewarmTask?.cancel()
+        directClickPrewarmTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                // Sample the basis before capture so an app/display switch
+                // during ScreenCaptureKit work is detected, not hidden by a
+                // post-capture-only snapshot.
+                let capturedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                let frontmostBeforeCapture = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                let displayFingerprintBeforeCapture = Self.currentDisplayFingerprint()
+                guard frontmostBeforeCapture != nil,
+                      !displayFingerprintBeforeCapture.isEmpty else {
+                    return
+                }
+                let captures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                guard !Task.isCancelled else { return }
+                let displayFingerprintFromCaptures = Self.displayFingerprint(for: captures)
+                let frontmostAfterCapture = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                let displayFingerprintAfterCapture = Self.currentDisplayFingerprint()
+                guard Self.isValidDirectClickPrewarmCaptureBasis(
+                    expectedFrontmostProcessIdentifier: frontmostBeforeCapture,
+                    currentFrontmostProcessIdentifier: frontmostAfterCapture,
+                    expectedDisplayFingerprint: displayFingerprintBeforeCapture,
+                    capturedDisplayFingerprint: displayFingerprintFromCaptures,
+                    currentDisplayFingerprint: displayFingerprintAfterCapture
+                ), Self.isValidDirectClickPrewarmBasis(
+                    capturedAtUptimeNanoseconds: capturedAtUptimeNanoseconds,
+                    nowUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                    expectedFrontmostProcessIdentifier: frontmostBeforeCapture,
+                    currentFrontmostProcessIdentifier: frontmostAfterCapture,
+                    expectedDisplayFingerprint: displayFingerprintBeforeCapture,
+                    currentDisplayFingerprint: displayFingerprintAfterCapture
+                ) else {
+                    return
+                }
+
+                let screens = captures.enumerated().map { index, capture in
+                    YishuDirectClickScreen(
+                        imageData: capture.imageData,
+                        screenshotWidthInPixels: capture.screenshotWidthInPixels,
+                        screenshotHeightInPixels: capture.screenshotHeightInPixels,
+                        screenNumber: index + 1
+                    )
+                }
+                guard let match = await YishuDirectClickResolver.resolve(
+                    utterance: partialText,
+                    screens: screens
+                ), !Task.isCancelled else {
+                    return
+                }
+                let nowAfterOCR = DispatchTime.now().uptimeNanoseconds
+                guard Self.isValidDirectClickPrewarmBasis(
+                    capturedAtUptimeNanoseconds: capturedAtUptimeNanoseconds,
+                    nowUptimeNanoseconds: nowAfterOCR,
+                    expectedFrontmostProcessIdentifier: frontmostBeforeCapture,
+                    currentFrontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                    expectedDisplayFingerprint: displayFingerprintBeforeCapture,
+                    currentDisplayFingerprint: Self.currentDisplayFingerprint()
+                ) else {
+                    return
+                }
+
+                let cache = DirectClickPrewarmCache(
+                    resolutionKey: resolutionKey,
+                    screenCaptures: captures,
+                    match: match,
+                    capturedAtUptimeNanoseconds: capturedAtUptimeNanoseconds,
+                    frontmostProcessIdentifier: frontmostBeforeCapture,
+                    displayFingerprint: displayFingerprintBeforeCapture,
+                    traceID: traceID
+                )
+                guard !Task.isCancelled else { return }
+                self.directClickPrewarmCache = cache
+            } catch {
+                // Prewarm is an optional latency optimization. The final
+                // direct-click path performs its normal capture/OCR on miss.
+            }
+        }
+    }
+
+    private func waitForDirectClickPrewarm() async {
+        guard let directClickPrewarmTask else { return }
+        await directClickPrewarmTask.value
+    }
+
+    private func consumeValidDirectClickPrewarm(
+        transcript: String,
+        traceID: String?
+    ) -> DirectClickPrewarmCache? {
+        defer { directClickPrewarmCache = nil }
+        guard let traceID,
+              let cache = directClickPrewarmCache,
+              cache.traceID == traceID,
+              let resolutionKey = YishuDirectClickResolver.resolutionKey(for: transcript),
+              resolutionKey == cache.resolutionKey else {
+            return nil
+        }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard Self.isValidDirectClickPrewarmBasis(
+            capturedAtUptimeNanoseconds: cache.capturedAtUptimeNanoseconds,
+            nowUptimeNanoseconds: now,
+            expectedFrontmostProcessIdentifier: cache.frontmostProcessIdentifier,
+            currentFrontmostProcessIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            expectedDisplayFingerprint: cache.displayFingerprint,
+            currentDisplayFingerprint: Self.currentDisplayFingerprint()
+        ) else {
+            return nil
+        }
+        return cache
+    }
+
+    /// Labels for toolbar/chrome navigation that OCR often cannot see (glyph-only).
+    /// Back (返回) and Up (上一级/上层文件夹) stay separate; never mix them.
+    static func accessibilityChromeNavigationLabels(for utterance: String) -> [String]? {
+        guard let target = YishuDirectClickResolver.targetPhrase(from: utterance) else {
+            return nil
+        }
+        return YishuComputerUseActuator.chromeNavigationLabels(forTargetPhrase: target)
+    }
+
+    /// Pure basis check shared by the post-OCR prewarm guard and cache reuse.
+    /// It intentionally requires a known frontmost owner and computes age from
+    /// the instant the screen capture completed, not from OCR completion.
+    static func isValidDirectClickPrewarmBasis(
+        capturedAtUptimeNanoseconds: UInt64,
+        nowUptimeNanoseconds: UInt64,
+        expectedFrontmostProcessIdentifier: pid_t?,
+        currentFrontmostProcessIdentifier: pid_t?,
+        expectedDisplayFingerprint: String,
+        currentDisplayFingerprint: String
+    ) -> Bool {
+        guard nowUptimeNanoseconds >= capturedAtUptimeNanoseconds,
+              nowUptimeNanoseconds - capturedAtUptimeNanoseconds <= 500_000_000,
+              let expectedFrontmostProcessIdentifier,
+              let currentFrontmostProcessIdentifier,
+              expectedFrontmostProcessIdentifier == currentFrontmostProcessIdentifier,
+              expectedDisplayFingerprint == currentDisplayFingerprint else {
+            return false
+        }
+        return true
+    }
+
+    /// Verifies that the capture itself still represents the pre-capture
+    /// frontmost/display basis. This catches a switch during ScreenCaptureKit
+    /// before OCR is allowed to populate the prewarm cache.
+    static func isValidDirectClickPrewarmCaptureBasis(
+        expectedFrontmostProcessIdentifier: pid_t?,
+        currentFrontmostProcessIdentifier: pid_t?,
+        expectedDisplayFingerprint: String,
+        capturedDisplayFingerprint: String,
+        currentDisplayFingerprint: String
+    ) -> Bool {
+        guard let expectedFrontmostProcessIdentifier,
+              let currentFrontmostProcessIdentifier,
+              expectedFrontmostProcessIdentifier == currentFrontmostProcessIdentifier,
+              !expectedDisplayFingerprint.isEmpty,
+              expectedDisplayFingerprint == capturedDisplayFingerprint,
+              expectedDisplayFingerprint == currentDisplayFingerprint else {
+            return false
+        }
+        return true
+    }
+
+    private static func displayFingerprint(for captures: [CompanionScreenCapture]) -> String {
+        captures
+            .map { capture in
+                let frame = capture.displayFrame
+                return "\(frame.origin.x),\(frame.origin.y),\(frame.width),\(frame.height)"
+            }
+            .sorted()
+            .joined(separator: ";")
+    }
+
+    private static func currentDisplayFingerprint() -> String {
+        NSScreen.screens
+            .map { screen in
+                let frame = screen.frame
+                return "\(frame.origin.x),\(frame.origin.y),\(frame.width),\(frame.height)"
+            }
+            .sorted()
+            .joined(separator: ";")
+    }
+
+    private func performDirectClickFastPathIfPossible(
+        transcript: String,
+        intentIsDirect: Bool,
+        timing: VoiceTurnTiming,
+        traceID: String?
+    ) async -> DirectClickFastPathOutcome {
+        guard intentIsDirect else {
+            return .miss(.intentNotDirect)
+        }
+        guard !Task.isCancelled else {
+            return .miss(.cancelled)
+        }
+
+        let prewarmedCache = consumeValidDirectClickPrewarm(
+            transcript: transcript,
+            traceID: traceID
+        )
+        let screenCaptures: [CompanionScreenCapture]
+        let match: YishuDirectClickMatch
+        if let prewarmedCache {
+            screenCaptures = prewarmedCache.screenCaptures
+            match = prewarmedCache.match
+            timing.mark(
+                "prewarm_reuse",
+                reason: "target_frame_fresh",
+                sourceDimensions: Self.telemetryDimensions(for: screenCaptures)
+            )
+        } else {
+            do {
+                screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+            } catch {
+                let reason: DirectClickFastPathMissReason = Task.isCancelled ? .cancelled : .screenCaptureFailed
+                timing.mark("screen_capture", reason: reason.rawValue)
+                return .miss(reason)
+            }
+            let sourceDimensions = Self.telemetryDimensions(for: screenCaptures)
+            timing.mark("screen_capture", reason: "ok", sourceDimensions: sourceDimensions)
+
+            let screens = screenCaptures.enumerated().map { index, capture in
+                YishuDirectClickScreen(
+                    imageData: capture.imageData,
+                    screenshotWidthInPixels: capture.screenshotWidthInPixels,
+                    screenshotHeightInPixels: capture.screenshotHeightInPixels,
+                    screenNumber: index + 1
+                )
+            }
+            timing.mark("ocr_resolve_start", reason: "started", sourceDimensions: sourceDimensions)
+            if let resolvedMatch = await YishuDirectClickResolver.resolve(
+                utterance: transcript,
+                screens: screens
+            ), !Task.isCancelled {
+                match = resolvedMatch
+                timing.mark("ocr_resolve", reason: "match", sourceDimensions: sourceDimensions)
+            } else if Task.isCancelled {
+                timing.mark("ocr_resolve", reason: DirectClickFastPathMissReason.cancelled.rawValue, sourceDimensions: sourceDimensions)
+                return .miss(.cancelled)
+            } else if let chromeLabels = Self.accessibilityChromeNavigationLabels(for: transcript) {
+                // Finder toolbar "返回" is an AX description on a chevron control;
+                // OCR cannot see the glyphs. Press the live labeled control once.
+                timing.mark("ocr_resolve", reason: "ocr_no_match_chrome_ax", sourceDimensions: sourceDimensions)
+                let sourceDimensions = Self.telemetryDimensions(for: screenCaptures)
+                activeTurnConsumedComputerAction = true
+                timing.mark("action_dispatch", reason: "chrome_ax_label", sourceDimensions: sourceDimensions)
+                let result = await YishuComputerUseActuator.performFrontmostLabeledControl(
+                    matching: chromeLabels,
+                    screenCaptures: screenCaptures
+                )
+                activeTurnLastComputerActionResult = result
+                timing.mark(
+                    "actuator_readback",
+                    reason: result.code.rawValue,
+                    sourceDimensions: sourceDimensions,
+                    receiptID: result.receiptId
+                )
+                Self.logComputerActionTelemetry(
+                    route: "ocr_fast_path_chrome_ax",
+                    request: YishuComputerActionRequest(
+                        requestId: UUID(),
+                        traceId: UUID(),
+                        actionId: UUID(),
+                        action: "left_click",
+                        x: 0,
+                        y: 0,
+                        screen: 1,
+                        label: chromeLabels.joined(separator: "|"),
+                        intentId: UUID().uuidString,
+                        attemptId: result.attemptId,
+                        basisFrameId: UUID().uuidString,
+                        effectClass: "activate"
+                    ),
+                    result: result,
+                    sourceCapture: screenCaptures.first(where: \.isCursorScreen) ?? screenCaptures.first
+                )
+                let confirmation = Self.directClickConfirmation(for: result)
+                print(
+                    "🖱️ 奕枢 direct chrome-ax action handled "
+                        + "status=\(result.status.rawValue) "
+                        + "method=\(result.method.rawValue) "
+                        + "code=\(result.code.rawValue)"
+                )
+                responseOverlayManager.showOverlayAndBeginStreaming()
+                responseOverlayManager.updateStreamingText(confirmation)
+                responseOverlayManager.finishStreaming()
+                voiceState = .responding
+                do {
+                    try await presentVoiceResponse(
+                        confirmation,
+                        transcript: transcript,
+                        screenCaptures: screenCaptures,
+                        timing: timing
+                    )
+                } catch is CancellationError {
+                    responseOverlayManager.hideOverlay()
+                } catch {
+                    // Click already attempted; do not fall through to model replay.
+                }
+                return .handled(result)
+            } else {
+                let reason: DirectClickFastPathMissReason = .ocrNoMatch
+                timing.mark("ocr_resolve", reason: reason.rawValue, sourceDimensions: sourceDimensions)
+                return .miss(reason)
+            }
+        }
+
+        let sourceDimensions = Self.telemetryDimensions(for: screenCaptures)
+
+        let captureFrameID = UUID().uuidString
+        let request = YishuComputerActionRequest(
+            requestId: UUID(),
+            traceId: UUID(),
+            actionId: UUID(),
+            action: "left_click",
+            x: match.x,
+            y: match.y,
+            screen: match.screenNumber,
+            label: match.label,
+            intentId: UUID().uuidString,
+            attemptId: UUID().uuidString,
+            basisFrameId: captureFrameID,
+            effectClass: "activate"
+        )
+        // The OCR target has been consumed once the actuator is invoked. Keep
+        // this state through presentation so a missing POINT tag can never
+        // downgrade a completed fast-path attempt into a model retry/failure.
+        activeTurnConsumedComputerAction = true
+        timing.mark("action_dispatch", reason: "ocr_match", sourceDimensions: sourceDimensions)
+        let result = await YishuComputerUseActuator.perform(
+            request,
+            screenCaptures: screenCaptures
+        )
+        activeTurnLastComputerActionResult = result
+        timing.mark(
+            "actuator_readback",
+            reason: result.code.rawValue,
+            sourceDimensions: sourceDimensions,
+            receiptID: result.receiptId
+        )
+        Self.logComputerActionTelemetry(
+            route: "ocr_fast_path",
+            request: request,
+            result: result,
+            sourceCapture: screenCaptures.indices.contains(match.screenNumber - 1)
+                ? screenCaptures[match.screenNumber - 1]
+                : nil
+        )
+
+        let confirmation = Self.directClickConfirmation(for: result)
+        print(
+            "🖱️ 奕枢 direct action handled "
+                + "status=\(result.status.rawValue) "
+                + "method=\(result.method.rawValue) "
+                + "code=\(result.code.rawValue)"
+        )
+        responseOverlayManager.showOverlayAndBeginStreaming()
+        responseOverlayManager.updateStreamingText(confirmation)
+        responseOverlayManager.finishStreaming()
+        voiceState = .responding
+        do {
+            try await presentVoiceResponse(
+                confirmation,
+                transcript: transcript,
+                screenCaptures: screenCaptures,
+                timing: timing
+            )
+        } catch is CancellationError {
+            responseOverlayManager.hideOverlay()
+        } catch {
+            // The click already happened. A presentation failure must not send
+            // the same action through the slower model path a second time.
+        }
+        return .handled(result)
+    }
+
+    /// Sample app/window/AX into ContextTrail every ~15s without screenshots.
+    private func startContextTrailSampling() {
+        trailSampleTask?.cancel()
+        trailSampleTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.yishuAgentRuntimeClient.isRunning {
+                    let sample = self.yishuContextFrameCollector.captureTrailSample()
+                    do {
+                        try self.yishuAgentRuntimeClient.observeTrail(contextFrame: sample)
+                    } catch {
+                        // Runtime may be restarting; next interval retries.
+                    }
+                }
+                try? await Task.sleep(nanoseconds: self.trailSampleIntervalNanoseconds)
+            }
+        }
+    }
+
+    private func respondThroughYishuRuntime(
+        transcript: String,
+        contextFrame: YishuContextFrame,
+        screenCaptures: [CompanionScreenCapture],
+        timing: VoiceTurnTiming? = nil
+    ) async throws -> String {
+        try contextFrame.validate()
+        if !yishuAgentRuntimeClient.isRunning {
+            try yishuAgentRuntimeClient.start()
+            startContextTrailSampling()
+        }
+
+        let turn = try yishuAgentRuntimeClient.startTurn(
+            utterance: transcript,
+            contextFrame: contextFrame,
+            modelProvider: selectedModelProvider,
+            model: selectedModel
+        )
+        activeRuntimeRequestId = turn.requestId
+        responseOverlayManager.showOverlayAndBeginStreaming()
+
+        defer {
+            if activeRuntimeRequestId == turn.requestId {
+                activeRuntimeRequestId = nil
+            }
+        }
+
+        var accumulatedText = ""
+        var completedText: String?
+        var usedMemories: [YishuMemoryUsedItem] = []
+        let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
+        // Clear prior turn's memory source so unrelated answers cannot inherit it.
+        clearMemorySourceNotice()
+        try await withTaskCancellationHandler {
+            for try await event in turn.events {
+                switch event {
+                case .started, .toolStarted, .toolCompleted:
+                    break
+                case let .memoryUsed(items):
+                    usedMemories = items
+                    applyMemorySourceNotice(Self.formatMemorySourceNotice(items))
+                case let .computerActionRequested(request):
+                    guard activeRuntimeRequestId == turn.requestId,
+                          !Task.isCancelled else {
+                        continue
+                    }
+                    // Consume the runtime action before awaiting the actuator;
+                    // the final model text must not replay it via a POINT tag.
+                    activeTurnConsumedComputerAction = true
+                    timing?.mark(
+                        "pi_action_arrival",
+                        reason: "computer_action",
+                        sourceDimensions: Self.telemetryDimensions(for: screenCaptures)
+                    )
+                    timing?.mark(
+                        "action_dispatch",
+                        reason: "pi_runtime",
+                        sourceDimensions: Self.telemetryDimensions(for: screenCaptures)
+                    )
+                    let result = await YishuComputerUseActuator.perform(
+                        request,
+                        screenCaptures: screenCaptures
+                    )
+                    if activeRuntimeRequestId == turn.requestId {
+                        activeTurnLastComputerActionResult = result
+                    }
+                    timing?.mark(
+                        "actuator_readback",
+                        reason: result.code.rawValue,
+                        sourceDimensions: Self.telemetryDimensions(for: screenCaptures),
+                        receiptID: result.receiptId
+                    )
+                    Self.logComputerActionTelemetry(
+                        route: "pi_runtime",
+                        request: request,
+                        result: result,
+                        sourceCapture: Self.sourceCapture(for: request, in: screenCaptures)
+                    )
+                    try yishuAgentRuntimeClient.completeComputerAction(request, result: result)
+                case let .responseDelta(delta):
+                    accumulatedText += delta
+                    // Direct-click turns stay buffered until the action/result
+                    // decision is known; this prevents model tool markup from
+                    // flashing in the overlay before `presentVoiceResponse`.
+                    if !isDirectClickTurn {
+                        responseOverlayManager.updateStreamingText(
+                            Self.scrubToolMarkup(from: accumulatedText)
+                        )
+                    }
+                case let .completed(text, _):
+                    completedText = text
+                case .cancelled:
+                    throw CancellationError()
+                }
+            }
+        } onCancel: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.activeRuntimeRequestId == turn.requestId else { return }
+                try? self.yishuAgentRuntimeClient.cancelTurn(
+                    requestId: turn.requestId,
+                    reason: "task-cancelled"
+                )
+            }
+        }
+
+        try Task.checkCancellation()
+        let finalText = Self.scrubToolMarkup(
+            from: (completedText ?? accumulatedText)
+        )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !finalText.isEmpty else {
+            clearMemorySourceNotice()
+            throw YishuAgentRuntimeClientError.turnFailed
+        }
+        // Only keep a source line when this turn actually used memory.
+        if usedMemories.isEmpty {
+            clearMemorySourceNotice()
+        } else {
+            applyMemorySourceNotice(Self.formatMemorySourceNotice(usedMemories))
+        }
+        if !isDirectClickTurn {
+            responseOverlayManager.updateStreamingText(finalText)
+        }
+        responseOverlayManager.finishStreaming()
+        return finalText
+    }
+
+    /// Drop panel + bubble source together. Call on every context boundary.
+    func clearMemorySourceNotice() {
+        memorySourceNotice = nil
+        responseOverlayManager.updateMemorySourceText(nil)
+    }
+
+    private func applyMemorySourceNotice(_ notice: String) {
+        let trimmed = notice.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            clearMemorySourceNotice()
+            return
+        }
+        memorySourceNotice = trimmed
+        responseOverlayManager.updateMemorySourceText(trimmed)
+    }
+
+    /// Short user-visible source line: which memory, when saved, and how it was saved.
+    static func formatMemorySourceNotice(_ items: [YishuMemoryUsedItem]) -> String {
+        YishuMemorySourcePolicy.formatNotice(items)
+    }
+
+    /// Credential-isolated continuity path. Pi remains the primary brain; this
+    /// path calls the same 8787 proxy only when the sidecar cannot complete.
+    private func respondLocally(
+        transcript: String,
+        screenCaptures: [CompanionScreenCapture],
+        timing: VoiceTurnTiming? = nil
+    ) async throws {
+        // Build image labels with the actual screenshot pixel dimensions
+        // so the local model's coordinate space matches the image it sees.
+        let labeledImages = screenCaptures.map { capture in
+            let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+            return (data: capture.imageData, label: capture.label + dimensionInfo)
+        }
+
+        let historyForAPI = conversationHistory.map { entry in
+            (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+        }
+
+        responseOverlayManager.showOverlayAndBeginStreaming()
+        let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
+        let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+            images: labeledImages,
+            systemPrompt: Self.companionVoiceResponseSystemPrompt,
+            conversationHistory: historyForAPI,
+            userPrompt: transcript,
+            onTextChunk: { [weak self] accumulatedText in
+                guard let self, !isDirectClickTurn else { return }
+                self.responseOverlayManager.updateStreamingText(
+                    Self.scrubToolMarkup(from: accumulatedText)
+                )
+            }
+        )
+
+        try Task.checkCancellation()
+        let safeResponseText = Self.scrubToolMarkup(from: fullResponseText)
+        if !isDirectClickTurn {
+            responseOverlayManager.updateStreamingText(safeResponseText)
+        }
+        responseOverlayManager.finishStreaming()
+        try await presentVoiceResponse(
+            safeResponseText,
+            transcript: transcript,
+            screenCaptures: screenCaptures,
+            timing: timing
+        )
+    }
+
+    private func presentVoiceResponse(
+        _ fullResponseText: String,
+        transcript: String,
+        screenCaptures: [CompanionScreenCapture],
+        timing: VoiceTurnTiming? = nil
+    ) async throws {
+        try Task.checkCancellation()
+
+        // Every presentation surface consumes the same scrubbed text. This is
+        // intentionally before POINT parsing, history, overlay, and TTS so a
+        // model's XML/tool syntax can never become user-visible speech.
+        let safeResponseText = Self.scrubToolMarkup(from: fullResponseText)
+        let parseResult = Self.parsePointingCoordinates(from: safeResponseText)
+        let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
+        var spokenText = parseResult.spokenText
+
+        if parseResult.coordinate != nil {
+            voiceState = .idle
+        }
+
+        let targetScreenCapture: CompanionScreenCapture? = {
+            if let screenNumber = parseResult.screenNumber {
+                guard let index = Self.selectedScreenIndex(
+                    for: screenNumber,
+                    captureCount: screenCaptures.count
+                ) else {
+                    return nil
+                }
+                return screenCaptures[index]
+            }
+            return screenCaptures.first(where: { $0.isCursorScreen })
+        }()
+
+        if Self.shouldUseDirectClickFailure(
+            transcript: transcript,
+            coordinate: parseResult.coordinate,
+            actionConsumed: activeTurnConsumedComputerAction
+        ) {
+            spokenText = Self.directClickFailureMessage
+            detectedElementScreenLocation = nil
+            detectedElementDisplayFrame = nil
+            voiceState = .responding
+        } else if isDirectClickTurn,
+                  !activeTurnConsumedComputerAction,
+                  let pointCoordinate = parseResult.coordinate {
+            activeTurnConsumedComputerAction = true
+            let request = YishuComputerActionRequest(
+                requestId: UUID(),
+                traceId: UUID(),
+                actionId: UUID(),
+                action: "left_click",
+                x: Double(pointCoordinate.x),
+                y: Double(pointCoordinate.y),
+                screen: parseResult.screenNumber,
+                label: parseResult.elementLabel
+            )
+            timing?.mark(
+                "action_dispatch",
+                reason: "point_tag",
+                sourceDimensions: Self.telemetryDimensions(for: screenCaptures)
+            )
+            let result = await YishuComputerUseActuator.perform(
+                request,
+                screenCaptures: screenCaptures
+            )
+            activeTurnLastComputerActionResult = result
+            timing?.mark(
+                "actuator_readback",
+                reason: result.code.rawValue,
+                sourceDimensions: Self.telemetryDimensions(for: screenCaptures),
+                receiptID: result.receiptId
+            )
+            Self.logComputerActionTelemetry(
+                route: "local_vision",
+                request: request,
+                result: result,
+                sourceCapture: Self.sourceCapture(for: request, in: screenCaptures)
+            )
+            spokenText = Self.directClickConfirmation(for: result)
+            detectedElementScreenLocation = nil
+            detectedElementDisplayFrame = nil
+            voiceState = .responding
+        } else if let pointCoordinate = parseResult.coordinate,
+                  !(isDirectClickTurn && activeTurnConsumedComputerAction),
+                  let targetScreenCapture {
+            detectedElementScreenLocation = Self.globalAppKitPoint(
+                x: Double(pointCoordinate.x),
+                y: Double(pointCoordinate.y),
+                screenCapture: targetScreenCapture
+            )
+            detectedElementDisplayFrame = targetScreenCapture.displayFrame
+            ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
+            print("🎯 奕枢 pointing target resolved")
+        } else {
+            print("🎯 奕枢 response has no pointing target")
+        }
+
+        // Runtime/local streaming may have been buffered for a direct click;
+        // publish only the scrubbed final state before history and speech.
+        responseOverlayManager.updateStreamingText(spokenText)
+        responseOverlayManager.finishStreaming()
+        timing?.mark(
+            "overlay",
+            reason: "updated",
+            sourceDimensions: Self.telemetryDimensions(for: screenCaptures)
+        )
+
+        conversationHistory.append((
+            userTranscript: transcript,
+            assistantResponse: spokenText
+        ))
+        if conversationHistory.count > 10 {
+            conversationHistory.removeFirst(conversationHistory.count - 10)
+        }
+
+        print("🧠 奕枢 conversation: \(conversationHistory.count) exchanges")
+        ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+
+        if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            timing?.mark("tts_start", reason: "speech")
+            do {
+                try await elevenLabsTTSClient.speakText(
+                    spokenText,
+                    speed: speechSpeed
+                )
+                voiceState = .responding
+                timing?.mark("tts_complete", reason: "ok")
+            } catch {
+                timing?.mark("tts_complete", reason: "error")
+                ClickyAnalytics.trackTTSError(error: error.localizedDescription)
+                print("⚠️ MiniMax TTS failed")
+                speakCreditsErrorFallback()
+            }
+        } else {
+            timing?.mark("tts_complete", reason: "skipped_empty")
+        }
+    }
+
+    /// Removes model/tool syntax before any user-facing surface consumes the
+    /// response. Both complete and still-open blocks are handled because local
+    /// Grok and Pi can stream an opening marker before the final chunk arrives.
+    static func scrubToolMarkup(from responseText: String) -> String {
+        var scrubbed = responseText
+
+        // Fenced tool/code blocks are never a presentation format for the
+        // companion. Removing an unclosed fence through end-of-input is
+        // important for streaming chunks that stop inside a block.
+        scrubbed = scrubToolFencedBlocks(in: scrubbed)
+
+        // Some providers serialize a tool call as
+        // `<function=computer_control>...</function>` rather than using an
+        // XML element named `computer_control`.
+        scrubbed = replacingMatches(
+            in: scrubbed,
+            pattern: #"(?is)<\s*function\s*=\s*[\"']?computer[ _-]?control[\"']?[^>]*>.*?(?:</\s*function\s*>|$)"#
+        )
+
+        let toolNames = #"(?:computer[ _-]?control|computer[ _-]?action|tool[ _-]?call|function[ _-]?call|tool)"#
+        // Complete wrapper and self-closing forms.
+        scrubbed = replacingMatches(
+            in: scrubbed,
+            pattern: #"(?is)<\s*\#(toolNames)\b[^>]*?/\s*>"#
+        )
+        scrubbed = replacingMatches(
+            in: scrubbed,
+            pattern: #"(?is)<\s*\#(toolNames)\b[^>]*>.*?</\s*\#(toolNames)\s*>"#
+        )
+
+        // An opening wrapper with no closing tag consumes the rest of the
+        // response. This is the safe branch for a truncated tool call.
+        scrubbed = replacingMatches(
+            in: scrubbed,
+            pattern: #"(?is)<\s*\#(toolNames)\b[^>]*>.*$"#
+        )
+        scrubbed = replacingMatches(
+            in: scrubbed,
+            pattern: #"(?is)<\s*\#(toolNames)\b[^>]*$"#
+        )
+
+        // Only a named `<parameter>` wrapper is tool syntax. Ordinary HTML/XML
+        // such as `<label>表单</label>` or `<x>横坐标</x>` must remain intact.
+        let namedParameter = #"parameter\b(?=[^>]*\bname\s*=)[^>]*"#
+        scrubbed = replacingMatches(
+            in: scrubbed,
+            pattern: #"(?is)<\s*\#(namedParameter)\s*/>"#
+        )
+        scrubbed = replacingMatches(
+            in: scrubbed,
+            pattern: #"(?is)<\s*\#(namedParameter)>.*?(?:</\s*parameter\s*>|$)"#
+        )
+
+        // Strip any orphaned closing/opening tool tags left after a partial
+        // stream. POINT tags are deliberately not part of these expressions.
+        scrubbed = replacingMatches(
+            in: scrubbed,
+            pattern: #"(?is)</?\s*\#(toolNames)\b[^>]*>"#
+        )
+        scrubbed = replacingMatches(
+            in: scrubbed,
+            pattern: #"(?is)\[\s*(?:tool[ _-]?call|computer[ _-]?control|function[ _-]?call)\b[^\]]*\].*?$"#
+        )
+
+        return scrubbed
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func replacingMatches(
+        in text: String,
+        pattern: String
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return text
+        }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: range,
+            withTemplate: ""
+        )
+    }
+
+    private static func scrubToolFencedBlocks(in text: String) -> String {
+        var output = ""
+        var cursor = text.startIndex
+
+        while let opening = text.range(of: "```", range: cursor..<text.endIndex) {
+            output += text[cursor..<opening.lowerBound]
+            guard let closing = text.range(
+                of: "```",
+                range: opening.upperBound..<text.endIndex
+            ) else {
+                let unclosedBlock = String(text[opening.lowerBound...])
+                if isToolFence(unclosedBlock) {
+                    return output
+                }
+                return output + unclosedBlock
+            }
+
+            let block = String(text[opening.lowerBound..<closing.upperBound])
+            if !isToolFence(block) {
+                output += block
+            }
+            cursor = closing.upperBound
+        }
+
+        output += text[cursor...]
+        return output
+    }
+
+    private static func isToolFence(_ block: String) -> Bool {
+        let lowercased = block.lowercased()
+        let firstLine = lowercased.split(whereSeparator: { $0.isNewline }).first.map(String.init) ?? ""
+        if firstLine.contains("```tool")
+            || firstLine.contains("```computer")
+            || firstLine.contains("```function")
+            || firstLine.contains("```parameter") {
+            return true
+        }
+
+        let toolMarkers = [
+            "computer_control",
+            "computer-control",
+            "computer control",
+            "tool_call",
+            "tool-call",
+            "<tool",
+            "<function",
+            "function=computer",
+            "<parameter",
+            "<action>",
+            "<x>",
+            "<y>",
+            "<screen>",
+            "<label>",
+        ]
+        return toolMarkers.contains(where: lowercased.contains)
+    }
+
+    static func selectedScreenIndex(
+        for oneBasedScreenNumber: Int?,
+        captureCount: Int
+    ) -> Int? {
+        guard let oneBasedScreenNumber,
+              oneBasedScreenNumber >= 1,
+              oneBasedScreenNumber <= captureCount else {
+            return nil
+        }
+        return oneBasedScreenNumber - 1
+    }
+
+    private static func sourceCapture(
+        for request: YishuComputerActionRequest,
+        in captures: [CompanionScreenCapture]
+    ) -> CompanionScreenCapture? {
+        if let screenNumber = request.screen {
+            guard let index = selectedScreenIndex(
+                for: screenNumber,
+                captureCount: captures.count
+            ) else {
+                return nil
+            }
+            return captures[index]
+        }
+        return captures.first(where: { $0.isCursorScreen }) ?? captures.first
+    }
+
+    private static func telemetryDimensions(
+        for captures: [CompanionScreenCapture]
+    ) -> String {
+        guard !captures.isEmpty else { return "unavailable" }
+        return captures.map {
+            "\($0.screenshotWidthInPixels)x\($0.screenshotHeightInPixels)"
+        }.joined(separator: ",")
+    }
+
+    /// Voice-route phase diagnostics intentionally contain only fixed phase
+    /// names, durations, screenshot dimensions, and typed receipts. They are
+    /// safe to inspect when a turn feels slow without retaining user speech or
+    /// screen contents in the log stream.
+    fileprivate static func logVoicePhase(
+        turnID: String,
+        phase: String,
+        deltaMS: Double,
+        totalMS: Double,
+        reason: String,
+        sourceDimensions: String? = nil,
+        receiptID: String? = nil
+    ) {
+        let dimensions = sourceDimensions ?? "none"
+        let receipt = receiptID.map(safeTelemetryID) ?? "none"
+        let message =
+            "route=voice "
+                + "turn=\(turnID) "
+                + "phase=\(phase) "
+                + "delta_ms=\(telemetryDuration(deltaMS)) "
+                + "total_ms=\(telemetryDuration(totalMS)) "
+                + "reason=\(reason) "
+                + "source=\(dimensions) "
+                + "receipt=\(receipt)"
+        computerActionLogger.notice("\(message, privacy: .public)")
+    }
+
+    /// Action diagnostics intentionally contain only geometry and typed
+    /// receipts. Never add transcript, target labels, or image data here.
+    private static func logComputerActionTelemetry(
+        route: String,
+        request: YishuComputerActionRequest,
+        result: YishuComputerActionResult,
+        sourceCapture: CompanionScreenCapture?
+    ) {
+        let frameID = safeTelemetryID(request.basisFrameId)
+        let attemptID = safeTelemetryID(result.attemptId)
+        let receiptID = safeTelemetryID(result.receiptId)
+        let source = sourceCapture.map {
+            "\($0.screenshotWidthInPixels)x\($0.screenshotHeightInPixels)"
+        } ?? "unavailable"
+        let globalPoint = sourceCapture.map {
+            YishuComputerUseActuator.globalTopLeftPoint(
+                screenshotX: request.x,
+                screenshotY: request.y,
+                screenCapture: $0
+            )
+        }
+        let global = globalPoint.map {
+            "(\(telemetryCoordinate(Double($0.x))),\(telemetryCoordinate(Double($0.y))))"
+        } ?? "unavailable"
+        let screen = request.screen.map(String.init) ?? "cursor"
+        let message =
+            "route=\(route) "
+                + "frame=\(frameID) "
+                + "source=\(source) "
+                + "screen=\(screen) "
+                + "raw=(\(telemetryCoordinate(request.x)),\(telemetryCoordinate(request.y))) "
+                + "global=\(global) "
+                + "method=\(result.method.rawValue) "
+                + "status=\(result.status.rawValue) "
+                + "code=\(result.code.rawValue) "
+                + "attempt=\(attemptID) "
+                + "receipt=\(receiptID)"
+        Self.computerActionLogger.notice("\(message, privacy: .public)")
+    }
+
+    private static func safeTelemetryID(_ value: String?) -> String {
+        let source = value ?? UUID().uuidString
+        let safeScalars = source.unicodeScalars.filter {
+            CharacterSet.alphanumerics.contains($0)
+        }
+        let truncated = String(safeScalars.prefix(12))
+        return truncated.isEmpty ? "unknown" : truncated
+    }
+
+    private static func telemetryCoordinate(_ value: Double) -> String {
+        guard value.isFinite else { return "invalid" }
+        return String(format: "%.2f", value)
+    }
+
+    private static func telemetryDuration(_ value: Double) -> String {
+        guard value.isFinite else { return "invalid" }
+        return String(format: "%.1f", value)
+    }
+
+    static let directClickFailureMessage = "这次没找到可点击的目标，我没有执行操作。"
+
+    static func shouldUseDirectClickFailure(
+        transcript: String,
+        coordinate: CGPoint?,
+        actionConsumed: Bool
+    ) -> Bool {
+        YishuDirectClickResolver.isDirectClickIntent(transcript)
+            && !actionConsumed
+            && coordinate == nil
+    }
+
+    static func shouldUseDirectActionResultAfterTurnFailure(
+        transcript: String,
+        actionResult: YishuComputerActionResult?
+    ) -> Bool {
+        YishuDirectClickResolver.isDirectClickIntent(transcript)
+            && actionResult != nil
+    }
+
+    private static func directClickConfirmation(for result: YishuComputerActionResult) -> String {
+        switch result.status {
+        case .verified:
+            return "点好了。"
+        case .delivered:
+            return "点击已送达，但界面结果还没确认。"
+        case .unverified:
+            return "点击结果不确定，我没有重复操作。"
+        case .failed:
+            return "这次没点成功，我没有重复操作。"
+        }
+    }
+
+    private func cancelActiveRuntimeTurn(reason: String) {
+        guard let requestId = activeRuntimeRequestId else { return }
+        activeRuntimeRequestId = nil
+        try? yishuAgentRuntimeClient.cancelTurn(requestId: requestId, reason: reason)
+    }
+
+    private static func globalAppKitPoint(
+        x: Double,
+        y: Double,
+        screenCapture: CompanionScreenCapture
+    ) -> CGPoint {
+        let screenshotWidth = CGFloat(screenCapture.screenshotWidthInPixels)
+        let screenshotHeight = CGFloat(screenCapture.screenshotHeightInPixels)
+        let displayWidth = CGFloat(screenCapture.displayWidthInPoints)
+        let displayHeight = CGFloat(screenCapture.displayHeightInPoints)
+        let displayFrame = screenCapture.displayFrame
+
+        let clampedX = max(0, min(CGFloat(x), screenshotWidth))
+        let clampedY = max(0, min(CGFloat(y), screenshotHeight))
+
+        let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+        let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+        let appKitY = displayHeight - displayLocalY
+
+        return CGPoint(
+            x: displayLocalX + displayFrame.origin.x,
+            y: appKitY + displayFrame.origin.y
+        )
+    }
+
+    /// If the cursor is in transient mode (user toggled "Show Clicky" off),
+    /// waits for TTS playback and any pointing animation to finish, then
+    /// fades out the overlay after a 1-second pause. Cancelled automatically
+    /// if the user starts another push-to-talk interaction.
+    private func scheduleTransientHideIfNeeded() {
+        guard !isClickyCursorEnabled && isOverlayVisible else { return }
+
+        transientHideTask?.cancel()
+        transientHideTask = Task {
+            // Wait for TTS audio to finish playing
+            while elevenLabsTTSClient.isPlaying {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard !Task.isCancelled else { return }
+            }
+
+            // Wait for pointing animation to finish (location is cleared
+            // when the buddy flies back to the cursor)
+            while detectedElementScreenLocation != nil {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard !Task.isCancelled else { return }
+            }
+
+            // Pause 1s after everything finishes, then fade out
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            overlayWindowManager.fadeOutAndHideOverlay()
+            isOverlayVisible = false
+        }
+    }
+
+    /// Speaks a hardcoded error message using macOS system TTS when API
+    /// credits run out. Uses NSSpeechSynthesizer so it works even when
+    /// ElevenLabs is down.
+    private func speakCreditsErrorFallback() {
+        let utterance = "我这边暂时说不出来了。请检查本地代理是否在跑，以及阶跃看图、转写和语音的额度。"
+        let synthesizer = NSSpeechSynthesizer()
+        synthesizer.startSpeaking(utterance)
+        voiceState = .responding
+    }
+
+    // MARK: - Point Tag Parsing
+
+    /// Result of parsing a [POINT:...] tag from Claude's response.
+    struct PointingParseResult {
+        /// The response text with the [POINT:...] tag removed — this is what gets spoken.
+        let spokenText: String
+        /// The parsed pixel coordinate, or nil if Claude said "none" or no tag was found.
+        let coordinate: CGPoint?
+        /// Short label describing the element (e.g. "run button"), or "none".
+        let elementLabel: String?
+        /// Which screen the coordinate refers to (1-based), or nil to default to cursor screen.
+        let screenNumber: Int?
+    }
+
+    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
+    /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
+    static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
+        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
+        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
+
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
+              let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
+            // No tag found at all
+            return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
+        }
+
+        // Remove the tag from the spoken text
+        let tagRange = Range(match.range, in: responseText)!
+        let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Check if it's [POINT:none]
+        guard match.numberOfRanges >= 3,
+              let xRange = Range(match.range(at: 1), in: responseText),
+              let yRange = Range(match.range(at: 2), in: responseText),
+              let x = Double(responseText[xRange]),
+              let y = Double(responseText[yRange]) else {
+            return PointingParseResult(spokenText: spokenText, coordinate: nil, elementLabel: "none", screenNumber: nil)
+        }
+
+        var elementLabel: String? = nil
+        if match.numberOfRanges >= 4, let labelRange = Range(match.range(at: 3), in: responseText) {
+            elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+        }
+
+        var screenNumber: Int? = nil
+        if match.numberOfRanges >= 5, let screenRange = Range(match.range(at: 4), in: responseText) {
+            screenNumber = Int(responseText[screenRange])
+        }
+
+        return PointingParseResult(
+            spokenText: spokenText,
+            coordinate: CGPoint(x: x, y: y),
+            elementLabel: elementLabel,
+            screenNumber: screenNumber
+        )
+    }
+
+    // MARK: - Onboarding Video
+
+    /// Sets up the onboarding video player, starts playback, and schedules
+    /// the demo interaction at 40s. Called by BlueCursorView when onboarding starts.
+    func setupOnboardingVideo() {
+        guard let videoURL = URL(string: "https://stream.mux.com/e5jB8UuSrtFABVnTHCR7k3sIsmcUHCyhtLu1tzqLlfs.m3u8") else { return }
+
+        let player = AVPlayer(url: videoURL)
+        player.isMuted = false
+        player.volume = 0.0
+        self.onboardingVideoPlayer = player
+        self.showOnboardingVideo = true
+        self.onboardingVideoOpacity = 0.0
+
+        // Start playback immediately — the video plays while invisible,
+        // then we fade in both the visual and audio over 1s.
+        player.play()
+
+        // Wait for SwiftUI to mount the view, then set opacity to 1.
+        // The .animation modifier on the view handles the actual animation.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            self.onboardingVideoOpacity = 1.0
+            // Fade audio volume from 0 → 1 over 2s to match visual fade
+            self.fadeInVideoAudio(player: player, targetVolume: 1.0, duration: 2.0)
+        }
+
+        // At 40 seconds into the video, trigger the onboarding demo where
+        // Clicky flies to something interesting on screen and comments on it
+        let demoTriggerTime = CMTime(seconds: 40, preferredTimescale: 600)
+        onboardingDemoTimeObserver = player.addBoundaryTimeObserver(
+            forTimes: [NSValue(time: demoTriggerTime)],
+            queue: .main
+        ) { [weak self] in
+            ClickyAnalytics.trackOnboardingDemoTriggered()
+            self?.performOnboardingDemoInteraction()
+        }
+
+        // Fade out and clean up when the video finishes
+        onboardingVideoEndObserver = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.didPlayToEndTimeNotification,
+            object: player.currentItem,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            ClickyAnalytics.trackOnboardingVideoCompleted()
+            self.onboardingVideoOpacity = 0.0
+            // Wait for the 2s fade-out animation to complete before tearing down
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                self.tearDownOnboardingVideo()
+                // After the video disappears, stream in the prompt to try talking
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    self.startOnboardingPromptStream()
+                }
+            }
+        }
+    }
+
+    func tearDownOnboardingVideo() {
+        showOnboardingVideo = false
+        if let timeObserver = onboardingDemoTimeObserver {
+            onboardingVideoPlayer?.removeTimeObserver(timeObserver)
+            onboardingDemoTimeObserver = nil
+        }
+        onboardingVideoPlayer?.pause()
+        onboardingVideoPlayer = nil
+        if let observer = onboardingVideoEndObserver {
+            NotificationCenter.default.removeObserver(observer)
+            onboardingVideoEndObserver = nil
+        }
+    }
+
+    private func startOnboardingPromptStream() {
+        let message = "press control + option and introduce yourself"
+        onboardingPromptText = ""
+        showOnboardingPrompt = true
+        onboardingPromptOpacity = 0.0
+
+        withAnimation(.easeIn(duration: 0.4)) {
+            onboardingPromptOpacity = 1.0
+        }
+
+        var currentIndex = 0
+        Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { timer in
+            guard currentIndex < message.count else {
+                timer.invalidate()
+                // Auto-dismiss after 10 seconds
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
+                    guard self.showOnboardingPrompt else { return }
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        self.onboardingPromptOpacity = 0.0
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        self.showOnboardingPrompt = false
+                        self.onboardingPromptText = ""
+                    }
+                }
+                return
+            }
+            let index = message.index(message.startIndex, offsetBy: currentIndex)
+            self.onboardingPromptText.append(message[index])
+            currentIndex += 1
+        }
+    }
+
+    /// Gradually raises an AVPlayer's volume from its current level to the
+    /// target over the specified duration, creating a smooth audio fade-in.
+    private func fadeInVideoAudio(player: AVPlayer, targetVolume: Float, duration: Double) {
+        let steps = 20
+        let stepInterval = duration / Double(steps)
+        let volumeIncrement = (targetVolume - player.volume) / Float(steps)
+        var stepsRemaining = steps
+
+        Timer.scheduledTimer(withTimeInterval: stepInterval, repeats: true) { timer in
+            stepsRemaining -= 1
+            player.volume += volumeIncrement
+
+            if stepsRemaining <= 0 {
+                timer.invalidate()
+                player.volume = targetVolume
+            }
+        }
+    }
+
+    // MARK: - Onboarding Demo Interaction
+
+    private static let onboardingDemoSystemPrompt = """
+    你是「奕枢」，屏幕上的蓝色小光标伙伴。现在在做首次展示：看用户屏幕，找一个具体、可指认的东西来指。选有明确名字的对象：某个 App 图标、可读的文字、文件名、按钮文案、标签页标题。不要选「某个窗口」「一些文字」这种模糊目标。
+
+    用 3 到 6 个中文词做一句俏皮、好奇的观察，证明你真的看到了那个东西。不要 emoji。不要复读屏幕原文，只做反应。最多 6 个词。
+
+    坐标硬规则：只能选屏幕中心区域。x 在宽度 20% 到 80%，y 在高度 20% 到 80%。不要菜单栏、Dock、侧栏或边缘。
+
+    只输出：短评 + 坐标标签。不要其他内容。
+
+    格式：短评 [POINT:x,y:标签]
+
+    截图带有像素尺寸。原点左上，x 向右，y 向下。
+    """
+
+    /// Captures a screenshot and asks Claude to find something interesting to
+    /// point at, then triggers the buddy's flight animation. Used during
+    /// onboarding to demo the pointing feature while the intro video plays.
+    func performOnboardingDemoInteraction() {
+        // Don't interrupt an active voice response
+        guard voiceState == .idle || voiceState == .responding else { return }
+
+        Task {
+            do {
+                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+
+                // Only send the cursor screen so Claude can't pick something
+                // on a different monitor that we can't point at.
+                guard let cursorScreenCapture = screenCaptures.first(where: { $0.isCursorScreen }) else {
+                    print("🎯 Onboarding demo: no cursor screen found")
+                    return
+                }
+
+                let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
+                let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
+
+                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                    images: labeledImages,
+                    systemPrompt: Self.onboardingDemoSystemPrompt,
+                    userPrompt: "看看我的屏幕，找一个有意思的东西指给我看",
+                    onTextChunk: { _ in }
+                )
+
+                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+
+                guard let pointCoordinate = parseResult.coordinate else {
+                    print("🎯 Onboarding demo: no element to point at")
+                    return
+                }
+
+                let screenshotWidth = CGFloat(cursorScreenCapture.screenshotWidthInPixels)
+                let screenshotHeight = CGFloat(cursorScreenCapture.screenshotHeightInPixels)
+                let displayWidth = CGFloat(cursorScreenCapture.displayWidthInPoints)
+                let displayHeight = CGFloat(cursorScreenCapture.displayHeightInPoints)
+                let displayFrame = cursorScreenCapture.displayFrame
+
+                let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
+                let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
+                let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+                let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+                let appKitY = displayHeight - displayLocalY
+                let globalLocation = CGPoint(
+                    x: displayLocalX + displayFrame.origin.x,
+                    y: appKitY + displayFrame.origin.y
+                )
+
+                // Set custom bubble text so the pointing animation uses Claude's
+                // comment instead of a random phrase
+                detectedElementBubbleText = parseResult.spokenText
+                detectedElementScreenLocation = globalLocation
+                detectedElementDisplayFrame = displayFrame
+                print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
+            } catch {
+                print("⚠️ Onboarding demo error: \(error)")
+            }
+        }
+    }
+}
+
+/// Pure rules for when the memory source line may appear. Kept testable without
+/// spinning up the full CompanionManager graph.
+enum YishuMemorySourcePolicy {
+    /// Panel shows the line in exactly one slot (personal history section).
+    static let panelDisplaySiteCount = 1
+
+    static func noticeAfterConversationOrScopeChange() -> String? { nil }
+
+    static func noticeAfterTurnCancelledOrFailed() -> String? { nil }
+
+    static func noticeAfterSuccessfulTurn(usedMemories: [YishuMemoryUsedItem]) -> String? {
+        let text = formatNotice(usedMemories)
+        return text.isEmpty ? nil : text
+    }
+
+    static func formatNotice(_ items: [YishuMemoryUsedItem]) -> String {
+        guard !items.isEmpty else { return "" }
+        let lines = items.prefix(3).map { item -> String in
+            let sourceLabel = sourceLabel(item.source)
+            let when = savedAtLabel(item.capturedAt)
+            return "用了记忆「\(item.summary)」· \(when) · \(sourceLabel)"
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func sourceLabel(_ source: String) -> String {
+        switch source {
+        case "conversation":
+            return "对话中明确保存"
+        case "user_correction":
+            return "你的纠正"
+        case "observation":
+            return "观察"
+        case "skill_verify":
+            return "技能验证"
+        case "system":
+            return "系统"
+        default:
+            return "明确保存"
+        }
+    }
+
+    static func savedAtLabel(_ iso: String) -> String {
+        guard !iso.isEmpty else { return "保存时间未知" }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = formatter.date(from: iso)
+        if date == nil {
+            formatter.formatOptions = [.withInternetDateTime]
+            date = formatter.date(from: iso)
+        }
+        guard let date else { return "保存于 \(iso)" }
+        let display = DateFormatter()
+        display.locale = Locale(identifier: "zh_CN")
+        display.dateFormat = "M月d日 HH:mm"
+        return "保存于 \(display.string(from: date))"
+    }
+}
+
+/// Documented forget-UI product rules (testable without full manager graph).
+enum YishuMemoryForgetUIPolicy {
+    /// Cancel confirmation must not call forget or mutate the list/store.
+    static let shouldMutateStoreOnCancel = false
+    /// While answering, requestForget refuses without writing.
+    static let shouldMutateStoreWhenBusy = false
+    /// Row drops only after memory.forgotten success.
+    static let shouldRemoveRowOnlyAfterStoreSuccess = true
+    static let busyRefuseNotice = "请等当前回答结束后再忘记记忆。"
+}

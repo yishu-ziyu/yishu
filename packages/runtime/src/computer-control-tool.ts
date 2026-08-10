@@ -21,6 +21,7 @@ export function createComputerControlTool(
       "Press a visible macOS control without moving the user's physical pointer.",
       "Coordinates use the screenshot pixel dimensions from the current Context Frame.",
       "Use only when the user directly asks to click or press a visible target.",
+      "The model may request only a left click; native commands are not accepted.",
     ].join(" "),
     promptSnippet: "Press a visible macOS control through the product-owned accessibility bridge.",
     promptGuidelines: [
@@ -32,7 +33,15 @@ export function createComputerControlTool(
     executionMode: "sequential",
     async execute(_toolCallId, params, signal) {
       const result = await perform(params, signal);
-      if (!result.succeeded) throw new Error(result.message);
+      const status = result.status
+        ?? (result.verified ? "verified" : result.succeeded ? "delivered" : "failed");
+      const terminalFailure = status === "blocked"
+        || status === "stale"
+        || status === "cancelled"
+        || status === "failed";
+      if (!result.succeeded || terminalFailure) {
+        throw new Error(`${result.message}${result.code ? ` (${result.code})` : ""}`);
+      }
 
       const text = result.verified
         ? `Click succeeded and was visibly verified. ${result.evidence ?? result.message}`

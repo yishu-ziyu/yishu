@@ -5,6 +5,8 @@ import {
   buildAgentCoreTask,
   summarizeContextFrame,
 } from "../src/agent-core-runtime.js";
+import { createYishuKernel } from "@yishu/kernel";
+import { ProductKernelRuntime } from "../src/product-kernel-runtime.js";
 import { createAgentRuntime, selectedRuntimeMode } from "../src/runtime-factory.js";
 import { makeTurnStartCommand } from "./fixtures.js";
 
@@ -52,6 +54,11 @@ test("agent-core runtime math turn returns 326-ish response and verified true", 
 
   assert.ok(events.some((e) => e.type === "turn.started"));
   assert.ok(events.some((e) => e.type === "response.delta"));
+  const toolStarted = events.find((e) => e.type === "tool.started");
+  const toolCompleted = events.find((e) => e.type === "tool.completed");
+  assert.equal(toolStarted?.payload.toolName, "code_exec");
+  assert.equal(toolCompleted?.payload.toolName, "code_exec");
+  assert.equal(toolCompleted?.payload.isError, false);
 
   const completed = events.find((e) => e.type === "response.completed");
   assert.ok(completed, "expected response.completed");
@@ -71,6 +78,27 @@ test("agent-core runtime math turn returns 326-ish response and verified true", 
   await runtime.dispose();
 });
 
+test("product wrapper projects agent-core tool execution into TaskTruth", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new AgentCoreRuntime(), kernel);
+  const base = makeTurnStartCommand();
+  const command = {
+    ...base,
+    payload: {
+      ...base.payload,
+      utterance: "计算 17*19+3",
+    },
+  };
+
+  await runtime.startTurn(command, () => undefined);
+
+  const [task] = await kernel.store.listTasks();
+  assert.equal(task?.id, command.requestId);
+  assert.equal(task?.status, "done");
+  assert.ok(task?.evidence.some((entry) => entry.includes("tool.started")));
+  await runtime.dispose();
+});
+
 test("selectedRuntimeMode and createAgentRuntime support agent-core", () => {
   assert.equal(
     selectedRuntimeMode({ YISHU_RUNTIME_MODE: "agent-core" }),
@@ -80,6 +108,9 @@ test("selectedRuntimeMode and createAgentRuntime support agent-core", () => {
     selectedRuntimeMode({ YISHU_RUNTIME_MODE: "mock" }),
     "mock",
   );
-  const runtime = createAgentRuntime("agent-core");
-  assert.ok(runtime instanceof AgentCoreRuntime);
+  const bare = createAgentRuntime("agent-core", { productKernel: false });
+  assert.ok(bare instanceof AgentCoreRuntime);
+
+  const wrapped = createAgentRuntime("agent-core", { productKernel: true });
+  assert.ok(wrapped instanceof ProductKernelRuntime);
 });

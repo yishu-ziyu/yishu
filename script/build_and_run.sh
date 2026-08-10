@@ -67,9 +67,22 @@ case "$MODE" in
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
   --verify|verify)
-    open_app
+    # Verify the development harness without exposing its flower presence or
+    # menu-bar item beside the canonical Clicky product.
+    YISHU_HEADLESS_VERIFY=1 "$APP_BINARY" >/dev/null 2>&1 &
+    VERIFY_PID=$!
+    cleanup_verify() {
+      if kill -0 "$VERIFY_PID" >/dev/null 2>&1; then
+        kill "$VERIFY_PID" >/dev/null 2>&1 || true
+        wait "$VERIFY_PID" 2>/dev/null || true
+      fi
+    }
+    trap cleanup_verify EXIT
     sleep 2
-    pgrep -x "$APP_NAME" >/dev/null
+    kill -0 "$VERIFY_PID"
+    pgrep -P "$VERIFY_PID" -x node >/dev/null
+    cleanup_verify
+    trap - EXIT
     ;;
   *)
     echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2

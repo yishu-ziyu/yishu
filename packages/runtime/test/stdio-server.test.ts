@@ -25,11 +25,12 @@ for (const mode of ["mock", "pi", "agent-core"] as const) {
     const traceId = randomUUID();
 
     await new Promise<void>((resolve, reject) => {
-      // Full suite load + heavier dependency graph can push cold start past 8s.
+      // Full suite load + heavier dependency graph can push cold start past 20s
+      // when node:test launches the mode fixtures together.
       const timeout = setTimeout(() => {
         child.kill("SIGTERM");
         reject(new Error(`${mode} runtime did not answer ping in time`));
-      }, 20_000);
+      }, 60_000);
 
       child.once("exit", (code) => {
         if (!sawReady) {
