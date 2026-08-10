@@ -1,5 +1,9 @@
 # Screenpipe 对 Yishu 的适配判断
 
+Type: research
+Status: historical
+As-of: 2026-08-09
+
 > 核对日期：2026-08-07
 > 上游快照：`screenpipe/screenpipe@9c5181998e1d68fb02f54814933b2297e1135f61`
 

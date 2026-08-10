@@ -1,5 +1,9 @@
 # 自进化 / 自改进 Agent Harness 格局（2025–2026）
 
+Type: research
+Status: historical
+As-of: 2026-08-06
+
 > 调研范围：生产与研究侧的 self-evolving / self-improving agent harness。  
 > 本地对齐：`ai-agent-book` 第 8 章「Agent 的持续进化」。  
 > Yishu 落点：`packages/agent-core`。  

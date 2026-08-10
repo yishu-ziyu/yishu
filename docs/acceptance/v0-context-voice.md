@@ -1,5 +1,9 @@
 # V0 context and voice acceptance
 
+Type: acceptance
+Status: historical
+As-of: 2026-08-09
+
 ## User path
 
 1. Launch the Yishu development harness explicitly when testing that historical

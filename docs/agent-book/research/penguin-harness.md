@@ -1,5 +1,9 @@
 # PenguinHarness 自进化机制研究
 
+Type: research
+Status: historical
+As-of: 2026-08-06
+
 来源：`/tmp/agent-research/penguin-harness`（https://github.com/Prism-Shadow/penguin-harness.git）  
 结论：**自进化 = 可编辑的 Agent 状态文件 + 私有 rubric 的 Benchmark + 严格分数门禁 + 快照回滚**。不改模型权重；评测/优化是普通 Session + 普通文件编辑，由 Skill 编排。
 

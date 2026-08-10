@@ -1,5 +1,10 @@
 # Clicky integration: one Yishu Super App
 
+Type: architecture
+Status: current
+Verified: 21629d6 2026-08-10
+Review: apps/clicky 与 runtime/sidecar 接线变化时
+
 ## Decision
 
 `apps/clicky` is Yishu's only formal Clicky source, installation source, and canonical interaction shell. It owns the interaction details that users can feel: the small cursor companion, menu bar panel, Control+Option push-to-talk, StepFun transcription, model selector, pointing animation, and MiniMax speech output.
