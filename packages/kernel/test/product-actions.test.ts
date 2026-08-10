@@ -342,10 +342,13 @@ describe("product actions via createYishuKernel", () => {
       [
         "finder_history_back",
         "forget",
+        "learn_mind_from_pattern",
         "record_learning",
+        "record_suggestion",
         "remember",
         "remember_how",
         "run_skill",
+        "settle_suggestion",
         "share_context",
       ].sort(),
     );

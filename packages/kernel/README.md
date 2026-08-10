@@ -82,6 +82,9 @@ const kernel = createYishuKernel({ storeDir: "/path/to/yishu-store" });
 | `remember_how` | Extract procedural skill from `ContextTrail` ("记住我刚才是怎么做的") |
 | `share_context` | Build a `ContextCapsule` JSON for handoff |
 | `record_learning` | Record a user correction as `Learning` |
+| `record_suggestion` | Put a product suggestion into durable history |
+| `settle_suggestion` | Record adoption/outcome for a prior suggestion |
+| `learn_mind_from_pattern` | Write repeated outcomes into Yishu Mind (needs 2+) |
 
 Callers: `voice` | `ui` | `initiative` | `mcp` | `cli` | `pi` | `system`.
 
@@ -92,9 +95,11 @@ Authority levels: `automatic` | `reversible` | `standing_mandate` | `explicit_ap
 ```text
 src/
   action/     defineYishuAction, registry, authority, ActionReceipt
-  actions/    remember, forget, remember_how, share_context, record_learning
+  actions/    remember, forget, remember_how, share_context, record_learning,
+              record_suggestion, settle_suggestion, learn_mind_from_pattern
+  mind/       sectioned Yishu Mind document + outcome thresholds
   context/    ContextTrail, ContextCapsule, sanitize
-  store/      YishuStore, MemoryClaim / Skill / Mandate types
+  store/      YishuStore, MemoryClaim / Skill / Mandate / Mind / Suggestion types
   task-truth.ts  execution progress -> durable TaskTruth policy
   kernel.ts   createYishuKernel
 ```

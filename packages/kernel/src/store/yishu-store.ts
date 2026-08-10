@@ -20,14 +20,21 @@ import type {
   MemoryListItem,
   MemoryListOptions,
   MemorySearchOptions,
+  MindLearnFromPatternInput,
+  MindLearnResult,
+  MindSectionWriteInput,
   PromoteSkillOptions,
   SkillCandidate,
   SkillCandidateInput,
   StoreMutationOptions,
+  SuggestionOutcomeInput,
+  SuggestionRecord,
+  SuggestionRecordInput,
   TaskInput,
   TaskSearchOptions,
   TaskTruth,
   VerifiedSkill,
+  YishuMindState,
   YishuStoreSnapshot,
 } from "./types.js"
 import {
@@ -57,6 +64,20 @@ import {
   sameEventPayload,
   SENSITIVE_CONTENT_REJECTED,
 } from "./ledger-safety.js"
+import {
+  applySuggestionOutcome,
+  buildSuggestionRecord,
+  cloneMindState,
+  cloneSuggestion,
+  emptyMindState,
+  learnMindFromPattern,
+  parseMindState,
+  parseSuggestions,
+  readMindState,
+  restoreSeedMindState,
+  writeMindSectionState,
+} from "./mind-store.js"
+
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -193,6 +214,8 @@ function emptySnapshot(): YishuStoreSnapshot {
     conversations: [],
     turns: [],
     events: [],
+    mind: emptyMindState(),
+    suggestions: [],
   }
 }
 
@@ -261,6 +284,8 @@ function cloneSnapshot(data: YishuStoreSnapshot): YishuStoreSnapshot {
       ...event,
       payload: cloneEventPayload(event.payload),
     })),
+    mind: cloneMindState(data.mind ?? emptyMindState()),
+    suggestions: (data.suggestions ?? []).map((s) => cloneSuggestion(s)),
   }
 }
 
@@ -280,6 +305,8 @@ function parseSnapshot(raw: unknown): YishuStoreSnapshot {
     conversations: parseConversations(raw.conversations),
     turns: parseConversationTurns(raw.turns),
     events: parseConversationEvents(raw.events),
+    mind: parseMindState(raw.mind),
+    suggestions: parseSuggestions(raw.suggestions),
   }
 }
 
@@ -708,6 +735,26 @@ export interface YishuStorePort {
     id: string,
     options?: { expectedScope?: SessionScope },
   ): Promise<Conversation | null>
+  getMind(): Promise<YishuMindState>
+  writeMindSection(
+    input: MindSectionWriteInput,
+    options?: StoreMutationOptions,
+  ): Promise<YishuMindState>
+  restoreSeedMind(options?: StoreMutationOptions): Promise<YishuMindState>
+  addSuggestion(
+    input: SuggestionRecordInput,
+    options?: StoreMutationOptions,
+  ): Promise<SuggestionRecord>
+  recordSuggestionOutcome(
+    input: SuggestionOutcomeInput,
+    options?: StoreMutationOptions,
+  ): Promise<SuggestionRecord>
+  listSuggestions(): Promise<SuggestionRecord[]>
+  getSuggestion(id: string): Promise<SuggestionRecord | null>
+  learnMindFromPattern(
+    input: MindLearnFromPatternInput,
+    options?: StoreMutationOptions,
+  ): Promise<MindLearnResult>
   getSnapshot(): YishuStoreSnapshot
 }
 
@@ -1422,6 +1469,92 @@ class YishuStoreCore {
       sessionScope: cloneSessionScope(existing.sessionScope),
     }
   }
+
+  getMindSync(): YishuMindState {
+    this.ensureData()
+    return readMindState(this.data.mind ?? emptyMindState())
+  }
+
+  writeMindSectionSync(
+    input: MindSectionWriteInput,
+    signal?: AbortSignal,
+  ): YishuMindState {
+    assertStoreOperationNotAborted(signal)
+    this.ensureData()
+    const next = writeMindSectionState(this.data.mind ?? emptyMindState(), input)
+    assertStoreOperationNotAborted(signal)
+    this.data.mind = next
+    return cloneMindState(next)
+  }
+
+  restoreSeedMindSync(signal?: AbortSignal): YishuMindState {
+    assertStoreOperationNotAborted(signal)
+    this.ensureData()
+    const next = restoreSeedMindState()
+    assertStoreOperationNotAborted(signal)
+    this.data.mind = next
+    return cloneMindState(next)
+  }
+
+  addSuggestionSync(
+    input: SuggestionRecordInput,
+    signal?: AbortSignal,
+  ): SuggestionRecord {
+    assertStoreOperationNotAborted(signal)
+    this.ensureData()
+    const record = buildSuggestionRecord(input)
+    assertStoreOperationNotAborted(signal)
+    this.data.suggestions.push(record)
+    return cloneSuggestion(record)
+  }
+
+  recordSuggestionOutcomeSync(
+    input: SuggestionOutcomeInput,
+    signal?: AbortSignal,
+  ): SuggestionRecord {
+    assertStoreOperationNotAborted(signal)
+    this.ensureData()
+    const index = this.data.suggestions.findIndex((s) => s.id === input.suggestionId)
+    if (index < 0) {
+      throw new Error("suggestion_not_found")
+    }
+    const next = applySuggestionOutcome(this.data.suggestions[index]!, input)
+    assertStoreOperationNotAborted(signal)
+    this.data.suggestions[index] = next
+    return cloneSuggestion(next)
+  }
+
+  listSuggestionsSync(): SuggestionRecord[] {
+    this.ensureData()
+    return this.data.suggestions.map((s) => cloneSuggestion(s))
+  }
+
+  getSuggestionSync(id: string): SuggestionRecord | null {
+    this.ensureData()
+    const hit = this.data.suggestions.find((s) => s.id === id)
+    return hit ? cloneSuggestion(hit) : null
+  }
+
+  learnMindFromPatternSync(
+    input: MindLearnFromPatternInput,
+    signal?: AbortSignal,
+  ): MindLearnResult {
+    assertStoreOperationNotAborted(signal)
+    this.ensureData()
+    const result = learnMindFromPattern(
+      this.data.mind ?? emptyMindState(),
+      this.data.suggestions,
+      input,
+    )
+    assertStoreOperationNotAborted(signal)
+    if (result.wrote) {
+      this.data.mind = result.mind
+    }
+    return {
+      ...result,
+      mind: cloneMindState(result.mind),
+    }
+  }
 }
 
 function cloneTurn(turn: ConversationTurn): ConversationTurn {
@@ -1834,6 +1967,146 @@ export class YishuStore extends YishuStoreCore implements YishuStorePort {
       return archived
     })
   }
+
+  async getMind(): Promise<YishuMindState> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      return this.getMindSync()
+    })
+  }
+
+  async writeMindSection(
+    input: MindSectionWriteInput,
+    options?: StoreMutationOptions,
+  ): Promise<YishuMindState> {
+    return this.enqueue(async () => {
+      const signal = options?.signal
+      await this.ensureLoadedUnsafe(signal)
+      const before = cloneSnapshot(this.data)
+      try {
+        const mind = this.writeMindSectionSync(input, signal)
+        await this.saveUnsafe(signal)
+        assertStoreOperationNotAborted(signal)
+        return mind
+      } catch (error) {
+        if (signal?.aborted || error instanceof StoreOperationCancelledError) {
+          this.data = before
+          await this.writeSnapshotUnsafe(before).catch(() => undefined)
+          throw new StoreOperationCancelledError()
+        }
+        throw error
+      }
+    })
+  }
+
+  async restoreSeedMind(options?: StoreMutationOptions): Promise<YishuMindState> {
+    return this.enqueue(async () => {
+      const signal = options?.signal
+      await this.ensureLoadedUnsafe(signal)
+      const before = cloneSnapshot(this.data)
+      try {
+        const mind = this.restoreSeedMindSync(signal)
+        await this.saveUnsafe(signal)
+        assertStoreOperationNotAborted(signal)
+        return mind
+      } catch (error) {
+        if (signal?.aborted || error instanceof StoreOperationCancelledError) {
+          this.data = before
+          await this.writeSnapshotUnsafe(before).catch(() => undefined)
+          throw new StoreOperationCancelledError()
+        }
+        throw error
+      }
+    })
+  }
+
+  async addSuggestion(
+    input: SuggestionRecordInput,
+    options?: StoreMutationOptions,
+  ): Promise<SuggestionRecord> {
+    return this.enqueue(async () => {
+      const signal = options?.signal
+      await this.ensureLoadedUnsafe(signal)
+      const before = cloneSnapshot(this.data)
+      try {
+        const record = this.addSuggestionSync(input, signal)
+        await this.saveUnsafe(signal)
+        assertStoreOperationNotAborted(signal)
+        return record
+      } catch (error) {
+        if (signal?.aborted || error instanceof StoreOperationCancelledError) {
+          this.data = before
+          await this.writeSnapshotUnsafe(before).catch(() => undefined)
+          throw new StoreOperationCancelledError()
+        }
+        throw error
+      }
+    })
+  }
+
+  async recordSuggestionOutcome(
+    input: SuggestionOutcomeInput,
+    options?: StoreMutationOptions,
+  ): Promise<SuggestionRecord> {
+    return this.enqueue(async () => {
+      const signal = options?.signal
+      await this.ensureLoadedUnsafe(signal)
+      const before = cloneSnapshot(this.data)
+      try {
+        const record = this.recordSuggestionOutcomeSync(input, signal)
+        await this.saveUnsafe(signal)
+        assertStoreOperationNotAborted(signal)
+        return record
+      } catch (error) {
+        if (signal?.aborted || error instanceof StoreOperationCancelledError) {
+          this.data = before
+          await this.writeSnapshotUnsafe(before).catch(() => undefined)
+          throw new StoreOperationCancelledError()
+        }
+        throw error
+      }
+    })
+  }
+
+  async listSuggestions(): Promise<SuggestionRecord[]> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      return this.listSuggestionsSync()
+    })
+  }
+
+  async getSuggestion(id: string): Promise<SuggestionRecord | null> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      return this.getSuggestionSync(id)
+    })
+  }
+
+  async learnMindFromPattern(
+    input: MindLearnFromPatternInput,
+    options?: StoreMutationOptions,
+  ): Promise<MindLearnResult> {
+    return this.enqueue(async () => {
+      const signal = options?.signal
+      await this.ensureLoadedUnsafe(signal)
+      const before = cloneSnapshot(this.data)
+      try {
+        const result = this.learnMindFromPatternSync(input, signal)
+        if (result.wrote) {
+          await this.saveUnsafe(signal)
+          assertStoreOperationNotAborted(signal)
+        }
+        return result
+      } catch (error) {
+        if (signal?.aborted || error instanceof StoreOperationCancelledError) {
+          this.data = before
+          await this.writeSnapshotUnsafe(before).catch(() => undefined)
+          throw new StoreOperationCancelledError()
+        }
+        throw error
+      }
+    })
+  }
 }
 
 /**
@@ -1998,6 +2271,50 @@ export class InMemoryYishuStore extends YishuStoreCore implements YishuStorePort
     options?: { expectedScope?: SessionScope },
   ): Promise<Conversation | null> {
     return this.archiveConversationSync(id, options)
+  }
+
+  async getMind(): Promise<YishuMindState> {
+    return this.getMindSync()
+  }
+
+  async writeMindSection(
+    input: MindSectionWriteInput,
+    options?: StoreMutationOptions,
+  ): Promise<YishuMindState> {
+    return this.writeMindSectionSync(input, options?.signal)
+  }
+
+  async restoreSeedMind(options?: StoreMutationOptions): Promise<YishuMindState> {
+    return this.restoreSeedMindSync(options?.signal)
+  }
+
+  async addSuggestion(
+    input: SuggestionRecordInput,
+    options?: StoreMutationOptions,
+  ): Promise<SuggestionRecord> {
+    return this.addSuggestionSync(input, options?.signal)
+  }
+
+  async recordSuggestionOutcome(
+    input: SuggestionOutcomeInput,
+    options?: StoreMutationOptions,
+  ): Promise<SuggestionRecord> {
+    return this.recordSuggestionOutcomeSync(input, options?.signal)
+  }
+
+  async listSuggestions(): Promise<SuggestionRecord[]> {
+    return this.listSuggestionsSync()
+  }
+
+  async getSuggestion(id: string): Promise<SuggestionRecord | null> {
+    return this.getSuggestionSync(id)
+  }
+
+  async learnMindFromPattern(
+    input: MindLearnFromPatternInput,
+    options?: StoreMutationOptions,
+  ): Promise<MindLearnResult> {
+    return this.learnMindFromPatternSync(input, options?.signal)
   }
 }
 

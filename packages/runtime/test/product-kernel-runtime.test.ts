@@ -17,6 +17,7 @@ import {
   type TurnSteerCommand,
 } from "../src/protocol.js";
 import type { AgentRuntime, RuntimeEventSink } from "../src/runtime-port.js";
+import { buildGroundedPrompt } from "../src/context-prompt.js";
 import { makeTurnStartCommand } from "./fixtures.js";
 
 function makeCommand(utterance: string, overrides?: Partial<TurnStartCommand["payload"]["contextFrame"]>): TurnStartCommand {
@@ -312,6 +313,7 @@ test("private turns execute live but leave no ledger, task, trail, or memory", a
   assert.deepEqual(kernel.store.getSnapshot().turns, []);
   assert.deepEqual(kernel.store.getSnapshot().events, []);
   assert.deepEqual(await kernel.store.listTasks(), []);
+  assert.deepEqual(await kernel.store.listSuggestions(), []);
   assert.equal(kernel.trail.size(), 0);
 
   const privateRemember = makeCommand("记住：这条私密信息不能留下");
@@ -321,6 +323,46 @@ test("private turns execute live but leave no ledger, task, trail, or memory", a
   await runtime.startTurn(privateRemember, (event) => blocked.push(event));
   assert.equal((await kernel.store.searchMemory("私密信息")).length, 0);
   assert.match(String(blocked.find((event) => event.type === "response.completed")?.payload.text), /私密会话/);
+});
+
+test("executable turns record and settle suggestions for the mind loop", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new ScriptedExecutionRuntime(true), kernel);
+  const first = makeCommand("点一下提交按钮");
+  first.payload.conversationId = randomUUID();
+  await runtime.startTurn(first, () => undefined);
+
+  let suggestions = await kernel.store.listSuggestions();
+  assert.equal(suggestions.length, 1);
+  assert.equal(suggestions[0]?.patternKey, "tool-computer-control");
+  assert.equal(suggestions[0]?.status, "succeeded");
+  assert.equal(suggestions[0]?.taskId, first.requestId);
+
+  // One success is not enough to rewrite mind.
+  assert.equal((await kernel.store.getMind()).markdown.trim(), "");
+
+  const second = makeCommand("再点一次确认");
+  second.payload.conversationId = randomUUID();
+  await runtime.startTurn(second, () => undefined);
+  suggestions = await kernel.store.listSuggestions();
+  assert.equal(suggestions.length, 2);
+  assert.ok(suggestions.every((item) => item.status === "succeeded"));
+
+  const mind = await kernel.store.getMind();
+  assert.match(mind.markdown, /tool-computer-control|What you've learned/);
+  await runtime.dispose();
+});
+
+test("executable turns with explicit negative verification settle suggestions as failed", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new ScriptedExecutionRuntime(false), kernel);
+  const command = makeCommand("点一下不确定的按钮");
+  command.payload.conversationId = randomUUID();
+  await runtime.startTurn(command, () => undefined);
+  const suggestions = await kernel.store.listSuggestions();
+  assert.equal(suggestions.length, 1);
+  assert.equal(suggestions[0]?.status, "failed");
+  await runtime.dispose();
 });
 
 test("one conversation id cannot be replayed under another project scope", async () => {
@@ -1786,4 +1828,105 @@ test("remember speech only after durable verify success", async () => {
   assert.equal(hits.length, 1);
   assert.equal(hits[0]?.source, "conversation");
   assert.equal(hits[0]?.scope, "personal");
+});
+
+type MindAttachedCommand = TurnStartCommand & {
+  payload: { __yishuRecalledMindLessons?: string[] };
+};
+
+/** Seed two succeeded outcomes so the mind learns one lesson for `tool:x`. */
+async function seedLearnedMindLesson(
+  kernel: ReturnType<typeof createYishuKernel>,
+): Promise<string> {
+  const first = await kernel.store.addSuggestion({
+    patternKey: "tool:x",
+    summary: "Use tool x for the weekly report",
+  });
+  await kernel.store.recordSuggestionOutcome({
+    suggestionId: first.id,
+    status: "succeeded",
+  });
+  const second = await kernel.store.addSuggestion({
+    patternKey: "tool:x",
+    summary: "Use tool x for the monthly report",
+  });
+  await kernel.store.recordSuggestionOutcome({
+    suggestionId: second.id,
+    status: "succeeded",
+  });
+  const learned = await kernel.store.learnMindFromPattern({ patternKey: "tool:x" });
+  assert.equal(learned.wrote, true);
+  assert.ok(learned.lesson);
+  return learned.lesson;
+}
+
+test("ordinary turn injects a relevant learned mind lesson into the inner prompt", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const lesson = await seedLearnedMindLesson(kernel);
+
+  const capturing = new CapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  const command = makeCommand("Should I use the tool in this situation?");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "personal" };
+  await runtime.startTurn(command, () => undefined);
+
+  const attached = capturing.lastCommand as MindAttachedCommand;
+  assert.deepEqual(attached.payload.__yishuRecalledMindLessons, [lesson.replace(/^- /, "")]);
+  // User-visible utterance is unchanged (ledger / history must not swallow the mind block).
+  assert.equal(attached.payload.utterance, "Should I use the tool in this situation?");
+
+  const prompt = buildGroundedPrompt(capturing.lastCommand!);
+  assert.match(prompt, /<mind_lessons>/);
+  assert.match(prompt, /tool-x/);
+  assert.match(prompt, /worked 2 times/);
+  assert.ok(prompt.indexOf("<mind_lessons>") < prompt.indexOf("<context_frame>"));
+});
+
+test("unrelated utterance gets no mind block", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  await seedLearnedMindLesson(kernel);
+
+  const capturing = new CapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  const command = makeCommand("今天北京的天气怎么样？");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "personal" };
+  await runtime.startTurn(command, () => undefined);
+
+  const attached = capturing.lastCommand as MindAttachedCommand;
+  assert.equal(attached.payload.__yishuRecalledMindLessons, undefined);
+  assert.doesNotMatch(buildGroundedPrompt(capturing.lastCommand!), /mind_lessons/);
+});
+
+test("private sessions never read learned mind lessons", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  await seedLearnedMindLesson(kernel);
+
+  const capturing = new CapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  const command = makeCommand("Should I use the tool in this situation?");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "private" };
+  await runtime.startTurn(command, () => undefined);
+
+  const attached = capturing.lastCommand as MindAttachedCommand;
+  assert.equal(attached.payload.__yishuRecalledMindLessons, undefined);
+  assert.doesNotMatch(buildGroundedPrompt(capturing.lastCommand!), /mind_lessons/);
+});
+
+test("prompt bytes are identical when no mind lesson is attached", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const capturing = new CapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  const command = makeCommand("Should I use the tool in this situation?");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "personal" };
+  await runtime.startTurn(command, () => undefined);
+
+  // Nothing recalled and nothing learned: the command passes through untouched.
+  assert.equal(capturing.lastCommand, command);
+  const prompt = buildGroundedPrompt(capturing.lastCommand!);
+  assert.equal(prompt, buildGroundedPrompt(command));
+  assert.doesNotMatch(prompt, /mind_lessons/);
 });

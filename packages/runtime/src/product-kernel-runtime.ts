@@ -8,6 +8,7 @@ import {
   routeProductUtterance,
   recallRelevantMemories,
   sanitizeVisibleText,
+  selectRelevantMindLessons,
   type FinderHistoryBackExecutor,
   type ConversationEvent,
   type ConversationTurn,
@@ -35,8 +36,10 @@ import type { AgentRuntime, RuntimeEventSink } from "./runtime-port.js";
 import type { ComputerUsePort } from "./computer-use-port.js";
 import type { YishuAuthService } from "./auth-service.js";
 import { RuntimeTaskProgressTracker } from "./task-progress.js";
+import { RuntimeSuggestionTracker } from "./suggestion-loop.js";
 import {
   attachRecalledMemories,
+  attachRecalledMind,
   type PromptMemorySnippet,
 } from "./context-prompt.js";
 
@@ -83,6 +86,7 @@ interface ReplayRecord {
 export class ProductKernelRuntime implements AgentRuntime {
   readonly kernel: YishuKernel;
   private readonly taskTrackers = new Map<string, RuntimeTaskProgressTracker>();
+  private readonly suggestionTrackers = new Map<string, RuntimeSuggestionTracker>();
   private readonly activeRequestIds = new Set<string>();
   private readonly activeTurns = new Map<string, TurnLedgerState>();
   private readonly activeTurnOperations = new Set<Promise<void>>();
@@ -646,6 +650,12 @@ export class ProductKernelRuntime implements AgentRuntime {
       ? new RuntimeTaskProgressTracker(this.kernel.taskTruth, state.command)
       : undefined;
     if (tracker) this.taskTrackers.set(state.command.requestId, tracker);
+    const suggestionTracker = state.durable
+      ? new RuntimeSuggestionTracker(this.kernel, state.command)
+      : undefined;
+    if (suggestionTracker) {
+      this.suggestionTrackers.set(state.command.requestId, suggestionTracker);
+    }
 
     try {
       // Cancel/dispose may close the gate during prepare or recall.  Never start
@@ -666,9 +676,19 @@ export class ProductKernelRuntime implements AgentRuntime {
       if (recalled.length > 0) {
         this.emitMemoryUsed(state, recalled);
       }
-      const commandForInner = attachRecalledMemories(
-        state.command,
-        recalled.map(toPromptMemorySnippet),
+      // Learned Mind lessons close the loop: bounded, private-safe, and any
+      // retrieval failure degrades to no lessons rather than breaking the turn.
+      const mindLessons = await this.recallMindForOrdinaryTurn(state);
+      if (state.terminalKind) {
+        await this.settleState(state);
+        return;
+      }
+      const commandForInner = attachRecalledMind(
+        attachRecalledMemories(
+          state.command,
+          recalled.map(toPromptMemorySnippet),
+        ),
+        mindLessons,
       );
 
       // Mark started before the last terminal check so a concurrent cancelTurn
@@ -682,6 +702,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       try {
         await this.inner.startTurn(commandForInner, (event) => {
           tracker?.observe(event);
+          suggestionTracker?.observe(event);
           this.acceptRuntimeEvent(state, event);
         });
       } catch {
@@ -710,8 +731,15 @@ export class ProductKernelRuntime implements AgentRuntime {
           this.replacePendingWithFailure(state, "task_truth_unavailable");
         }
       }
+      await suggestionTracker?.flush();
       if (tracker && this.taskTrackers.get(state.command.requestId) === tracker) {
         this.taskTrackers.delete(state.command.requestId);
+      }
+      if (
+        suggestionTracker
+        && this.suggestionTrackers.get(state.command.requestId) === suggestionTracker
+      ) {
+        this.suggestionTrackers.delete(state.command.requestId);
       }
     }
 
@@ -1022,10 +1050,12 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
 
     const tracker = this.taskTrackers.get(command.requestId);
+    const suggestionTracker = this.suggestionTrackers.get(command.requestId);
     try {
       state.innerStarted = true;
       await this.inner.steerTurn(command, (event) => {
         tracker?.observe(event);
+        suggestionTracker?.observe(event);
         this.acceptRuntimeEvent(state, event);
       });
     } catch {
@@ -1047,6 +1077,7 @@ export class ProductKernelRuntime implements AgentRuntime {
           this.replacePendingWithFailure(state, "task_truth_unavailable");
         }
       }
+      await suggestionTracker?.flush();
       await this.settleState(state);
     }
   }
@@ -1081,11 +1112,13 @@ export class ProductKernelRuntime implements AgentRuntime {
         : "product_action_cancelled",
     });
     this.taskTrackers.get(command.requestId)?.observe(cancelledEvent);
+    this.suggestionTrackers.get(command.requestId)?.observe(cancelledEvent);
     this.acceptRuntimeEvent(state, cancelledEvent);
     if (state.innerStarted) {
       try {
         await this.inner.cancelTurn(command, (event) => {
           this.taskTrackers.get(command.requestId)?.observe(event);
+          this.suggestionTrackers.get(command.requestId)?.observe(event);
           this.acceptRuntimeEvent(state, event);
         });
       } catch {
@@ -1099,6 +1132,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       // Preserve an explicit user cancellation even if TaskTruth persistence
       // is unavailable; the ledger turn remains the authoritative outcome.
     }
+    await this.suggestionTrackers.get(command.requestId)?.flush();
     await this.settleState(state);
   }
 
@@ -1124,19 +1158,26 @@ export class ProductKernelRuntime implements AgentRuntime {
     // Wait for every producer before taking the final durable snapshot.
     await Promise.allSettled([...this.activeTurnOperations]);
     await Promise.allSettled([...this.taskTrackers.values()].map((tracker) => tracker.flush()));
+    await Promise.allSettled(
+      [...this.suggestionTrackers.values()].map((tracker) => tracker.flush()),
+    );
     for (const state of this.activeTurns.values()) {
       if (!state.terminalKind) {
-        this.acceptRuntimeEvent(
-          state,
-          runtimeEvent("turn.cancelled", state.command.requestId, state.traceId, {
-            reason: "runtime_disposed",
-          }),
+        const cancelled = runtimeEvent(
+          "turn.cancelled",
+          state.command.requestId,
+          state.traceId,
+          { reason: "runtime_disposed" },
         );
+        this.suggestionTrackers.get(state.command.requestId)?.observe(cancelled);
+        this.acceptRuntimeEvent(state, cancelled);
+        await this.suggestionTrackers.get(state.command.requestId)?.flush();
         await this.settleState(state);
       }
     }
     await this.flushLedger();
     this.taskTrackers.clear();
+    this.suggestionTrackers.clear();
     this.activeRequestIds.clear();
     this.activeTurns.clear();
     if (disposeError !== undefined) throw disposeError;
@@ -1442,6 +1483,26 @@ export class ProductKernelRuntime implements AgentRuntime {
         this.kernel.store,
         state.command.payload.utterance,
         { scope },
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Ordinary turns also recall a few learned Mind lessons, scoped by token
+   * overlap with the utterance. Private ("不保存") sessions never read the
+   * Mind document; retrieval errors degrade to no lessons, never a failure.
+   */
+  private async recallMindForOrdinaryTurn(
+    state: TurnLedgerState,
+  ): Promise<string[]> {
+    if (state.sessionScope.kind === "private") return [];
+    try {
+      const mind = await this.kernel.store.getMind();
+      return selectRelevantMindLessons(
+        mind.markdown,
+        state.command.payload.utterance,
       );
     } catch {
       return [];

@@ -19,6 +19,18 @@ export type TurnStartWithRecalledMemories = TurnStartCommand & {
   };
 };
 
+/** Product-authored mind lesson: one whole learned bullet line. */
+export type PromptMindLesson = string;
+
+/** Product-kernel-only attachment; never accepted from the client wire schema. */
+export const RECALLED_MIND_KEY = "__yishuRecalledMindLessons" as const;
+
+export type TurnStartWithRecalledMind = TurnStartCommand & {
+  payload: TurnStartCommand["payload"] & {
+    [RECALLED_MIND_KEY]?: readonly PromptMindLesson[];
+  };
+};
+
 function contextWithoutImageBytes(contextFrame: ContextFrame): Record<string, unknown> {
   return {
     schemaVersion: contextFrame.schemaVersion,
@@ -63,9 +75,40 @@ function formatMemoryBlock(memories: readonly PromptMemorySnippet[]): string[] {
   return lines;
 }
 
+function mindLessonsFromCommand(
+  command: TurnStartCommand,
+): readonly PromptMindLesson[] {
+  const payload = (command as TurnStartWithRecalledMind).payload;
+  const raw = payload[RECALLED_MIND_KEY];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((lesson): lesson is string => typeof lesson === "string");
+}
+
+/**
+ * Product-authored learned lessons, bounded upstream by selectRelevantMindLessons.
+ * Trusted product data: rendered plain, never wrapped as untrusted context.
+ */
+function formatMindBlock(lessons: readonly PromptMindLesson[]): string[] {
+  if (lessons.length === 0) return [];
+  const lines: string[] = [
+    "You previously learned the following lessons from repeated outcomes.",
+    "Use only the lessons that are clearly relevant to the current question.",
+    "Do not invent extra lessons. Do not mention secret material.",
+    "When a lesson shapes the answer, prefer applying it over generic style.",
+    "",
+    "<mind_lessons>",
+  ];
+  for (const [index, lesson] of lessons.entries()) {
+    lines.push(`${index + 1}. ${lesson}`);
+  }
+  lines.push("</mind_lessons>", "");
+  return lines;
+}
+
 export function buildGroundedPrompt(command: TurnStartCommand): string {
   const groundedContext = contextWithoutImageBytes(command.payload.contextFrame);
   const memories = memoriesFromCommand(command);
+  const mindLessons = mindLessonsFromCommand(command);
   const contextJson = JSON.stringify(groundedContext, null, 2);
   // Screen-derived context is untrusted: scan it, and when risky wrap it as
   // data (never stripped) plus prepend a reminder. Low risk stays byte-identical.
@@ -81,6 +124,7 @@ export function buildGroundedPrompt(command: TurnStartCommand): string {
     "Treat observations as evidence with confidence and timestamps, not as infallible facts.",
     "",
     ...formatMemoryBlock(memories),
+    ...formatMindBlock(mindLessons),
     ...contextLines,
     "",
     "<user_utterance>",
@@ -107,6 +151,22 @@ export function attachRecalledMemories(
         capturedAt: m.capturedAt,
         scope: m.scope,
       })),
+    },
+  };
+}
+
+export function attachRecalledMind(
+  command: TurnStartCommand,
+  lessons: readonly PromptMindLesson[],
+): TurnStartWithRecalledMind {
+  if (lessons.length === 0) {
+    return command as TurnStartWithRecalledMind;
+  }
+  return {
+    ...command,
+    payload: {
+      ...command.payload,
+      [RECALLED_MIND_KEY]: [...lessons],
     },
   };
 }

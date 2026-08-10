@@ -1,4 +1,8 @@
 import type { SessionScope } from "../session-scope.js"
+import type { SuggestionOutcomeStatus } from "../mind/document.js"
+
+export type { SuggestionOutcomeStatus } from "../mind/document.js"
+
 
 /**
  * Evidence-based resource types for Yishu product-owned store.
@@ -172,7 +176,11 @@ export interface YishuStoreSnapshot {
   conversations: Conversation[]
   turns: ConversationTurn[]
   events: ConversationEvent[]
+  /** Empty markdown means still tracking the shipped seed. */
+  mind: YishuMindState
+  suggestions: SuggestionRecord[]
 }
+
 
 export type MemoryInput = Omit<MemoryClaim, "id">
 export type LearningInput = Omit<Learning, "id" | "source"> & {
@@ -314,4 +322,85 @@ export interface PromoteSkillOptions {
   confidence?: number
   verifierNote?: string
   signal?: AbortSignal
+}
+
+/**
+ * Product-owned Yishu Mind document.
+ * Empty markdown tracks the shipped seed until the first write forks it.
+ */
+export interface YishuMindState {
+  markdown: string
+  updatedAt: string | null
+  /** ISO time of the last automatic learned-section write, if any. */
+  lastLearnedAt?: string
+}
+
+export type SuggestionRecordStatus = SuggestionOutcomeStatus
+
+/**
+ * A product suggestion that enters durable history so later outcomes can
+ * judge whether the advice worked.
+ */
+export interface SuggestionRecord {
+  id: string
+  createdAt: string
+  updatedAt: string
+  /** Short stable key used to count repeated outcomes. */
+  patternKey: string
+  /** One-line summary shown in history and learning evidence. */
+  summary: string
+  status: SuggestionRecordStatus
+  conversationId?: string
+  turnId?: string
+  taskId?: string
+  /** Optional free note about adoption or outcome. */
+  note?: string
+  /** When an outcome status was recorded. */
+  outcomeAt?: string
+}
+
+export type SuggestionRecordInput = {
+  id?: string
+  createdAt?: string
+  updatedAt?: string
+  patternKey: string
+  summary: string
+  status?: SuggestionRecordStatus
+  conversationId?: string
+  turnId?: string
+  taskId?: string
+  note?: string
+  outcomeAt?: string
+}
+
+export type SuggestionOutcomeInput = {
+  suggestionId: string
+  status: Exclude<SuggestionRecordStatus, "proposed">
+  note?: string
+  outcomeAt?: string
+  taskId?: string
+}
+
+export type MindSectionWriteInput = {
+  heading: string
+  body: string
+}
+
+export type MindLearnFromPatternInput = {
+  patternKey: string
+  /** Optional lesson body; store synthesizes a default when omitted. */
+  lesson?: string
+  /** Override the repeated-outcome bar (tests). Default 2. */
+  minEvidence?: number
+  /** Force write even below the bar; requires explicit approval path. */
+  force?: boolean
+}
+
+export interface MindLearnResult {
+  wrote: boolean
+  reason: string
+  patternKey: string
+  evidenceCount: number
+  mind: YishuMindState
+  lesson?: string
 }

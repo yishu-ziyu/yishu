@@ -21,14 +21,21 @@ import type {
   MemoryListItem,
   MemoryListOptions,
   MemorySearchOptions,
+  MindLearnFromPatternInput,
+  MindLearnResult,
+  MindSectionWriteInput,
   PromoteSkillOptions,
   SkillCandidate,
   SkillCandidateInput,
   StoreMutationOptions,
+  SuggestionOutcomeInput,
+  SuggestionRecord,
+  SuggestionRecordInput,
   TaskInput,
   TaskSearchOptions,
   TaskTruth,
   VerifiedSkill,
+  YishuMindState,
   YishuStoreSnapshot,
 } from "./types.js";
 import {
@@ -56,6 +63,16 @@ import {
   sanitizeEventPayload,
   sanitizeVisibleText,
 } from "./ledger-safety.js";
+import {
+  applySuggestionOutcome,
+  buildSuggestionRecord,
+  cloneMindState,
+  cloneSuggestion,
+  emptyMindState,
+  learnMindFromPattern,
+  restoreSeedMindState,
+  writeMindSectionState,
+} from "./mind-store.js";
 import type { YishuStorePort } from "./yishu-store.js";
 import {
   assertStoreOperationNotAborted,
@@ -1039,6 +1056,125 @@ export class SqliteYishuStore implements YishuStorePort {
     return rowToConversation(row);
   }
 
+  async getMind(): Promise<YishuMindState> {
+    return this.readMindState();
+  }
+
+  async writeMindSection(
+    input: MindSectionWriteInput,
+    options?: StoreMutationOptions,
+  ): Promise<YishuMindState> {
+    const signal = options?.signal;
+    assertStoreOperationNotAborted(signal);
+    const current = this.readMindState();
+    const next = writeMindSectionState(current, input);
+    assertStoreOperationNotAborted(signal);
+    this.writeMindState(next);
+    return cloneMindState(next);
+  }
+
+  async restoreSeedMind(options?: StoreMutationOptions): Promise<YishuMindState> {
+    const signal = options?.signal;
+    assertStoreOperationNotAborted(signal);
+    const next = restoreSeedMindState();
+    assertStoreOperationNotAborted(signal);
+    this.writeMindState(next);
+    return cloneMindState(next);
+  }
+
+  async addSuggestion(
+    input: SuggestionRecordInput,
+    options?: StoreMutationOptions,
+  ): Promise<SuggestionRecord> {
+    const signal = options?.signal;
+    assertStoreOperationNotAborted(signal);
+    const record = buildSuggestionRecord(input);
+    assertStoreOperationNotAborted(signal);
+    this.db
+      .prepare(
+        `INSERT INTO suggestions (
+          id, created_at, updated_at, pattern_key, summary, status,
+          conversation_id, turn_id, task_id, note, outcome_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.createdAt,
+        record.updatedAt,
+        record.patternKey,
+        record.summary,
+        record.status,
+        record.conversationId ?? null,
+        record.turnId ?? null,
+        record.taskId ?? null,
+        record.note ?? null,
+        record.outcomeAt ?? null,
+      );
+    return cloneSuggestion(record);
+  }
+
+  async recordSuggestionOutcome(
+    input: SuggestionOutcomeInput,
+    options?: StoreMutationOptions,
+  ): Promise<SuggestionRecord> {
+    const signal = options?.signal;
+    assertStoreOperationNotAborted(signal);
+    const row = this.db
+      .prepare(`SELECT * FROM suggestions WHERE id = ?`)
+      .get(input.suggestionId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error("suggestion_not_found");
+    const existing = rowToSuggestion(row);
+    const next = applySuggestionOutcome(existing, input);
+    assertStoreOperationNotAborted(signal);
+    this.db
+      .prepare(
+        `UPDATE suggestions SET
+          updated_at = ?, status = ?, task_id = ?, note = ?, outcome_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        next.updatedAt,
+        next.status,
+        next.taskId ?? null,
+        next.note ?? null,
+        next.outcomeAt ?? null,
+        next.id,
+      );
+    return cloneSuggestion(next);
+  }
+
+  async listSuggestions(): Promise<SuggestionRecord[]> {
+    const rows = this.db
+      .prepare(`SELECT * FROM suggestions ORDER BY created_at ASC`)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map(rowToSuggestion);
+  }
+
+  async getSuggestion(id: string): Promise<SuggestionRecord | null> {
+    const row = this.db
+      .prepare(`SELECT * FROM suggestions WHERE id = ?`)
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? rowToSuggestion(row) : null;
+  }
+
+  async learnMindFromPattern(
+    input: MindLearnFromPatternInput,
+    options?: StoreMutationOptions,
+  ): Promise<MindLearnResult> {
+    const signal = options?.signal;
+    assertStoreOperationNotAborted(signal);
+    const suggestions = await this.listSuggestions();
+    const result = learnMindFromPattern(this.readMindState(), suggestions, input);
+    assertStoreOperationNotAborted(signal);
+    if (result.wrote) {
+      this.writeMindState(result.mind);
+    }
+    return {
+      ...result,
+      mind: cloneMindState(result.mind),
+    };
+  }
+
   getSnapshot(): YishuStoreSnapshot {
     return {
       memories: this.listMemoriesRaw(),
@@ -1074,7 +1210,42 @@ export class SqliteYishuStore implements YishuStorePort {
         .prepare(`SELECT * FROM conversation_events ORDER BY conversation_id ASC, sequence ASC`)
         .all()
         .map((r) => rowToConversationEvent(r as Record<string, unknown>)),
+      mind: this.readMindState(),
+      suggestions: this.db
+        .prepare(`SELECT * FROM suggestions ORDER BY created_at ASC`)
+        .all()
+        .map((r) => rowToSuggestion(r as Record<string, unknown>)),
     };
+  }
+
+  private readMindState(): YishuMindState {
+    const row = this.db
+      .prepare(`SELECT markdown, updated_at, last_learned_at FROM mind_state WHERE id = 1`)
+      .get() as Record<string, unknown> | undefined;
+    if (!row) return emptyMindState();
+    const mind: YishuMindState = {
+      markdown: String(row.markdown ?? ""),
+      updatedAt: row.updated_at === null || row.updated_at === undefined
+        ? null
+        : String(row.updated_at),
+    };
+    if (typeof row.last_learned_at === "string" && row.last_learned_at.length > 0) {
+      mind.lastLearnedAt = row.last_learned_at;
+    }
+    return mind;
+  }
+
+  private writeMindState(mind: YishuMindState): void {
+    this.db
+      .prepare(
+        `INSERT INTO mind_state (id, markdown, updated_at, last_learned_at)
+         VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           markdown = excluded.markdown,
+           updated_at = excluded.updated_at,
+           last_learned_at = excluded.last_learned_at`,
+      )
+      .run(mind.markdown, mind.updatedAt, mind.lastLearnedAt ?? null);
   }
 
   close(): void {
@@ -1199,6 +1370,27 @@ export class SqliteYishuStore implements YishuStorePort {
         ON conversation_turns (conversation_id, sequence);
       CREATE INDEX IF NOT EXISTS idx_conversation_events_conversation
         ON conversation_events (conversation_id, sequence);
+      CREATE TABLE IF NOT EXISTS mind_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        markdown TEXT NOT NULL DEFAULT '',
+        updated_at TEXT,
+        last_learned_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS suggestions (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        pattern_key TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        status TEXT NOT NULL,
+        conversation_id TEXT,
+        turn_id TEXT,
+        task_id TEXT,
+        note TEXT,
+        outcome_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_suggestions_pattern
+        ON suggestions (pattern_key, created_at);
     `);
 
     // Existing databases created before the ledger had no trace_id column.
@@ -1227,10 +1419,46 @@ export class SqliteYishuStore implements YishuStorePort {
         // Fresh/current schemas already contain the additive column.
       }
     }
-    if (currentVersion < 3) {
-      this.db.exec("PRAGMA user_version = 3;");
+    // Ensure singleton mind row exists for fresh and upgraded databases.
+    this.db
+      .prepare(
+        `INSERT INTO mind_state (id, markdown, updated_at, last_learned_at)
+         VALUES (1, '', NULL, NULL)
+         ON CONFLICT(id) DO NOTHING`,
+      )
+      .run();
+    if (currentVersion < 4) {
+      this.db.exec("PRAGMA user_version = 4;");
     }
   }
+}
+
+
+function rowToSuggestion(row: Record<string, unknown>): SuggestionRecord {
+  const record: SuggestionRecord = {
+    id: String(row.id),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    patternKey: String(row.pattern_key),
+    summary: String(row.summary),
+    status: String(row.status) as SuggestionRecord["status"],
+  };
+  if (typeof row.conversation_id === "string" && row.conversation_id.length > 0) {
+    record.conversationId = row.conversation_id;
+  }
+  if (typeof row.turn_id === "string" && row.turn_id.length > 0) {
+    record.turnId = row.turn_id;
+  }
+  if (typeof row.task_id === "string" && row.task_id.length > 0) {
+    record.taskId = row.task_id;
+  }
+  if (typeof row.note === "string" && row.note.length > 0) {
+    record.note = row.note;
+  }
+  if (typeof row.outcome_at === "string" && row.outcome_at.length > 0) {
+    record.outcomeAt = row.outcome_at;
+  }
+  return cloneSuggestion(record);
 }
 
 function parseJsonArray(value: unknown): unknown[] {

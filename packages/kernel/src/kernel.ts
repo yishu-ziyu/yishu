@@ -7,10 +7,13 @@ import type { ContextTrailOptions } from "./context/trail.js";
 import {
   createForgetAction,
   createFinderHistoryBackAction,
+  createLearnMindFromPatternAction,
   createRecordLearningAction,
+  createRecordSuggestionAction,
   createRememberAction,
   createRememberHowAction,
   createRunSkillAction,
+  createSettleSuggestionAction,
   createShareContextAction,
 } from "./actions/index.js";
 import {
@@ -87,6 +90,9 @@ export function createYishuKernel(
     createRememberHowAction({ store, trail }),
     createShareContextAction(trail),
     createRecordLearningAction(store),
+    createRecordSuggestionAction(store),
+    createSettleSuggestionAction(store),
+    createLearnMindFromPatternAction(store),
     createRunSkillAction({ store, trail }),
     createFinderHistoryBackAction(),
   ];
