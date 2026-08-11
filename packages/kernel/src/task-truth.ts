@@ -7,6 +7,8 @@ export type TaskProgressKind =
   | "start"
   | "progress"
   | "verified"
+  /** A bounded, safe result was produced; its factual content is not verified. */
+  | "completed"
   | "unverified"
   | "failed"
   | "cancelled"
@@ -77,6 +79,7 @@ function statusFor(kind: TaskProgressKind): TaskTruth["status"] {
     case "progress":
       return "running"
     case "verified":
+    case "completed":
       return "done"
     case "unverified":
       return "blocked"

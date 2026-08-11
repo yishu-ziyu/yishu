@@ -140,6 +140,22 @@ describe("TaskTruthProjector", () => {
     assert.equal(resumed?.status, "running");
   });
 
+  it("records a safely produced delegated result as done without calling it verified", async () => {
+    const store = new InMemoryYishuStore();
+    const projector = new TaskTruthProjector(store);
+    await projector.record(base);
+
+    const completed = await projector.record({
+      ...base,
+      kind: "completed",
+      observedAt: "2026-08-08T00:00:02.000Z",
+      evidence: "delegate:completed:turn-1",
+    });
+
+    assert.equal(completed?.status, "done");
+    assert.ok(completed?.evidence.includes("delegate:completed:turn-1"));
+  });
+
   it("copies project scope into TaskTruth and filters project queries", async () => {
     const store = new InMemoryYishuStore();
     const projector = new TaskTruthProjector(store);

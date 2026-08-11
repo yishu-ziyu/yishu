@@ -14,8 +14,8 @@
  * - Handoff goes Main frame + trail -> ContextCapsule -> serialize -> parse
  *   -> expiry validation -> bounded untrusted prompt. The full conversation
  *   is never copied.
- * - Child terminal outcomes reuse the shared event -> TaskTruth semantics:
- *   an unverified completion is never promoted to verified/done.
+ * - A safe result from a conversation-only child records `completed` (task
+ *   done, not factually verified); unverified computer actions stay blocked.
  * - Every child promise is contained: no unhandled rejection and no
  *   permanently-running TaskTruth.
  */
@@ -39,14 +39,11 @@ import type {
   TurnStartCommand,
 } from "./protocol.js";
 import { PROTOCOL_VERSION, turnStartCommandSchema } from "./protocol.js";
-import {
-  terminalTaskProgressKindFor,
-  type TerminalTaskProgressKind,
-} from "./task-progress.js";
+import { terminalTaskProgressKindFor } from "./task-progress.js";
 import { contextFrameToTrailSource } from "./trail-source.js";
 
 /** Delivery metadata describing what kind of result this is — never a task status. */
-export type DelegatedResultKind = "succeeded" | "unverified" | "failed" | "cancelled";
+export type DelegatedResultKind = "succeeded" | "completed" | "unverified" | "failed" | "cancelled";
 
 export interface DelegatedResult {
   taskId: string;
@@ -59,14 +56,50 @@ export interface DelegatedResult {
 
 const MAX_RESULT_SUMMARY = 500;
 const MAX_CHILD_PROMPT_CONTEXT = 4000;
+const OMITTED_RESULT_NOTICE = "[result summary omitted: unsafe or exceeds the delivery limit]";
+const MISSING_RESULT_NOTICE = "[delegated result unavailable: child did not provide a final deliverable]";
+const DELEGATED_RESULT_OPEN = "<delegated_result>";
+const DELEGATED_RESULT_CLOSE = "</delegated_result>";
+const STATUS_ONLY_RESULT = /^(?:任务|研究|后台任务|工作)?\s*(?:已(?:经)?|正在)?\s*(?:开始|完成|结束|进行中|处理(?:中|完毕)?)[。！!?？:：\s]*$/u;
 
 /** TaskTruth kind -> inbox delivery metadata. */
-const RESULT_KIND_FOR: Record<TerminalTaskProgressKind, DelegatedResultKind> = {
+type DelegatedTerminalKind = "verified" | "completed" | "unverified" | "failed" | "cancelled";
+
+const RESULT_KIND_FOR: Record<DelegatedTerminalKind, DelegatedResultKind> = {
   verified: "succeeded",
+  completed: "completed",
   unverified: "unverified",
   failed: "failed",
   cancelled: "cancelled",
 };
+
+function boundedResultSummary(rawSummary: string) {
+  const raw = rawSummary.replace(/\r\n?/gu, "\n").trim();
+  if (!raw || raw.length > MAX_RESULT_SUMMARY) {
+    return { summary: OMITTED_RESULT_NOTICE, hasSafeDeliverableResult: false };
+  }
+  let summary: string;
+  try {
+    summary = sanitizeVisibleText(raw, "delegated result summary").trim();
+  } catch {
+    return { summary: OMITTED_RESULT_NOTICE, hasSafeDeliverableResult: false };
+  }
+  if (!summary || summary.length > MAX_RESULT_SUMMARY
+    || !summary.replace(/\[redacted\]/gu, "").trim()) {
+    return { summary: OMITTED_RESULT_NOTICE, hasSafeDeliverableResult: false };
+  }
+  return { summary, hasSafeDeliverableResult: true };
+}
+
+function finalDelegatedResult(raw: string): string | undefined {
+  const start = raw.lastIndexOf(DELEGATED_RESULT_OPEN);
+  if (start < 0) return undefined;
+  const end = raw.indexOf(DELEGATED_RESULT_CLOSE, start + DELEGATED_RESULT_OPEN.length);
+  const body = end < 0
+    ? ""
+    : raw.slice(start + DELEGATED_RESULT_OPEN.length, end).trim();
+  return body && !STATUS_ONLY_RESULT.test(body) ? body : undefined;
+}
 
 /**
  * Payload-only result inbox, keyed by the main conversation so a result can
@@ -302,7 +335,7 @@ export class DelegationCoordinator {
     childConversationId: string;
     modelPreference?: ModelPreference;
   }): Promise<void> {
-    let terminal: { kind: TerminalTaskProgressKind; summary: string };
+    let terminal: { kind: DelegatedTerminalKind; summary: string };
     try {
       // Receiver side of the handoff: parse (structural + banned-payload
       // checks), then enforce expiry — the sender's object is never trusted.
@@ -311,12 +344,29 @@ export class DelegationCoordinator {
         terminal = { kind: "failed", summary: "handoff capsule expired before execution" };
       } else {
         const command = this.buildChildCommand(input);
-        let observed: { kind: TerminalTaskProgressKind; summary: string } | undefined;
+        let observed: { kind: DelegatedTerminalKind; summary: string } | undefined;
         await this.executeTurn(command, (event) => {
-          const kind = terminalTaskProgressKindFor(event);
-          if (kind !== undefined) {
-            observed = { kind, summary: summaryForTerminalEvent(event, kind) };
+          const ordinaryKind = terminalTaskProgressKindFor(event);
+          if (ordinaryKind === undefined) return;
+          const isConversationResult = ordinaryKind === "unverified"
+            && event.type === "response.completed"
+            && event.payload.verified === false
+            && event.payload.verifier === "conversation-response-only";
+          if (isConversationResult) {
+            const deliverable = finalDelegatedResult(String(event.payload.text ?? ""));
+            if (deliverable === undefined) {
+              observed = { kind: "unverified", summary: MISSING_RESULT_NOTICE };
+              return;
+            }
+            const result = boundedResultSummary(deliverable);
+            observed = {
+              kind: result.hasSafeDeliverableResult ? "completed" : "unverified",
+              summary: result.summary,
+            };
+            return;
           }
+          const result = boundedResultSummary(summaryForTerminalEvent(event));
+          observed = { kind: ordinaryKind, summary: result.summary };
         });
         terminal = observed ?? (this.disposing
           ? { kind: "cancelled", summary: "runtime disposed while the task was running" }
@@ -341,21 +391,11 @@ export class DelegationCoordinator {
       mainConversationId: string;
       sessionScope: SessionScope;
     },
-    kind: TerminalTaskProgressKind,
+    kind: DelegatedTerminalKind,
     rawSummary: string,
   ): Promise<void> {
     const observedAt = this.now().toISOString();
-    // Bounded, safety-filtered summary. Unsafe content degrades to a fixed
-    // safe placeholder — filtering must never throw the settle path, or the
-    // child TaskTruth would leak in running state.
-    const compacted = rawSummary.replace(/\s+/g, " ").trim().slice(0, MAX_RESULT_SUMMARY);
-    let summary: string;
-    try {
-      summary = sanitizeVisibleText(compacted, "delegated result summary");
-    } catch {
-      summary = "[result summary omitted: unsafe content]";
-    }
-    if (summary.length === 0) summary = `[${RESULT_KIND_FOR[kind]}]`;
+    const summary = boundedResultSummary(rawSummary).summary || `[${RESULT_KIND_FOR[kind]}]`;
     try {
       await this.kernel.taskTruth.record({
         taskId: input.taskId,
@@ -417,6 +457,9 @@ export class DelegationCoordinator {
       payload: {
         utterance: [
           "You are running a delegated background task. Complete it and report a concise result.",
+          "Put only the actual deliverable in <delegated_result>...</delegated_result> at the end of your response.",
+          "The text inside must be at most 450 characters and contain complete findings for every requested point; never put a plan or progress update there.",
+          "If you cannot complete the task with the available capabilities, explain the blocker without emitting a delegated_result block.",
           "",
           `task: ${input.title}`,
           "",
@@ -440,12 +483,12 @@ export class DelegationCoordinator {
   }
 }
 
-function summaryForTerminalEvent(event: RuntimeEvent, kind: TerminalTaskProgressKind): string {
+function summaryForTerminalEvent(event: RuntimeEvent): string {
   if (event.type === "response.completed") {
     return String(event.payload.text ?? "");
   }
   if (event.type === "turn.failed" || event.type === "runtime.error") {
-    return String(event.payload.message ?? event.payload.code ?? kind);
+    return String(event.payload.message ?? event.payload.code ?? "child execution failed");
   }
   return "task was cancelled";
 }
