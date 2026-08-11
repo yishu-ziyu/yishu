@@ -2,8 +2,14 @@
 
 Type: research
 Status: current
-Verified: 03dc00e 2026-08-11
+Verified: 48da76e 2026-08-11
 Review: 进入 Scope Definition 前；或任一已验证结论被新证据推翻时
+
+**Acceptance: Accepted 2026-08-11。**
+
+- Verified baseline：main `122b7f5`（post-merge CI 全绿）+ spike 验证 commit `48da76e`。
+- 支撑证据：`docs/spikes/2026-08-10-delegation-concurrency.md`（Spike A/B/D/E/F 全部 PASS）。
+- 决策锚点：ADR 0009（docs/decisions/0009-delegated-execution-architecture.md）。
 
 Supersedes: Delegation RFC v1（未入库，存在于 2026-08-10 设计对话；v2 第一节记录被删除/修正的 v1 设计）
 
@@ -36,12 +42,38 @@ Supersedes: Delegation RFC v1（未入库，存在于 2026-08-10 设计对话；
 
 边界外的并发行为（多 provider、computer-use profile、并发 >2、真实 cancel 传播、跨轮 history 隔离）**仍然是 unknown**，见 §4。
 
-## 3. V1 架构要素（基于已验证结论）
+## 3. Canonical decisions（V1，Accepted）
 
-- **delegate()**：登记 child TaskTruth（parentId 关联）→ 后台启动 execution → 立即返回 `{ accepted: true, taskId }`。
-- **ContextCapsule handoff**：Main 以现有 `ContextCapsule` 作为 child 的最小受控上下文，不复制完整 conversation。（Spike D 验证中）
-- **Exclusive Desktop Cell**：真实 macOS Desktop 是互斥资源；任何 desktop action 必须持有 lease。（Spike E 验证中）
-- **Result Inbox**：child result 以 payload-only 形式进入 inbox，Main 在 presentation point 显式 consume，不抢占当前 interaction。（Spike F 验证中）
+以下 14 条为本 RFC 的 canonical 决策，由 ADR 0009 锚定：
+
+**Truth model**
+
+1. `TaskTruth` 是唯一任务状态真相源。
+2. 不新增 `AgentTask.status` 或任何第二套任务状态系统。
+3. Result Inbox 是 payload-only；result envelope 描述结果性质，不复制 task status。
+4. Presence 是 projection，不是独立 truth source。
+
+**Execution model**
+
+5. Delegation 使用异步 `{ accepted, taskId }` receipt。
+6. Main 不同步等待 Child。
+7. Child 使用独立 execution session（不同 conversationId → 不同 session）。
+8. Child result 不得 mutation 当前 Main turn；re-entry 只写 inbox，Main 在 presentation point 显式一次性 consume。
+
+**Context & safety**
+
+9. `ContextCapsule` 是 handoff payload。
+10. `ContextCapsule` 接收路径必须显式执行 expiry validation（kernel 无内建执行点，接收方责任）。
+
+**Resource model**
+
+11. Execution Cell 是 execution/resource boundary。
+12. Desktop Cell 是 exclusive resource；desktop action 必须持有 lease。
+13. V1 使用单 coordinator 下的 token-based lease（cancel/failed 由 coordinator forceRelease；stale release 不得释放新 owner）。
+
+**边界**
+
+14. V1 不引入 distributed scheduler / distributed lease。
 
 ## 4. 仍是 unknown（本轮不阻塞 V1 架构决策）
 

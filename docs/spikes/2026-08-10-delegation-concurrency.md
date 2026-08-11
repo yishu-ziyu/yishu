@@ -170,6 +170,34 @@ Layer 2（real Pi，探测日志 `.work/spike-a-l2-log.txt`，2026-08-11T03:04Z�
 
 ---
 
+## Promotion record（2026-08-11，Architecture Decision Gate）
+
+RFC 已 Accepted（docs/research/delegation-rfc.md），决策锚点 ADR 0009。资产实际处置：
+
+**Promoted（知识与长期契约）**
+
+- RFC v2 → `docs/research/delegation-rfc.md`（Accepted）
+- 本实验记录 → 保留（research / historical）
+- Spike A 并发测试 → 转正为 `packages/runtime/test/pi-runtime-adapter-concurrency.test.ts`（3 个契约测试；fake harness 保持自包含）
+- Spike B 的 parent-child truth invariant → 重写为 `task-truth.test.ts` 的 "keeps parent and child TaskTruth independent across child terminal states"（直接驱动生产 `TaskTruthProjector`，无 worker 胶水）
+- Spike D 的 capsule 安全/隔离 invariant → 重写为 `packages/kernel/test/context-capsule.test.ts`（6 个测试，直接驱动生产 `capsule.ts`；含"parse 不执行 expiry"的 gap 钉住测试）
+- ADR 0009 → `docs/decisions/0009-delegated-execution-architecture.md`
+
+**Deleted（spike 胶水与一次性材料）**
+
+- `spike-b-async-delegation.test.ts`（FakeWorker / delegate 胶水自测；invariant 已重写）
+- `spike-d-capsule-handoff.test.ts`（handoffReceive 胶水；invariant 已重写）
+- `spike-e-desktop-cell.test.ts`（spike `ResourceLease` 自测——无生产实现可保护；E1–E5 保留为未来产品 lease 的验收清单，见本文 Spike E 节）
+- `spike-f-result-reentry.test.ts`（spike `ResultInbox` 自测——同上；F1–F7 保留为未来产品 inbox 的验收清单）
+- `.work/spike-a-real-pi-probe.mjs`、`.work/spike-a-l2-log.txt`（disposable probe 与日志）
+
+**遗留设计义务（已记录于 ADR 0009 Consequences）**
+
+- 产品 handoff 实现必须在接收路径显式执行 capsule expiry validation（kernel 无内建执行点，`context-capsule.test.ts` 已钉住该 gap）。
+- 产品 Desktop lease / Result Inbox 实现时，以本文 E1–E5 / F1–F7 为验收清单。
+
+---
+
 # 第二轮（2026-08-11）：Spike D / E / F
 
 输入：RFC v2（docs/research/delegation-rfc.md）。同样先写标准再写代码。
