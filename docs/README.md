@@ -97,6 +97,7 @@ Git (Canonical)
 | `docs/runbooks/` | runbook | 操作程序 |
 | `docs/debt/` | debt | 技术债台账 |
 | `docs/research/` | research | 默认 historical |
+| `docs/spikes/` | research | 实验记录，写入即冻结 |
 | `docs/acceptance/` | acceptance | 默认 historical |
 | `docs/agent-book/` | 混合 | 见各文件头 |
 | 根级架构文档（`architecture.md` / `product-kernel.md` / `persona.md` 等） | architecture | 产品架构与身份 |
