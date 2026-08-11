@@ -578,6 +578,47 @@ struct leanring_buddyTests {
             transcript: "点击左上角新对话",
             actionResult: nil
         ))
+        #expect(CompanionManager.runtimeFailureRecoveryRoute(
+            actionResult: consumedResult,
+            runtimeIsRunning: false
+        ) == .useActionReceipt)
+        #expect(CompanionManager.runtimeFailureRecoveryRoute(
+            actionResult: consumedResult,
+            runtimeIsRunning: true
+        ) == .useActionReceipt)
+        #expect(CompanionManager.runtimeFailureRecoveryRoute(
+            actionResult: nil,
+            runtimeIsRunning: false
+        ) == .restartRuntime)
+        #expect(CompanionManager.runtimeFailureRecoveryRoute(
+            actionResult: nil,
+            runtimeIsRunning: true
+        ) == .legacyProxy)
+
+        let initialCapture = Self.makeCapture(label: "initial", width: 111)
+        let retryCapture = Self.makeCapture(label: "retry", width: 222)
+        #expect(CompanionManager.continuityProxyScreenCaptures(
+            initial: [initialCapture],
+            retry: [retryCapture]
+        ).map(\.label) == ["retry"])
+        #expect(CompanionManager.continuityProxyScreenCaptures(
+            initial: [initialCapture],
+            retry: []
+        ).isEmpty)
+    }
+
+    private static func makeCapture(label: String, width: Int) -> CompanionScreenCapture {
+        CompanionScreenCapture(
+            imageData: Data(label.utf8),
+            label: label,
+            isCursorScreen: true,
+            displayWidthInPoints: width,
+            displayHeightInPoints: 100,
+            displayFrame: CGRect(x: 0, y: 0, width: width, height: 100),
+            globalTopLeftDisplayFrame: CGRect(x: 0, y: 0, width: width, height: 100),
+            screenshotWidthInPixels: width,
+            screenshotHeightInPixels: 100
+        )
     }
 
     @Test func runtimeIngressUUIDHelperRejectsMalformedOptionalIDs() async throws {

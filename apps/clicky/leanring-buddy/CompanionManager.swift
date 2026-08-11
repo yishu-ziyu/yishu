@@ -34,6 +34,12 @@ private enum DirectClickFastPathMissReason: String {
     case ocrNoMatch = "ocr_no_match"
 }
 
+enum YishuRuntimeFailureRecoveryRoute: Equatable {
+    case useActionReceipt
+    case restartRuntime
+    case legacyProxy
+}
+
 private struct VoiceTurnOrigin {
     let traceID: String
     let releaseAt: UInt64?
@@ -1528,12 +1534,16 @@ final class CompanionManager: ObservableObject {
             } catch {
                 clearMemorySourceNotice()
                 guard !Task.isCancelled else { return }
-                if activeVoiceTurnToken == turnToken,
-                   let actionResult = activeTurnLastComputerActionResult,
-                   Self.shouldUseDirectActionResultAfterTurnFailure(
-                       transcript: transcript,
-                       actionResult: actionResult
-                   ) {
+                var fallbackScreenCaptures = capturedContext.screenCaptures
+                let actionResult = activeVoiceTurnToken == turnToken
+                    ? activeTurnLastComputerActionResult
+                    : nil
+                switch Self.runtimeFailureRecoveryRoute(
+                    actionResult: actionResult,
+                    runtimeIsRunning: yishuAgentRuntimeClient.isRunning
+                ) {
+                case .useActionReceipt:
+                    guard let actionResult else { return }
                     // A direct action was already consumed. Do not spend a
                     // second model turn after Pi failed around its result.
                     activeTurnConsumedComputerAction = true
@@ -1553,13 +1563,56 @@ final class CompanionManager: ObservableObject {
                         responseOverlayManager.hideOverlay()
                     }
                     return
+                case .restartRuntime:
+                    // A crashed sidecar must not immediately fork product
+                    // behavior into the legacy proxy. Re-enter the same
+                    // Runtime/Kernel spine with fresh evidence first.
+                    responseOverlayManager.hideOverlay()
+                    timing.mark("runtime_restart", reason: "sidecar_not_running")
+                    do {
+                        let retryContext = await yishuContextFrameCollector.capture()
+                        fallbackScreenCaptures = Self.continuityProxyScreenCaptures(
+                            initial: fallbackScreenCaptures,
+                            retry: retryContext.screenCaptures
+                        )
+                        timing.mark(
+                            "context_capture",
+                            reason: "runtime_restart",
+                            sourceDimensions: Self.telemetryDimensions(for: retryContext.screenCaptures)
+                        )
+                        let response = try await respondThroughYishuRuntime(
+                            transcript: transcript,
+                            contextFrame: retryContext.frame,
+                            screenCaptures: retryContext.screenCaptures,
+                            timing: timing
+                        )
+                        try Task.checkCancellation()
+                        timing.mark("runtime_restart_complete", reason: "ok")
+                        try await presentVoiceResponse(
+                            response,
+                            transcript: transcript,
+                            screenCaptures: retryContext.screenCaptures,
+                            timing: timing
+                        )
+                        return
+                    } catch is CancellationError {
+                        clearMemorySourceNotice()
+                        responseOverlayManager.hideOverlay()
+                        return
+                    } catch {
+                        clearMemorySourceNotice()
+                        responseOverlayManager.hideOverlay()
+                        timing.mark("runtime_restart_complete", reason: "failed")
+                    }
+                case .legacyProxy:
+                    break
                 }
                 responseOverlayManager.hideOverlay()
-                print("⚠️ Pi Runtime turn failed; using local Grok fallback")
+                print("⚠️ Unified Runtime recovery failed; using continuity proxy")
                 do {
                     try await respondLocally(
                         transcript: transcript,
-                        screenCaptures: capturedContext.screenCaptures,
+                        screenCaptures: fallbackScreenCaptures,
                         timing: timing
                     )
                 } catch is CancellationError {
@@ -2659,6 +2712,30 @@ final class CompanionManager: ObservableObject {
     ) -> Bool {
         YishuDirectClickResolver.isDirectClickIntent(transcript)
             && actionResult != nil
+    }
+
+    static func runtimeFailureRecoveryRoute(
+        actionResult: YishuComputerActionResult?,
+        runtimeIsRunning: Bool
+    ) -> YishuRuntimeFailureRecoveryRoute {
+        // Once an effect has a receipt, never replay the turn automatically.
+        // This remains true even when the original utterance was not classified
+        // as the narrow direct-click fast path.
+        if actionResult != nil {
+            return .useActionReceipt
+        }
+        return runtimeIsRunning ? .legacyProxy : .restartRuntime
+    }
+
+    static func continuityProxyScreenCaptures(
+        initial: [CompanionScreenCapture],
+        retry: [CompanionScreenCapture]
+    ) -> [CompanionScreenCapture] {
+        // If the Runtime restart still fails, the continuity proxy must answer
+        // from the evidence gathered for that retry instead of stale pre-crash
+        // screenshots. Empty capture sets are still terminal evidence of the
+        // freshest observation attempt.
+        retry
     }
 
     private static func directClickConfirmation(for result: YishuComputerActionResult) -> String {
