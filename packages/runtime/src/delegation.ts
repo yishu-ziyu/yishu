@@ -41,6 +41,7 @@ import type {
 import { PROTOCOL_VERSION, turnStartCommandSchema } from "./protocol.js";
 import { terminalTaskProgressKindFor } from "./task-progress.js";
 import { contextFrameToTrailSource } from "./trail-source.js";
+import { createWebSearchTool } from "./web-search-tool.js";
 
 /** Delivery metadata describing what kind of result this is — never a task status. */
 export type DelegatedResultKind = "succeeded" | "completed" | "unverified" | "failed" | "cancelled";
@@ -185,7 +186,10 @@ export class DelegationCoordinator {
    */
   sessionToolPolicyFor(conversationId: string): SessionToolPolicy {
     if (this.childConversations.has(conversationId)) {
-      return { computerControl: false, extraTools: [] };
+      return {
+        computerControl: false,
+        extraTools: [createWebSearchTool() as unknown as ToolDefinition],
+      };
     }
     return { computerControl: true, extraTools: [this.createDelegateTool(conversationId)] };
   }
@@ -459,6 +463,7 @@ export class DelegationCoordinator {
           "You are running a delegated background task. Complete it and report a concise result.",
           "Put only the actual deliverable in <delegated_result>...</delegated_result> at the end of your response.",
           "The text inside must be at most 450 characters and contain complete findings for every requested point; never put a plan or progress update there.",
+          "For current or external facts, use web_search and include compact source URLs in the deliverable.",
           "If you cannot complete the task with the available capabilities, explain the blocker without emitting a delegated_result block.",
           "",
           `task: ${input.title}`,

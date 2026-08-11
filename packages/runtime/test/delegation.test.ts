@@ -153,7 +153,7 @@ test("ResultInbox is payload-only, conversation-scoped, and one-shot", () => {
   assert.equal(inbox.consume("conv-a").length, 0, "consume must be one-shot");
 });
 
-test("runtime-owned child identity strips computer control and delegate from child sessions", async (t) => {
+test("runtime-owned child identity gives child only web search", async (t) => {
   const harness = new FakeChildHarness();
   const { coordinator } = makeCoordinator(harness);
   t.after(async () => {
@@ -169,11 +169,11 @@ test("runtime-owned child identity strips computer control and delegate from chi
   const childConversationId = harness.calls[0]!.payload.conversationId!;
   assert.ok(childConversationId !== "conv-main");
 
-  // The child conversation is identity-registered: its policy has neither
-  // computer_control nor delegate — recursion is structurally impossible.
+  // The child conversation is identity-registered: it can search the public
+  // web but still has neither Desktop control nor recursive delegation.
   const childPolicy = coordinator.sessionToolPolicyFor(childConversationId);
   assert.equal(childPolicy.computerControl, false);
-  assert.equal(childPolicy.extraTools.length, 0);
+  assert.deepEqual(childPolicy.extraTools.map((candidate) => candidate.name), ["web_search"]);
 
   // Unrelated conversations are unaffected.
   const otherPolicy = coordinator.sessionToolPolicyFor("conv-other");
@@ -803,11 +803,12 @@ test("at the real createSession boundary a safe conversation result completes an
   });
   const taskId = accepted.details.taskId;
 
-  // Child session appears at the real createSession boundary — with neither tool.
+  // Child session appears at the real createSession boundary with only web search.
   await waitFor(() => sessions.length === 2, "child session created");
   const childToolNames = sessionCalls[1]!.customTools.map((tool) => tool.name);
   assert.equal(childToolNames.includes("computer_control"), false, "child must not get computer_control");
   assert.equal(childToolNames.includes("delegate"), false, "child must not get delegate (no recursion)");
+  assert.deepEqual(childToolNames, ["web_search"]);
 
   // The child command satisfies the full wire schema and inherits the model.
   const childCommand = startTurnCalls.find(
