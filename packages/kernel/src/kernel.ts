@@ -5,6 +5,7 @@ import type { AnyYishuAction } from "./action/types.js";
 import { ContextTrail } from "./context/trail.js";
 import type { ContextTrailOptions } from "./context/trail.js";
 import {
+  createDelegateAction,
   createForgetAction,
   createFinderHistoryBackAction,
   createLearnMindFromPatternAction,
@@ -95,6 +96,7 @@ export function createYishuKernel(
     createLearnMindFromPatternAction(store),
     createRunSkillAction({ store, trail }),
     createFinderHistoryBackAction(),
+    createDelegateAction({ taskTruth }),
   ];
 
   for (const action of defaults) {
