@@ -23,14 +23,22 @@ swift build --package-path "$ROOT_DIR" --product "$APP_NAME"
 BUILD_BINARY="$(swift build --package-path "$ROOT_DIR" --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS" "$APP_RESOURCES/packages/runtime"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES/packages/runtime" "$APP_RESOURCES/packages/kernel" "$APP_RESOURCES/packages/agent-core"
 cp "$BUILD_BINARY" "$APP_BINARY"
 cp "$ROOT_DIR/apps/macos/Resources/Info.plist" "$INFO_PLIST"
 cp "$ROOT_DIR/apps/macos/Resources/Yishu.png" "$APP_RESOURCES/Yishu.png"
 cp -R "$ROOT_DIR/node_modules" "$APP_RESOURCES/node_modules"
+# The runtime imports workspace packages (@yishu/kernel, @yishu/agent-core);
+# their pnpm symlinks resolve as siblings under packages/, so ship them too.
 cp -R "$ROOT_DIR/packages/runtime/dist" "$APP_RESOURCES/packages/runtime/dist"
 cp -R "$ROOT_DIR/packages/runtime/node_modules" "$APP_RESOURCES/packages/runtime/node_modules"
 cp "$ROOT_DIR/packages/runtime/package.json" "$APP_RESOURCES/packages/runtime/package.json"
+cp -R "$ROOT_DIR/packages/kernel/dist" "$APP_RESOURCES/packages/kernel/dist"
+cp -R "$ROOT_DIR/packages/kernel/node_modules" "$APP_RESOURCES/packages/kernel/node_modules"
+cp "$ROOT_DIR/packages/kernel/package.json" "$APP_RESOURCES/packages/kernel/package.json"
+cp -R "$ROOT_DIR/packages/agent-core/dist" "$APP_RESOURCES/packages/agent-core/dist"
+cp -R "$ROOT_DIR/packages/agent-core/node_modules" "$APP_RESOURCES/packages/agent-core/node_modules"
+cp "$ROOT_DIR/packages/agent-core/package.json" "$APP_RESOURCES/packages/agent-core/package.json"
 chmod +x "$APP_BINARY"
 
 /usr/libexec/PlistBuddy -c "Set :YishuRuntimeMode $RUNTIME_MODE" "$INFO_PLIST"
