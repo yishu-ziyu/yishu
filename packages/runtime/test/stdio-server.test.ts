@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const runtimeDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-for (const mode of ["mock", "pi", "agent-core"] as const) {
+for (const mode of ["mock", "pi"] as const) {
   test(`stdio server boots and pongs in ${mode} mode`, async () => {
     const child = spawn(process.execPath, ["--import", "tsx", "src/stdio-server.ts"], {
       cwd: runtimeDirectory,

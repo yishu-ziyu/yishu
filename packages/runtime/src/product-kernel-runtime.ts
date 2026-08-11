@@ -80,7 +80,7 @@ interface ReplayRecord {
 }
 
 /**
- * Product layer wrapper around any AgentRuntime (Pi / mock / agent-core).
+ * Product layer wrapper around the Pi AgentRuntime or its protocol test double.
  *
  * The wrapper owns the durable conversation projection.  The inner runtime
  * remains an execution harness; it never writes product conversation state.

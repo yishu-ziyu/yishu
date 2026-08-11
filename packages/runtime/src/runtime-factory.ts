@@ -1,18 +1,20 @@
-import { AgentCoreRuntime } from "./agent-core-runtime.js";
 import { MockAgentRuntime } from "./mock-runtime.js";
 import { PiRuntimeAdapter } from "./pi-runtime-adapter.js";
 import { ProductKernelRuntime } from "./product-kernel-runtime.js";
 import type { ComputerUsePort } from "./computer-use-port.js";
 import type { AgentRuntime } from "./runtime-port.js";
 
-export type RuntimeMode = "mock" | "pi" | "agent-core";
+/**
+ * Pi is the only production agent loop. Mock is a deterministic protocol test
+ * double, not an alternative product harness.
+ */
+export type RuntimeMode = "mock" | "pi";
 
 export function selectedRuntimeMode(
   environment: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
 ): RuntimeMode {
   const configuredMode = environment.YISHU_RUNTIME_MODE ?? environment.HANAKO_RUNTIME_MODE;
   if (configuredMode === "mock") return "mock";
-  if (configuredMode === "agent-core") return "agent-core";
   return "pi";
 }
 
@@ -40,7 +42,6 @@ function createInnerRuntime(
   ports: RuntimePorts,
 ): AgentRuntime {
   if (mode === "mock") return new MockAgentRuntime();
-  if (mode === "agent-core") return new AgentCoreRuntime();
   return new PiRuntimeAdapter(process.cwd(), ports.computerUse);
 }
 

@@ -1,5 +1,5 @@
-import { highRiskReminder, scanForInjection, wrapUntrustedContent } from "@yishu/agent-core";
 import type { ContextFrame, TurnStartCommand } from "./protocol.js";
+import { highRiskReminder, scanForInjection, wrapUntrustedContent } from "./untrusted-content.js";
 
 /** Controlled memory snippet injected into a single ordinary turn prompt. */
 export type PromptMemorySnippet = {

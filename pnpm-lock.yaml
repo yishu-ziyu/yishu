@@ -49,9 +49,6 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 0.83.0
         version: 0.83.0(ws@8.21.2)(zod@4.4.3)
-      '@yishu/agent-core':
-        specifier: workspace:*
-        version: link:../agent-core
       '@yishu/kernel':
         specifier: workspace:*
         version: link:../kernel
