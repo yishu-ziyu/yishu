@@ -20,6 +20,24 @@ function evidenceFor(event: RuntimeEvent, suffix?: string): string {
     .join(":");
 }
 
+export type TerminalTaskProgressKind = "verified" | "unverified" | "cancelled" | "failed";
+
+/**
+ * The single source of truth for terminal event → TaskTruth kind, shared by
+ * the per-turn tracker and delegated-child settlement (ADR 0009). An
+ * unverified completion is never promoted to verified/done.
+ */
+export function terminalTaskProgressKindFor(
+  event: RuntimeEvent,
+): TerminalTaskProgressKind | undefined {
+  if (event.type === "response.completed") {
+    return event.payload.verified === true ? "verified" : "unverified";
+  }
+  if (event.type === "turn.cancelled") return "cancelled";
+  if (event.type === "turn.failed" || event.type === "runtime.error") return "failed";
+  return undefined;
+}
+
 /**
  * Runtime-side adapter only: translate typed execution events into the generic
  * progress signals whose persistence policy is owned by TaskTruthProjector.
@@ -90,26 +108,14 @@ export class RuntimeTaskProgressTracker {
     // A terminal event closes the request even when no tool has started yet.
     // This prevents a cancelled or completed conversation from later being
     // resurrected into a task by delayed runtime events.
-    if (event.type === "response.completed") {
+    const terminalKind = terminalTaskProgressKindFor(event);
+    if (terminalKind !== undefined) {
       this.turnEnded = true;
       if (!this.executionStarted) return undefined;
-      const verified = event.payload.verified === true;
-      return {
-        kind: verified ? "verified" : "unverified",
-        evidence: evidenceFor(event, verified ? "verified" : "unverified"),
-      };
-    }
-
-    if (event.type === "turn.cancelled") {
-      this.turnEnded = true;
-      if (!this.executionStarted) return undefined;
-      return { kind: "cancelled", evidence: evidenceFor(event) };
-    }
-
-    if (event.type === "turn.failed" || event.type === "runtime.error") {
-      this.turnEnded = true;
-      if (!this.executionStarted) return undefined;
-      return { kind: "failed", evidence: evidenceFor(event) };
+      const suffix = terminalKind === "verified" || terminalKind === "unverified"
+        ? terminalKind
+        : undefined;
+      return { kind: terminalKind, evidence: evidenceFor(event, suffix) };
     }
 
     if (event.type === "tool.started" || event.type === "computer.action.requested") {

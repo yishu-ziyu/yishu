@@ -44,6 +44,7 @@ import {
   type PromptMemorySnippet,
 } from "./context-prompt.js";
 import { DelegationCoordinator, type DelegatedResult } from "./delegation.js";
+import { contextFrameToTrailSource } from "./trail-source.js";
 
 type TerminalKind = "completed" | "cancelled" | "failed";
 
@@ -115,15 +116,18 @@ export class ProductKernelRuntime implements AgentRuntime {
       kernel,
       executeTurn: (command, emit) => this.inner.startTurn(command, emit),
     });
-    // Additive seam: PiRuntimeAdapter contributes the delegate tool per Main
-    // session; other AgentRuntime implementations simply lack the method. The
-    // factory stays structurally typed so Pi-specific tool types never leak
-    // into this product wrapper.
+    // Additive seam: PiRuntimeAdapter asks this coordinator for the session
+    // tool policy at the createSession boundary (Main keeps computer_control
+    // and gets delegate; delegated children get neither). Other AgentRuntime
+    // implementations simply lack the method. The policy stays structurally
+    // typed so Pi-specific tool types never leak into this product wrapper.
     (
       this.inner as {
-        setDelegationToolFactory?: (factory: (conversationId: string) => unknown[]) => void;
+        setSessionToolPolicy?: (
+          policy: (conversationId: string) => { computerControl: boolean; extraTools: unknown[] },
+        ) => void;
       }
-    ).setDelegationToolFactory?.((conversationId) => this.delegation.delegateToolFor(conversationId));
+    ).setSessionToolPolicy?.((conversationId) => this.delegation.sessionToolPolicyFor(conversationId));
   }
 
   observeTrail(command: TrailObserveCommand, emit: RuntimeEventSink): void {
@@ -676,9 +680,17 @@ export class ProductKernelRuntime implements AgentRuntime {
     if (suggestionTracker) {
       this.suggestionTrackers.set(state.command.requestId, suggestionTracker);
     }
-    // Register the active Main turn so the delegate tool can link child
+    // Register the active Main turn (with its frame and model preference) so
+    // the delegate tool can build the handoff capsule and link child
     // parentage while this turn runs on the harness.
-    this.delegation.noteMainTurn(state.conversationId, state.command.requestId, state.sessionScope);
+    this.delegation.noteMainTurn(state.conversationId, {
+      requestId: state.command.requestId,
+      sessionScope: state.sessionScope,
+      contextFrame: state.command.payload.contextFrame,
+      ...(state.command.payload.modelPreference !== undefined
+        ? { modelPreference: state.command.payload.modelPreference }
+        : {}),
+    });
 
     try {
       // Cancel/dispose may close the gate during prepare or recall.  Never start
@@ -1168,6 +1180,9 @@ export class ProductKernelRuntime implements AgentRuntime {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    // Mark delegation shutdown before the inner harness goes down so children
+    // whose turns die with the harness settle as cancelled, deterministically.
+    this.delegation.beginDispose();
     // Abort product actions before waiting for active turn operations.  The
     // registry receives this signal and returns a fixed cancelled receipt,
     // allowing dispose to drain without late action writes or speech.
@@ -2082,28 +2097,6 @@ function safeMetadata(value: unknown): string | undefined {
     .replace(/^_+|_+$/gu, "")
     .slice(0, 120);
   return compact.length > 0 ? compact : undefined;
-}
-
-export function contextFrameToTrailSource(frame: ContextFrame): TrailSourceFrame {
-  return {
-    frameId: frame.frameId,
-    capturedAt: frame.capturedAt,
-    expiresAt: frame.expiresAt,
-    frontmostApplication: frame.frontmostApplication,
-    activeWindow: frame.activeWindow,
-    elementUnderCursor: frame.elementUnderCursor,
-    cursor: frame.cursor,
-    screenshots: frame.screenshots.map((s) => ({
-      label: s.label,
-      base64Data: s.base64Data,
-      mediaType: s.mediaType,
-      displayWidthPoints: s.displayWidthPoints,
-      displayHeightPoints: s.displayHeightPoints,
-      screenshotWidthPixels: s.screenshotWidthPixels,
-      screenshotHeightPixels: s.screenshotHeightPixels,
-    })),
-    warnings: frame.warnings,
-  };
 }
 
 function summarizeOutput(output: unknown): unknown {
