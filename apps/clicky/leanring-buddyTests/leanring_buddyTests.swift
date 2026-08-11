@@ -516,6 +516,29 @@ struct leanring_buddyTests {
         #expect(parsed.elementLabel == "新对话")
     }
 
+    @Test func speechTextKeepsVisibleSourcesButDoesNotReadURLs() {
+        let presentationText = """
+        1. Apple 调整了硬件出货。
+        https://www.macrumors.com/2026/08/10/apple-hardware/
+        2. 相机增加来源认证（来源：https://9to5mac.com/example）。
+        3. 详情见 [Apple 开发者新闻](https://developer.apple.com/news/?id=example)。
+        来源：https://developer.apple.com/news/
+        """
+
+        let spoken = CompanionManager.speechText(from: presentationText)
+
+        #expect(presentationText.contains("https://www.macrumors.com"))
+        #expect(!spoken.contains("http"))
+        #expect(!spoken.contains("www."))
+        #expect(spoken.contains("2. 相机增加来源认证。"))
+        #expect(spoken.contains("3. 详情见 Apple 开发者新闻。"))
+        #expect(spoken.hasSuffix("来源链接我放在文字里了。"))
+    }
+
+    @Test func speechTextLeavesOrdinaryRepliesUntouched() {
+        #expect(CompanionManager.speechText(from: "好的，我已经处理完了。") == "好的，我已经处理完了。")
+    }
+
     @Test func directClickWithoutPointUsesOnlyTheShortFailure() async throws {
         #expect(CompanionManager.shouldUseDirectClickFailure(
             transcript: "点击左上角新对话",

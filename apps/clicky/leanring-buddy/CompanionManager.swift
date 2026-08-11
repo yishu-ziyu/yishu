@@ -2176,9 +2176,9 @@ final class CompanionManager: ObservableObject {
     ) async throws {
         try Task.checkCancellation()
 
-        // Every presentation surface consumes the same scrubbed text. This is
-        // intentionally before POINT parsing, history, overlay, and TTS so a
-        // model's XML/tool syntax can never become user-visible speech.
+        // Visual surfaces and history consume the same scrubbed text. TTS
+        // derives a separate readable version later so links remain visible
+        // without being spelled out aloud.
         let safeResponseText = Self.scrubToolMarkup(from: fullResponseText)
         let parseResult = Self.parsePointingCoordinates(from: safeResponseText)
         let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
@@ -2286,11 +2286,12 @@ final class CompanionManager: ObservableObject {
         print("🧠 奕枢 conversation: \(conversationHistory.count) exchanges")
         ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
-        if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let ttsText = Self.speechText(from: spokenText)
+        if !ttsText.isEmpty {
             timing?.mark("tts_start", reason: "speech")
             do {
                 try await elevenLabsTTSClient.speakText(
-                    spokenText,
+                    ttsText,
                     speed: speechSpeed
                 )
                 voiceState = .responding
@@ -2304,6 +2305,48 @@ final class CompanionManager: ObservableObject {
         } else {
             timing?.mark("tts_complete", reason: "skipped_empty")
         }
+    }
+
+    /// Keeps citations in the visual response while making the TTS copy
+    /// conversational. Link-only/source-only lines are omitted, inline
+    /// Markdown links keep their human label, and one short notice replaces
+    /// the spoken URLs.
+    static func speechText(from presentationText: String) -> String {
+        let urlPattern = #"(?i)(?:https?://|www\.)[^\s<>()（）\[\]{}，。！？；、“”‘’]+"#
+        guard presentationText.range(of: urlPattern, options: .regularExpression) != nil else {
+            return presentationText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var readableLines: [String] = []
+        for rawLine in presentationText.components(separatedBy: .newlines) {
+            var line = replacingMatches(
+                in: rawLine,
+                pattern: #"(?i)\[([^\]\n]+)\]\(\s*(?:https?://|www\.)[^)\n]+\)"#,
+                withTemplate: "$1"
+            )
+            line = replacingMatches(
+                in: line,
+                pattern: #"(?i)<\s*(?:https?://|www\.)[^>\s]+\s*>"#
+            )
+            line = replacingMatches(in: line, pattern: urlPattern)
+            line = replacingMatches(
+                in: line,
+                pattern: #"(?i)[（(]\s*(?:来源(?:链接)?|网址|链接|source)\s*[:：]?\s*[）)]"#
+            )
+            line = replacingMatches(
+                in: line,
+                pattern: #"(?i)[ \t（(,，;；-]*(?:来源(?:链接)?|网址|链接|source)\s*[:：]?\s*[）)]?[ \t]*$"#
+            )
+            line = line.trimmingCharacters(
+                in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",，;；-"))
+            )
+            if !line.isEmpty {
+                readableLines.append(line)
+            }
+        }
+
+        readableLines.append("来源链接我放在文字里了。")
+        return readableLines.joined(separator: "\n")
     }
 
     /// Removes model/tool syntax before any user-facing surface consumes the
@@ -2376,7 +2419,8 @@ final class CompanionManager: ObservableObject {
 
     private static func replacingMatches(
         in text: String,
-        pattern: String
+        pattern: String,
+        withTemplate template: String = ""
     ) -> String {
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return text
@@ -2386,7 +2430,7 @@ final class CompanionManager: ObservableObject {
             in: text,
             options: [],
             range: range,
-            withTemplate: ""
+            withTemplate: template
         )
     }
 
