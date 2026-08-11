@@ -1,7 +1,8 @@
-// Spike A — Pi Session Concurrency, Layer 1: Yishu runtime concurrency semantics.
-// Pass criteria A1–A6 are defined in docs/spikes/2026-08-10-delegation-concurrency.md.
-// The fake harness below is copied from pi-runtime-adapter.test.ts so this spike
-// stays self-contained and disposable.
+// Concurrency contract for PiRuntimeAdapter (ADR 0009, RFC v2 §2.1–2.2):
+// one adapter may run independent executions for distinct conversationIds
+// in parallel while sessions, events, cancel, and disposal stay isolated.
+// The fake harness below mirrors pi-runtime-adapter.test.ts and is
+// intentionally self-contained.
 
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -47,7 +48,7 @@ type FakeSessionEvent = {
 
 class FakeAgentSession {
   private static nextId = 0;
-  readonly sessionId = `spike-a-session-${++FakeAgentSession.nextId}`;
+  readonly sessionId = `concurrency-session-${++FakeAgentSession.nextId}`;
   readonly agent: { state: { errorMessage?: string } } = { state: {} };
   readonly promptStarted = deferred();
   abortCount = 0;
@@ -135,7 +136,7 @@ const unusedPort: ComputerUsePort = {
 async function makeAdapter(
   harness: FakeHarness,
 ): Promise<{ adapter: PiRuntimeAdapter; workdir: string }> {
-  const workdir = await mkdtemp(path.join(tmpdir(), "yishu-spike-a-"));
+  const workdir = await mkdtemp(path.join(tmpdir(), "yishu-adapter-concurrency-"));
   const adapter = new PiRuntimeAdapter(workdir, unusedPort, harness.adapterOptions);
   return { adapter, workdir };
 }
@@ -168,7 +169,7 @@ function assertEventOwnership(
   }
 }
 
-test("A1/A2/A3/A5: B starts while A is in flight; sessions, events, completion stay isolated", async (t) => {
+test("concurrent turns keep sessions, events, and completion isolated", async (t) => {
   const harness = createFakeHarness();
   const gateA = deferred();
   const gateB = deferred();
@@ -197,17 +198,17 @@ test("A1/A2/A3/A5: B starts while A is in flight; sessions, events, completion s
   const sessionA = await waitForSessionAt(harness.sessions, 0);
   await sessionA.promptStarted.promise;
 
-  // A1: A has not completed (gateA still pending) — start B now.
+  // A has not completed (gateA still pending) — start B now.
   const turnB = adapter.startTurn(commandB, (event) => eventsB.push(event));
   const sessionB = await waitForSessionAt(harness.sessions, 1);
   await sessionB.promptStarted.promise;
 
-  // A2: distinct session objects and identities.
+  // Distinct session objects and identities.
   assert.equal(harness.sessions.length, 2);
   assert.notEqual(sessionA, sessionB);
   assert.notEqual(sessionA.sessionId, sessionB.sessionId);
 
-  // A5: B completes first, independently of A.
+  // B completes first, independently of A.
   gateB.resolve();
   await turnB;
   const completedB = eventsB.find((event) => event.type === "response.completed");
@@ -227,14 +228,14 @@ test("A1/A2/A3/A5: B starts while A is in flight; sessions, events, completion s
   assert.equal(completedA.requestId, "req-a");
   assert.equal(completedA.payload.text, "reply-from-A");
 
-  // A3: every emitted event belongs to its own requestId; no cross-talk.
+  // Every emitted event belongs to its own requestId; no cross-talk.
   assertEventOwnership(eventsA, "req-a", "A");
   assertEventOwnership(eventsB, "req-b", "B");
   assert.ok(!completedA.payload.text.includes("reply-from-B"));
   assert.ok(!completedB.payload.text.includes("reply-from-A"));
 });
 
-test("A4: cancelTurn(A) cancels A but leaves concurrently running B intact", async (t) => {
+test("cancelling one turn leaves a concurrently running turn intact", async (t) => {
   const harness = createFakeHarness();
   const gateA = deferred();
   const gateB = deferred();
@@ -306,7 +307,7 @@ test("A4: cancelTurn(A) cancels A but leaves concurrently running B intact", asy
   assertEventOwnership(eventsB, "req-b", "B");
 });
 
-test("A6: dispose aborts every in-flight session and stops event flow", async (t) => {
+test("dispose aborts every in-flight session and stops event flow", async (t) => {
   const harness = createFakeHarness();
   const gates: Deferred<void>[] = [];
   harness.adapterOptions.createSession = (async () => {

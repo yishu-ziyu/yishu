@@ -162,4 +162,62 @@ describe("TaskTruthProjector", () => {
       /task_scope_conflict/,
     );
   });
+
+  // Parent-child truth semantics for delegated execution (ADR 0009, RFC v2
+  // §2.6): parentId links child truth to its parent, and a child's terminal
+  // state never propagates into the parent's own TaskTruth.
+  it("keeps parent and child TaskTruth independent across child terminal states", async () => {
+    const store = new InMemoryYishuStore();
+    const projector = new TaskTruthProjector(store);
+
+    await projector.record({ ...base, taskId: "parent-task", title: "main task" });
+    await projector.record({
+      ...base,
+      taskId: "child-task",
+      title: "delegated research",
+      parentId: "parent-task",
+    });
+
+    let tasks = await store.listTasks();
+    const child = tasks.find((task) => task.id === "child-task");
+    assert.equal(child?.status, "running");
+    assert.equal(child?.parentId, "parent-task");
+
+    // Child failure does not fail the parent.
+    await projector.record({
+      ...base,
+      taskId: "child-task",
+      title: "delegated research",
+      kind: "failed",
+      observedAt: "2026-08-08T00:00:05.000Z",
+      evidence: "runtime:turn.failed:event-9",
+    });
+    tasks = await store.listTasks();
+    assert.equal(tasks.find((task) => task.id === "child-task")?.status, "failed");
+    assert.equal(tasks.find((task) => task.id === "parent-task")?.status, "running");
+
+    // Parent can still reach its own terminal state afterwards.
+    await projector.record({
+      ...base,
+      taskId: "parent-task",
+      title: "main task",
+      kind: "verified",
+      observedAt: "2026-08-08T00:00:06.000Z",
+      evidence: "runtime:response.completed:event-10",
+    });
+    tasks = await store.listTasks();
+    assert.equal(tasks.find((task) => task.id === "parent-task")?.status, "done");
+
+    // A late signal against the failed child cannot move its terminal truth.
+    await projector.record({
+      ...base,
+      taskId: "child-task",
+      title: "delegated research",
+      kind: "verified",
+      observedAt: "2026-08-08T00:00:07.000Z",
+      evidence: "runtime:response.completed:event-11",
+    });
+    tasks = await store.listTasks();
+    assert.equal(tasks.find((task) => task.id === "child-task")?.status, "failed");
+  });
 });
