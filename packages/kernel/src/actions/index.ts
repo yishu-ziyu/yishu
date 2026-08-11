@@ -18,3 +18,5 @@ export { createSettleSuggestionAction } from "./settle-suggestion.js";
 export type { SettleSuggestionInput } from "./settle-suggestion.js";
 export { createLearnMindFromPatternAction } from "./learn-mind.js";
 export type { LearnMindInput } from "./learn-mind.js";
+export { createDelegateAction } from "./delegate.js";
+export type { DelegateInput, DelegateResult } from "./delegate.js";
