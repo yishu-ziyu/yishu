@@ -130,3 +130,11 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 - evidence: `apps/clicky/leanring-buddy/BuddyTranscriptionProvider.swift:72` `resolveProvider()`（实例化调用点）、`apps/clicky/leanring-buddy/AssemblyAIStreamingTranscriptionProvider.swift:22` `tokenProxyURL`（模板值 `your-worker-name.your-subdomain.workers.dev`）；`isConfigured` 恒 true（同文件 :27），配置 `VoiceTranscriptionProvider=assemblyai` 即可选择该路径。
 - revisit trigger: 触及语音转写 provider 选择路径，或决定启用 / 移除 AssemblyAI 时。
 - severity: low
+
+## debt-016: Result Inbox 为内存态，重启后丢失
+
+- what: Delegated Execution V1 的 `ResultInbox` 保存在进程内存中；App 重启后，已完成但尚未被 Main turn 消费的 child result 会丢失（TaskTruth 中的任务终态仍在，但结果摘要不会再注入对话）。
+- why deferred: V1 只需证明异步 delegation 语义成立；持久化 inbox 涉及跨重启交付语义与 scheduler crash recovery，属下一阶段。
+- evidence: `packages/runtime/src/delegation.ts` `ResultInbox`（`private readonly entries = new Map<string, DelegatedResult[]>()`，无持久化后端）
+- revisit trigger: 需要跨重启交付结果，或实现 scheduler crash recovery 时。
+- severity: medium
