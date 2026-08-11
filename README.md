@@ -10,7 +10,9 @@
 
 - `apps/clicky`：唯一正式 Clicky 源码、签名产物和安装入口，拥有用户可见的常驻存在、语音、TTS、权限与设置。
 - `apps/macos`：本仓库的开发壳和集成验证面；不得作为第二个常驻产品、登录项或正式安装源。
+- `packages/kernel`：唯一产品核心，拥有对话、记忆、规则、Action、Skill 与 TaskTruth。
 - `packages/runtime`：Pi `AgentRuntime` 适配器和版本化协议。Pi 是执行 harness，产品身份、关系记忆、权限、主动性和任务真相仍由奕枢拥有。
+- `packages/agent-core`：离线实验室，不是第二个产品核心，也不是正式 Clicky 的产品真相源。
 - Kairos：只保留在 Kairos 历史仓库中的旧 bridge 记录；Yishu 不依赖、不回退、不运行 Kairos，也不允许 `KairosBridgeClient`、SSE progress stream、`RunProgressPresenter` 或 `forceKairosRouting` 进入正式路径。
 - Agent Native：只作为 Action 方法论来源，不是 Swift 或 Node 依赖。Yishu 只吸收单一 typed Action、fresh target/observation、执行前 revalidate、结构化 receipt 和可见 read-back；不导入或复制其运行时。
 
@@ -39,11 +41,12 @@
 
 ```bash
 pnpm install
-pnpm test
-pnpm run check
-swift test
-./script/build_and_run.sh --verify # headless; does not show the development flower UI
+pnpm product:check  # Kernel + Runtime + Swift 的日常统一内环
+pnpm product:verify # 再加正式 Clicky Xcode 测试与开发壳打包验证
 ```
+
+完整工作区测试（包括 AgentCore 实验室）仍可运行 `pnpm test && pnpm run check`。
+正式本地 Clicky 构建统一使用 `pnpm product:build:clicky`。
 
 Run the visible development slice without model credentials:
 
@@ -90,15 +93,17 @@ pnpm --filter @yishu/runtime test
 pnpm test
 ```
 
-## Agent-core（奕枢认知与成长内核）
+## AgentCore 实验室
 
-仓库另有可独立运行的 `@yishu/agent-core`（`packages/agent-core`），作为奕枢认知与成长内核的第一版可验证实现和离线验证面。
-它实现 **LLM + 上下文 + 工具** 的 ReAct 循环、沙箱工具、文件记忆、多 Agent、eval 与轨迹落盘；默认离线规则 LLM，不依赖 macOS App，也不是第二个对外产品身份。成熟能力继续进入产品内核，Pi 仍负责底层执行 harness。
+仓库另有可独立运行的 `@yishu/agent-core`（`packages/agent-core`），用于验证 ReAct、
+沙箱工具、多 Agent、eval、轨迹和自我改进等实验。它不是奕枢的产品核心，也不拥有
+正式对话、记忆、任务或关系状态。成熟能力必须迁入 Kernel Action 或 Runtime adapter，
+通过正式 Clicky 验收后才算产品能力。Pi 仍是正式执行 harness。
 
 ```bash
-pnpm agent:test
-pnpm agent:demo
-pnpm agent:eval
+pnpm lab:agent:test
+pnpm lab:agent:demo
+pnpm lab:agent:eval
 pnpm agent -- run "计算 17*19+3"
 ```
 
@@ -109,4 +114,4 @@ pnpm agent -- run "计算 17*19+3"
 - [三分钟试用](docs/agent-book/TRY_ME.md)
 - [v0-agent-book-harness 验收](docs/acceptance/v0-agent-book-harness.md)
 
-See [Product kernel](docs/product-kernel.md), [Architecture](docs/architecture.md), [Clicky integration](docs/clicky-integration.md), [persona contract](docs/persona.md), [Clicky presence research](docs/research/clicky-presence.md), and [vertical-slice acceptance](docs/acceptance/v0-context-voice.md).
+See [Unified product spine](docs/decisions/0010-unified-product-spine.md), [Product kernel](docs/product-kernel.md), [Architecture](docs/architecture.md), [Clicky integration](docs/clicky-integration.md), [persona contract](docs/persona.md), [Clicky presence research](docs/research/clicky-presence.md), and [vertical-slice acceptance](docs/acceptance/v0-context-voice.md).
