@@ -159,3 +159,146 @@ Layer 2（real Pi，探测日志 `.work/spike-a-l2-log.txt`，2026-08-11T03:04Z�
 - `.work/spike-a-real-pi-probe.mjs`、`.work/spike-a-l2-log.txt` → **disposable experiment**（`.work` 本就不入库；probe 脚本仅作下次真实验证的参考模板）。
 - `docs/spikes/2026-08-10-delegation-concurrency.md` → **保留**（research 类知识，Status 转 historical，As-of 2026-08-10）。
 - 无 production-worthy code：本轮没有改动任何 `src/`。
+
+第二轮（D/E/F）补充：
+
+- `packages/kernel/test/spike-d-capsule-handoff.test.ts` → **部分 reusable**。D3/D4/D5（bannedKeys 硬拒、字段丢弃）与 D8（深拷贝隔离）值得并入正式 kernel 测试；`handoffReceive` 的 expiry 检查是 disposable 胶水，但其揭示的"kernel 无内建 expiry 执行点"必须在产品 handoff 设计中回答。
+- `packages/runtime/test/spike-e-desktop-cell.test.ts` → **disposable experiment**（`ResourceLease` 是 spike 最小实现；产品 lease 需要正式的宿主与生命周期设计）。E1–E5 的语义断言可作为产品 lease 实现后的验收清单复用。
+- `packages/kernel/test/spike-f-result-reentry.test.ts` → **部分 reusable**。F3/F6（active turn 不被 result 抢占）与 F5（单次 consume）是正式 inbox 实现后的关键验收；spike 的 `ResultInbox` / `delegate` 胶水 disposable。
+- `docs/research/delegation-rfc.md` → **保留**（research 类，RFC v2 为当前设计基准）。
+- 两轮累计：仍无 production-worthy code；`src/` 零改动。
+
+---
+
+# 第二轮（2026-08-11）：Spike D / E / F
+
+输入：RFC v2（docs/research/delegation-rfc.md）。同样先写标准再写代码。
+
+## Spike D — ContextCapsule Handoff
+
+### Question
+
+Main Agent 能否把现有 `ContextCapsule` 作为最小、受控上下文交给独立 Child execution，而不复制完整 conversation？
+
+### Hypothesis
+
+1. `buildContextCapsule` 输出字段有限（intent / app / window / AX / projectHint / recentTrail 窗口），天然是最小上下文。
+2. capsule 无 conversation turns 字段，handoff 不会复制完整 history。
+3. screenshot bytes / credentials / hidden reasoning 已有三道防线：`buildContextCapsule` 不包含、`parseContextCapsule` 的 bannedKeys 硬拒、`sanitizePortableText` 消毒。
+4. capsule 本身不携带 SessionScope；handoff envelope 需显式携带 scope，child 以此 scope 写 TaskTruth 时与 parent 一致。
+5. **反假设**：`expiresAt` 字段存在但 kernel 内没有强制执行点——expiry 执行需要 handoff 边界的显式检查，当前可能不成立。
+6. serialize → parse 是深拷贝投影，child 改自己的副本不会污染 Main 的 trail/frame。
+
+### Experiment
+
+deterministic child task：child 收到 capsule（经 serialize/parse 边界 + 最小 handoff 检查）后，仅根据 capsule 字段回答预设问题。对照组：过期 capsule、手工注入 bannedKeys 的 capsule、错 scope 的 TaskTruth 写入。
+
+### Pass Criteria
+
+- D1：child 仅凭 capsule 字段完成 deterministic task（intent/app/window/AX 摘要足够）。
+- D2：capsule 不含 conversation turns；recentTrail 只含 recentMinutes 窗口（构造跨 1 小时的 trail，仅 5 分钟内条目进入）。
+- D3：capsule 无 `base64Data`；手工注入的 capsule 被 `parseContextCapsule` 硬拒。
+- D4：含 credential 样式的输入被消毒或拒绝；手工注入 `apiKey`/`accessToken` 字段被硬拒。
+- D5：手工注入 `chainOfThought`/`systemPrompt` 被硬拒。
+- D6：handoff envelope 携带的 SessionScope 使 child 的 TaskTruth 写入与 parent 同 scope；不同 scope 写入同 taskId 被 `task_scope_conflict` 拒绝。
+- D7：过期 capsule 在 handoff 边界被拒绝（若 kernel 无内建执行点，如实记录并由 spike 胶水实现最小检查）。
+- D8：child 修改自己 capsule 副本后，Main 的 trail entries / frame 原值不变。
+
+### Observation
+
+测试 `packages/kernel/test/spike-d-capsule-handoff.test.ts`，kernel 116/116 全绿（当时）：
+
+- Fact: deterministic child 仅凭 capsule 字段（userIntent / frontmostApp / axElement / selectedText / projectHint）完成预设任务。
+- Fact: 跨 1 小时的 6 条 trail 中，仅 5 分钟窗口内的 2 条进入 capsule；capsule 无 turns / conversation 字段。
+- Fact: 序列化后的 handoff 不含 `base64Data`；手工注入 `base64Data` / `apiKey` / `accessToken` / `password` / `chainOfThought` / `systemPrompt` 的 capsule 全部被 `parseContextCapsule` 硬拒；`serializeContextCapsule` 丢弃手造对象的未知字段。
+- Fact: handoff envelope 携带的 project scope 使 child 写入与 parent 同 scope 的 TaskTruth 成功；异 scope 写入同 taskId 被 `task_scope_conflict` 拒绝。
+- Fact: **kernel 内没有 expiry 强制执行点**——`parseContextCapsule` 只验证结构，不检查 `expiresAt`。过期拒绝由 spike 胶水（`handoffReceive`）在 handoff 边界实现。这正是 Hypothesis 5 的反假设，被证实。
+- Fact: child 把副本的 userIntent 改写、trail 清空、app 改名后，Main 的 trail entries / frame / 原 capsule 实例全部不变（serialize→parse 是深拷贝投影）。
+
+### Decision
+
+- Hypothesis 1–4、6：**证实**。Hypothesis 5（反假设）：**证实**——`expiresAt` 只是数据字段，expiry 执行是 handoff 边界的责任，kernel 当前不提供执行点。产品实现时，expiry 检查必须成为 handoff 接收路径的显式步骤，不能依赖 parse。
+- 结论：现有 `ContextCapsule` 可直接作为 child 的最小受控上下文；handoff envelope = `{ capsule, sessionScope }`（scope 不进 capsule 本体）。
+
+## Spike E — Exclusive Desktop Cell
+
+### Question
+
+两个独立任务都请求真实 macOS Desktop 时，系统能否确保同一时间只有一个任务拥有执行权？
+
+### Hypothesis
+
+1. 单 coordinator process 内，一个带 token/epoch 的最小 lease 即可保证互斥，无需 distributed lease。
+2. owner 的 cancel/failed 路径都能释放 lease（终结即释放）。
+3. 迟到的 stale release（旧 token）无法释放新 owner 的 lease。
+4. lease 按资源命名（"desktop" 与其他 cell 独立），后台任务持有非 Desktop cell 不阻塞 Main 的 Desktop acquire。
+
+### Experiment
+
+spike 内实现最小 disposable `ResourceLease`（单进程、内存态、token 防 stale）。desktop action 用计数 fake port 守门：无 lease 不得执行。
+
+### Pass Criteria
+
+- E1：A 持有 Desktop 时 B acquire → B 为 queued/blocked，且 B 的 desktop action 调用计数为 0。
+- E2：A cancel → lease 释放 → B acquire 成功并可执行。
+- E3：A failed → lease 释放。
+- E4：lease 易主后，A 的迟到 release（旧 token）不影响 B 的持有。
+- E5：后台任务持有非 Desktop cell（如 "research"）时，Main 的 Desktop acquire 不受阻塞。
+
+### Observation
+
+测试 `packages/runtime/test/spike-e-desktop-cell.test.ts`，runtime 147/147 全绿（当时）：
+
+- Fact: A 持有 desktop 时 B 的 `acquire` 返回 `{ granted: false }`，B 无 token 的 `perform` 被拒且 `desktop.executed` 中无 B 的记录（E1）。
+- Fact: A cancel → `forceRelease(desktop, task-A)` 后 B acquire 成功并执行（E2）；failed 路径同样释放（E3）。
+- Fact: 易主后 A 持旧 token 的 `release` 返回 false，B 仍是 owner 且 `holds` 为 true（E4）。
+- Fact: 后台任务持有 "research" cell 时，Main 的 desktop acquire 立即成功（E5）。
+- Fact: 全部互斥逻辑是单进程内存态 + token 匹配，约 40 行，无分布式设施。
+
+### Decision
+
+- Hypothesis 1–4：**全部证实**。
+- 结论：单 coordinator process 下，token 防 stale 的最小 lease 足以保证 Desktop 互斥语义；cancel/failed 统一走 coordinator `forceRelease`（owner 已终结，不能依赖其自愿释放）。产品实现时，desktop action 执行路径必须先过 lease 守门，lease 本身可以是 kernel 或 runtime 的单例协调器。
+- 未验证（保持 unknown）：真实 Pi 并发 desktop 执行时的 OS 层互斥（本 spike 只验证 lease 语义层）；lease 超时与死 owner 检测；跨进程 worker 持有 lease 的模型。
+
+## Spike F — Result Re-entry
+
+### Question
+
+Child task 完成后，结果如何安全重新进入 Main Agent，而不抢占用户当前 interaction？
+
+### Hypothesis
+
+1. payload-only Result Inbox（条目关联 taskId/parentId，无 status 字段）足以承载 re-entry。
+2. result envelope（succeeded/failed/cancelled）描述的是 result 的性质，不构成第二套 task status。
+3. inbox 写入与 Main 当前 turn 完全解耦：active turn 的上下文不被修改、不被中断。
+4. Main 在显式 presentation point consume；consume 是一次性的。
+
+### Experiment
+
+沿用 Spike B 的 fake worker/scheduler。Main 侧模拟一个 active turn（持有 turn 上下文对象），child 在其间完成。断言 turn 上下文 deep-equal 不变；turn 结束（presentation point）后 Main consume。
+
+### Pass Criteria
+
+- F1：inbox 条目可通过 taskId 检索，且携带 parentId。
+- F2：条目无 status 字段；TaskTruth 仍是唯一 status 真相。
+- F3：result 到达前后，Main active turn 的上下文对象 deep-equal。
+- F4：Main 未 consume 时 result 留在 inbox；显式 consume 才取出。
+- F5：同一 taskId 第二次 consume 返回空。
+- F6：Main active turn 期间 child 完成只写 inbox，无任何对 turn 的注入/中断。
+- F7：failed / cancelled 的 child 产生明确 result envelope（`{kind:"failed",error}` / `{kind:"cancelled"}`），可正常 consume。
+
+### Observation
+
+测试 `packages/kernel/test/spike-f-result-reentry.test.ts`，kernel 118/118 全绿：
+
+- Fact: Main active turn 进行中 child 完成，turn 上下文对象（draft / pendingToolCalls / consumePointOpen）与快照 deep-equal，无任何 mutation 或中断（F3/F6）。
+- Fact: inbox 条目按 taskId 检索并携带 parentId；条目无 status 字段（F1/F2）；TaskTruth 中 child 为 done，与 inbox 互不复制。
+- Fact: 未 consume 时 result 留在 inbox；presentation point 打开后显式 consume 取出；第二次 consume 返回 undefined（F4/F5）。
+- Fact: failed / cancelled child 分别产生 `{kind:"failed",error}` / `{kind:"cancelled"}` envelope，均可正常 consume；对应 TaskTruth 为 failed / cancelled；Main 的 TaskTruth 保持 running（F7）。
+
+### Decision
+
+- Hypothesis 1–4：**全部证实**。
+- 结论：payload-only inbox + result envelope 语义成立；envelope 的 kind 描述 result 性质，不构成第二套 task status。re-entry 的安全模型是"child 只写 inbox，Main 在 presentation point 显式一次性 consume"——proactive notification 系统不需要为 V1 存在。
+- 未验证（保持 unknown）：result 在 Main 下一 turn 的注入形式（context 摘要 vs 原文）；inbox 的持久化与重启恢复；多 child 同时完成的 consume 顺序策略。
