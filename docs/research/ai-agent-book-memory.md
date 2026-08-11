@@ -1,5 +1,9 @@
 # 《AI Agent Book》Memory 系统证据报告
 
+Type: research
+Status: historical
+As-of: 2026-08-09
+
 > 目的：用本机原始书稿与配套代码回答“记忆到底如何搭建”，并给出可映射到 Yishu 的系统模型。
 >
 > 证据标签：

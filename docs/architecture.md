@@ -1,5 +1,10 @@
 # Architecture
 
+Type: architecture
+Status: current
+Verified: 21629d6 2026-08-10
+Review: apps/ 或 packages/ 结构、ownership、数据流变化时
+
 ```text
                     Yishu single macOS application
        apps/clicky - formal Clicky source and install source

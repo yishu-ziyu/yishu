@@ -1,5 +1,9 @@
 # 奕枢统一主链：P1 验收与风险矩阵（最终验收）
 
+Type: research
+Status: historical
+As-of: 2026-08-09
+
 > 审计范围：当前本地工作树的 `packages/kernel`、`packages/runtime` 和
 > `apps/clicky`。本文保留 P1 主链结论，并追加 P1.1 的项目/私密会话作用域
 > 验收；结论依据当前共享树的测试、Xcode 和启动验收。

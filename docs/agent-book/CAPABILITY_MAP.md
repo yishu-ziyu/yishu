@@ -1,5 +1,10 @@
 # AI Agent Book × 奕枢能力对照
 
+Type: architecture
+Status: current
+Verified: 21629d6 2026-08-10
+Review: agent-core 能力对照变化时
+
 本书（《深入理解 AI Agent》，bojieli/ai-agent-book）与本仓库的对照。
 书讲通用 Agent 公式与工程；奕枢是个人桌面 Agent Super App。
 本表只写**现在磁盘上有什么**，以 `packages/agent-core/src/**/*.ts`、`packages/runtime/src/agent-core-runtime.ts`、`packages/agent-core/test/*.ts` 为准。

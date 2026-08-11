@@ -1,5 +1,9 @@
 # V0 验收：AI Agent Book 最小 Harness（agent-core）
 
+Type: acceptance
+Status: historical
+As-of: 2026-08-06
+
 ## 切片名称
 
 `v0-agent-book-harness`
