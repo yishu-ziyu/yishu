@@ -598,6 +598,93 @@ struct leanring_buddyTests {
         #expect(!YishuAgentRuntimeClient.isValidScreenPayloadValue("2"))
     }
 
+    @Test @MainActor func delegatedTaskPresenceStrictlyDecodesAndProjectsRuntimeTruth() {
+        let taskId = UUID()
+        let parentId = UUID()
+        let conversationId = UUID()
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        var raw: [String: Any] = [
+            "schemaVersion": 1,
+            "type": "task.presence.updated",
+            "eventId": UUID().uuidString,
+            "requestId": parentId.uuidString,
+            "traceId": UUID().uuidString,
+            "conversationId": conversationId.uuidString,
+            "payload": [
+                "taskId": taskId.uuidString,
+                "parentId": parentId.uuidString,
+                "mainConversationId": conversationId.uuidString,
+                "title": "研究 Agent Presence",
+                "status": "running",
+                "createdAt": timestamp,
+                "updatedAt": timestamp,
+                "provider": "openai-codex",
+                "model": "gpt-5.6-terra",
+            ],
+        ]
+
+        let running = YishuDelegatedTaskPresenceEvent.decode(raw)
+        #expect(running?.id == taskId)
+        #expect(running?.status == .running)
+        #expect(running?.workerLabel == "Research · Terra")
+
+        let client = YishuAgentRuntimeClient()
+        var dispatched: YishuDelegatedTaskPresenceEvent?
+        client.onDelegatedTaskPresenceEvent = { dispatched = $0 }
+        client.dispatchRuntimeEventForTests(raw)
+        #expect(dispatched?.id == taskId)
+
+        let viewModel = AgentPresenceViewModel()
+        if let running { viewModel.apply(running) }
+        #expect(viewModel.tasks.count == 1)
+        #expect(viewModel.tasks.first?.status == .running)
+
+        var terminalPayload = raw["payload"] as! [String: Any]
+        terminalPayload["status"] = "done"
+        terminalPayload["resultKind"] = "completed"
+        terminalPayload["summary"] = "找到三个可执行结论。"
+        raw["payload"] = terminalPayload
+        let completed = YishuDelegatedTaskPresenceEvent.decode(raw)
+        if let completed { viewModel.apply(completed) }
+        #expect(viewModel.tasks.first?.status == .done)
+        #expect(viewModel.tasks.first?.summary == "找到三个可执行结论。")
+
+        viewModel.acknowledge(taskId)
+        #expect(viewModel.tasks.isEmpty)
+    }
+
+    @Test @MainActor func delegatedTaskPresenceRejectsCrossConversationAndIncompleteTerminalEvents() {
+        let taskId = UUID()
+        let parentId = UUID()
+        let conversationId = UUID()
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        var base: [String: Any] = [
+            "schemaVersion": 1,
+            "type": "task.presence.updated",
+            "eventId": UUID().uuidString,
+            "requestId": parentId.uuidString,
+            "traceId": UUID().uuidString,
+            "conversationId": conversationId.uuidString,
+            "payload": [
+                "taskId": taskId.uuidString,
+                "parentId": parentId.uuidString,
+                "mainConversationId": conversationId.uuidString,
+                "title": "不应进入 UI",
+                "status": "done",
+                "createdAt": timestamp,
+                "updatedAt": timestamp,
+            ],
+        ]
+        #expect(YishuDelegatedTaskPresenceEvent.decode(base) == nil)
+
+        var mismatchedPayload = base["payload"] as! [String: Any]
+        mismatchedPayload["mainConversationId"] = UUID().uuidString
+        mismatchedPayload["resultKind"] = "completed"
+        mismatchedPayload["summary"] = "不应进入 UI"
+        base["payload"] = mismatchedPayload
+        #expect(YishuDelegatedTaskPresenceEvent.decode(base) == nil)
+    }
+
     @Test @MainActor func runtimeProcessDeathEndsPendingHistoryWithoutWaitingTimeout() async throws {
         let client = YishuAgentRuntimeClient()
         let parked = await client.parkHistoryListWaitForTests()

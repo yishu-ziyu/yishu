@@ -296,6 +296,20 @@ export const turnCancelCommandSchema = z.object({
   payload: z.object({ reason: z.string().trim().min(1).optional() }),
 });
 
+/** Cancel one running delegated child owned by the current Main conversation. */
+export const delegatedTaskCancelCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("task.cancel"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    taskId: z.string().uuid(),
+    mainConversationId: conversationIdSchema,
+    reason: z.string().trim().min(1).max(80).optional(),
+  }),
+});
+
 export const computerActionResultCommandSchema = z.object({
   schemaVersion: z.literal(PROTOCOL_VERSION),
   type: z.literal("computer.action.result"),
@@ -466,6 +480,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   turnStartCommandSchema,
   turnSteerCommandSchema,
   turnCancelCommandSchema,
+  delegatedTaskCancelCommandSchema,
   computerActionResultCommandSchema,
   runtimePingCommandSchema,
   trailObserveCommandSchema,
@@ -490,6 +505,7 @@ export type { AuthModelPreference };
 export type TurnStartCommand = z.infer<typeof turnStartCommandSchema>;
 export type TurnSteerCommand = z.infer<typeof turnSteerCommandSchema>;
 export type TurnCancelCommand = z.infer<typeof turnCancelCommandSchema>;
+export type DelegatedTaskCancelCommand = z.infer<typeof delegatedTaskCancelCommandSchema>;
 export type ComputerAction = z.infer<typeof computerActionSchema>;
 export type ComputerActionStatus = z.infer<typeof computerActionStatusSchema>;
 export type ComputerActionMethod = z.infer<typeof computerActionMethodSchema>;
@@ -528,6 +544,7 @@ export type RuntimeEventType =
   | "response.completed"
   | "turn.cancelled"
   | "turn.failed"
+  | "task.presence.updated"
   | "runtime.error"
   | "trail.appended"
   | "trail.skipped"

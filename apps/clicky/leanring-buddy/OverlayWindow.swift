@@ -114,6 +114,7 @@ struct BlueCursorView: View {
     let isFirstAppearance: Bool
     @ObservedObject var companionManager: CompanionManager
     @ObservedObject var responseOverlayViewModel: CompanionResponseOverlayViewModel
+    @ObservedObject var agentPresenceViewModel: AgentPresenceViewModel
 
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
@@ -123,6 +124,7 @@ struct BlueCursorView: View {
         self.isFirstAppearance = isFirstAppearance
         self.companionManager = companionManager
         self.responseOverlayViewModel = companionManager.responseOverlayViewModel
+        self.agentPresenceViewModel = companionManager.agentPresenceViewModel
 
         // Seed the cursor position from the current mouse location so the
         // buddy doesn't flash at (0,0) before onAppear fires.
@@ -361,6 +363,7 @@ struct BlueCursorView: View {
                         && (companionManager.voiceState == .idle
                             || companionManager.voiceState == .responding
                             || responseOverlayViewModel.isShowingResponse)
+                        && !agentPresenceViewModel.hasTasks
                         ? cursorOpacity
                         : 0
                 )

@@ -24,7 +24,7 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { wrapUntrustedContent } from "@yishu/agent-core";
-import type { SessionScope, YishuKernel } from "@yishu/kernel";
+import type { SessionScope, TaskTruth, YishuKernel } from "@yishu/kernel";
 import {
   buildContextCapsule,
   parseContextCapsule,
@@ -34,8 +34,10 @@ import {
 import type { SessionToolPolicy } from "./pi-runtime-adapter.js";
 import type {
   ContextFrame,
+  DelegatedTaskCancelCommand,
   ModelPreference,
   RuntimeEvent,
+  TurnCancelCommand,
   TurnStartCommand,
 } from "./protocol.js";
 import { PROTOCOL_VERSION, turnStartCommandSchema } from "./protocol.js";
@@ -53,6 +55,21 @@ export interface DelegatedResult {
   /** Bounded, sanitized, user-presentable summary. */
   summary: string;
   completedAt: string;
+}
+
+/** A transport-only projection of product-owned TaskTruth for Clicky. */
+export interface DelegatedTaskPresenceUpdate {
+  taskId: string;
+  parentId: string;
+  mainConversationId: string;
+  title: string;
+  status: TaskTruth["status"];
+  createdAt: string;
+  updatedAt: string;
+  provider?: string;
+  model?: string;
+  resultKind?: DelegatedResultKind;
+  summary?: string;
 }
 
 const MAX_RESULT_SUMMARY = 500;
@@ -140,7 +157,30 @@ export interface DelegationCoordinatorDeps {
   kernel: YishuKernel;
   /** Execute a turn on the shared execution harness (the inner runtime). */
   executeTurn: (command: TurnStartCommand, emit: (event: RuntimeEvent) => void) => Promise<void>;
+  /** Cancel one child turn on that same harness. */
+  cancelTurn: (command: TurnCancelCommand, emit: (event: RuntimeEvent) => void) => Promise<void>;
   now?: () => Date;
+}
+
+interface ChildExecutionInput {
+  taskId: string;
+  title: string;
+  serializedCapsule: string;
+  sessionScope: SessionScope;
+  parentId: string;
+  mainConversationId: string;
+  childConversationId: string;
+  createdAt: string;
+  modelPreference?: ModelPreference;
+}
+
+interface RunningChild {
+  input: ChildExecutionInput;
+  requestId?: string;
+  traceId?: string;
+  executionStarted: boolean;
+  cancellationRequested: boolean;
+  settled: boolean;
 }
 
 /**
@@ -149,18 +189,26 @@ export interface DelegationCoordinatorDeps {
 export class DelegationCoordinator {
   private readonly kernel: YishuKernel;
   private readonly executeTurn: DelegationCoordinatorDeps["executeTurn"];
+  private readonly cancelTurn: DelegationCoordinatorDeps["cancelTurn"];
   private readonly now: () => Date;
   readonly inbox = new ResultInbox();
   private readonly mainTurns = new Map<string, MainTurnHandle>();
   /** Runtime-owned child identity: child conversationId -> taskId. */
   private readonly childConversations = new Map<string, string>();
   private readonly runningChildren = new Set<Promise<void>>();
+  private readonly runningChildrenByTaskId = new Map<string, RunningChild>();
+  private presenceSink: ((update: DelegatedTaskPresenceUpdate) => void) | undefined;
   private disposing = false;
 
   constructor(deps: DelegationCoordinatorDeps) {
     this.kernel = deps.kernel;
     this.executeTurn = deps.executeTurn;
+    this.cancelTurn = deps.cancelTurn;
     this.now = deps.now ?? (() => new Date());
+  }
+
+  setPresenceSink(sink?: (update: DelegatedTaskPresenceUpdate) => void): void {
+    this.presenceSink = sink;
   }
 
   /** Register the active Main turn so the delegate tool can link parentage. */
@@ -176,6 +224,29 @@ export class DelegationCoordinator {
   /** Results consumed by the next Main turn's prompt assembly. */
   consumeForTurn(conversationId: string): DelegatedResult[] {
     return this.inbox.consume(conversationId);
+  }
+
+  /** Cancel a running child without confusing its task id with a turn id. */
+  async cancelDelegatedTask(command: DelegatedTaskCancelCommand): Promise<boolean> {
+    const child = this.runningChildrenByTaskId.get(command.payload.taskId);
+    if (!child || child.input.mainConversationId !== command.payload.mainConversationId) {
+      return false;
+    }
+    if (child.settled) return false;
+    if (child.cancellationRequested) return true;
+    child.cancellationRequested = true;
+
+    if (!child.executionStarted || !child.requestId || !child.traceId) return true;
+    await this.cancelTurn({
+      schemaVersion: PROTOCOL_VERSION,
+      type: "turn.cancel",
+      requestId: child.requestId,
+      traceId: child.traceId,
+      sentAt: this.now().toISOString(),
+      payload: { reason: command.payload.reason ?? "user_cancelled_delegation" },
+    }, () => undefined);
+    await this.settleChild(child.input, "cancelled", "用户已停止这项任务。");
+    return true;
   }
 
   /**
@@ -204,6 +275,8 @@ export class DelegationCoordinator {
     await Promise.allSettled([...this.runningChildren]);
     this.mainTurns.clear();
     this.childConversations.clear();
+    this.runningChildrenByTaskId.clear();
+    this.presenceSink = undefined;
   }
 
   private createDelegateTool(conversationId: string): ToolDefinition {
@@ -283,6 +356,7 @@ export class DelegationCoordinator {
     });
     const serializedCapsule = serializeContextCapsule(capsule);
 
+    const acceptedAt = this.now();
     const receipt = await this.kernel.registry.invoke("delegate", {
       caller: "pi",
       input: {
@@ -290,27 +364,44 @@ export class DelegationCoordinator {
         parentId: input.mainTurn.requestId,
         sessionScope: input.mainTurn.sessionScope,
       },
-      now: this.now(),
+      now: acceptedAt,
     });
     if (receipt.status !== "ok" || !receipt.output) {
       throw new Error(receipt.message ?? "delegate action failed");
     }
     const output = receipt.output as { accepted: true; taskId: string };
 
-    const childInput = {
+    await this.kernel.taskTruth.flush(output.taskId);
+    const taskTruth = (await this.kernel.store.listTasks()).find(
+      (task) => task.id === output.taskId,
+    );
+    if (!taskTruth) throw new Error("delegate task truth was not persisted");
+
+    const childInput: ChildExecutionInput = {
       taskId: output.taskId,
-      title: input.title,
+      title: taskTruth.title,
       serializedCapsule,
       sessionScope: input.mainTurn.sessionScope,
-      parentId: input.mainTurn.requestId,
+      parentId: taskTruth.parentId ?? input.mainTurn.requestId,
       mainConversationId: input.mainConversationId,
       childConversationId: randomUUID(),
+      createdAt: taskTruth.createdAt,
       ...(input.mainTurn.modelPreference !== undefined
         ? { modelPreference: input.mainTurn.modelPreference }
         : {}),
     };
     // Runtime-owned child identity, registered before the session can exist.
     this.childConversations.set(childInput.childConversationId, childInput.taskId);
+    this.runningChildrenByTaskId.set(childInput.taskId, {
+      input: childInput,
+      executionStarted: false,
+      cancellationRequested: false,
+      settled: false,
+    });
+    this.emitPresence({
+      ...this.presenceBase(taskTruth, childInput),
+      status: taskTruth.status,
+    });
 
     // runChild is designed to never reject; the catch is a final guarantee
     // that no delegation can produce an unhandled rejection or leave the
@@ -319,7 +410,10 @@ export class DelegationCoordinator {
       this.settleChild(childInput, "failed", "unexpected delegation error")
     );
     this.runningChildren.add(childPromise);
-    void childPromise.finally(() => this.runningChildren.delete(childPromise));
+    void childPromise.finally(() => {
+      this.runningChildren.delete(childPromise);
+      this.runningChildrenByTaskId.delete(childInput.taskId);
+    });
 
     return { accepted: true, taskId: output.taskId };
   }
@@ -329,25 +423,29 @@ export class DelegationCoordinator {
    * (the verified isolation path of Spike A), then translate the outcome into
    * TaskTruth + a payload-only inbox entry. This method must never reject.
    */
-  private async runChild(input: {
-    taskId: string;
-    title: string;
-    serializedCapsule: string;
-    sessionScope: SessionScope;
-    parentId: string;
-    mainConversationId: string;
-    childConversationId: string;
-    modelPreference?: ModelPreference;
-  }): Promise<void> {
+  private async runChild(input: ChildExecutionInput): Promise<void> {
     let terminal: { kind: DelegatedTerminalKind; summary: string };
     try {
       // Receiver side of the handoff: parse (structural + banned-payload
       // checks), then enforce expiry — the sender's object is never trusted.
       const capsule = parseContextCapsule(input.serializedCapsule);
-      if (Date.parse(capsule.expiresAt) <= this.now().getTime()) {
+      const runningChild = this.runningChildrenByTaskId.get(input.taskId);
+      if (runningChild?.cancellationRequested) {
+        terminal = { kind: "cancelled", summary: "用户已停止这项任务。" };
+      } else if (Date.parse(capsule.expiresAt) <= this.now().getTime()) {
         terminal = { kind: "failed", summary: "handoff capsule expired before execution" };
       } else {
         const command = this.buildChildCommand(input);
+        if (runningChild) {
+          runningChild.requestId = command.requestId;
+          runningChild.traceId = command.traceId;
+          runningChild.executionStarted = true;
+        }
+        if (runningChild?.cancellationRequested) {
+          terminal = { kind: "cancelled", summary: "用户已停止这项任务。" };
+          await this.settleChild(input, terminal.kind, terminal.summary);
+          return;
+        }
         let observed: { kind: DelegatedTerminalKind; summary: string } | undefined;
         await this.executeTurn(command, (event) => {
           const ordinaryKind = terminalTaskProgressKindFor(event);
@@ -388,20 +486,19 @@ export class DelegationCoordinator {
   }
 
   private async settleChild(
-    input: {
-      taskId: string;
-      title: string;
-      parentId: string;
-      mainConversationId: string;
-      sessionScope: SessionScope;
-    },
+    input: ChildExecutionInput,
     kind: DelegatedTerminalKind,
     rawSummary: string,
   ): Promise<void> {
+    const runningChild = this.runningChildrenByTaskId.get(input.taskId);
+    if (runningChild?.settled) return;
+    if (runningChild) runningChild.settled = true;
+
     const observedAt = this.now().toISOString();
     const summary = boundedResultSummary(rawSummary).summary || `[${RESULT_KIND_FOR[kind]}]`;
+    let projected: TaskTruth | null;
     try {
-      await this.kernel.taskTruth.record({
+      projected = await this.kernel.taskTruth.record({
         taskId: input.taskId,
         title: input.title,
         kind,
@@ -415,12 +512,22 @@ export class DelegationCoordinator {
       // must not silently pretend the task settled — drop the inbox entry.
       return;
     }
-    this.inbox.put(input.mainConversationId, {
+    if (!projected) {
+      return;
+    }
+    const result: DelegatedResult = {
       taskId: input.taskId,
       parentId: input.parentId,
       resultKind: RESULT_KIND_FOR[kind],
       summary,
       completedAt: observedAt,
+    };
+    this.inbox.put(input.mainConversationId, result);
+    this.emitPresence({
+      ...this.presenceBase(projected, input),
+      status: projected.status,
+      resultKind: result.resultKind,
+      summary: result.summary,
     });
   }
 
@@ -485,6 +592,34 @@ export class DelegationCoordinator {
     };
     // Delegated commands cross the same wire contract as client commands.
     return turnStartCommandSchema.parse(command);
+  }
+
+  private presenceBase(
+    task: TaskTruth,
+    input: ChildExecutionInput,
+  ): Omit<DelegatedTaskPresenceUpdate, "status" | "resultKind" | "summary"> {
+    return {
+      taskId: task.id,
+      parentId: task.parentId ?? input.parentId,
+      mainConversationId: input.mainConversationId,
+      title: task.title,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      ...(input.modelPreference
+        ? {
+            provider: input.modelPreference.provider,
+            model: input.modelPreference.model,
+          }
+        : {}),
+    };
+  }
+
+  private emitPresence(update: DelegatedTaskPresenceUpdate): void {
+    try {
+      this.presenceSink?.(update);
+    } catch {
+      // Presence is a projection only. UI transport failure must not alter task execution.
+    }
   }
 }
 
