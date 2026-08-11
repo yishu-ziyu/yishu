@@ -2,7 +2,7 @@
 
 Type: debt
 Status: current
-Verified: 21629d6 2026-08-10
+Verified: 2cfddf1 2026-08-11
 Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 使用规则：
@@ -81,14 +81,6 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 - why deferred: 接入 workspace 需处理其独立依赖与 CI 顺序，待排期。
 - evidence: `apps/clicky/worker/`、`pnpm-workspace.yaml:1-2`
 - revisit trigger: worker 逻辑变更或 voice proxy 路径演进时。
-- severity: medium
-
-## debt-010: clicky xcodebuild 测试未接入 CI
-
-- what: CI 的 `swift test` 只覆盖 `apps/macos`；`apps/clicky` 的 xcodebuild 测试无 CI 守护。
-- why deferred: xcodebuild 测试需签名身份与更长时长，接入成本高。
-- evidence: `.github/workflows/ci.yml`（install → check → build → test → swift test）
-- revisit trigger: clicky 侧出现回归逃逸，或 CI 时长预算放宽时。
 - severity: medium
 
 ## debt-011: cancelTurn 对不存在 requestId 也发 turn.cancelled

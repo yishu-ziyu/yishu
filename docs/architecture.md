@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: 607688d 2026-08-11
+Verified: 2cfddf1 2026-08-11
 Review: apps/ 或 packages/ 结构、ownership、数据流变化时
 
 ```text
