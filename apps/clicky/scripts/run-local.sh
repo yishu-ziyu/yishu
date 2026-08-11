@@ -79,7 +79,6 @@ bundle_yishu_runtime() {
     # unrelated packages; the root recursive build must not make this app's
     # bundle depend on them. Runtime depends on @yishu/kernel for product
     # actions / ContextTrail / SQLite store.
-    pnpm --filter @yishu/agent-core build
     pnpm --filter @yishu/kernel build
     pnpm --filter @yishu/runtime build
     pnpm --filter=@yishu/runtime deploy --prod --legacy "$runtime_deploy"
@@ -90,6 +89,9 @@ bundle_yishu_runtime() {
   # deep traversal, so remove only that exact generated link.
   rm -f -- "$runtime_deploy/node_modules/.pnpm/node_modules/@yishu/runtime"
 
+  # Xcode may reuse the existing app bundle. Replace the entire embedded
+  # Runtime so deleted modules cannot survive as stale production code.
+  rm -rf -- "$bundle_root"
   mkdir -p "$bundle_root/runtime" "$bundle_root/bin"
   ditto "$runtime_deploy" "$bundle_root/runtime"
   rm -f -- "$bundle_root/runtime/node_modules/.pnpm/node_modules/@yishu/runtime"
