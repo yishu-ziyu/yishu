@@ -138,3 +138,11 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 - evidence: `packages/runtime/src/delegation.ts` `ResultInbox`（`private readonly entries = new Map<string, DelegatedResult[]>()`，无持久化后端）
 - revisit trigger: 需要跨重启交付结果，或实现 scheduler crash recovery 时。
 - severity: medium
+
+## debt-017: delegated child session 在 adapter 缓存中累积
+
+- what: 每次 delegation 使用全新 uuid conversationId，`PiRuntimeAdapter.sessions` 缓存随之单调增长，child session 只有 adapter dispose 时才释放；长时间运行且频繁 delegation 会累积内存与历史。
+- why deferred: V1 只需证明语义正确；按 delegation 频率增长速度有限，session 生命周期管理（LRU / 完成即释放）属下一阶段统一设计。
+- evidence: `packages/runtime/src/pi-runtime-adapter.ts` `sessionFor()`（`this.sessions.set(sessionKey, session)`，无逐会话释放路径）、`packages/runtime/src/delegation.ts` `acceptDelegation()`（每次 `randomUUID()` 新 conversationId）
+- revisit trigger: delegation 频率显著上升、出现内存压力，或实现 session 生命周期管理时。
+- severity: low

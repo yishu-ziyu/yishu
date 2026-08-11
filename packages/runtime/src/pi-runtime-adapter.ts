@@ -126,6 +126,22 @@ export interface PiRuntimeAdapterOptions {
   createSession?: typeof createAgentSession;
 }
 
+/**
+ * Per-conversation tool surface decided at the createSession boundary
+ * (delegation V1, ADR 0009). Main sessions keep computer control and may
+ * receive extra product tools (delegate); delegated child sessions receive
+ * neither, so recursion and Desktop access are structurally excluded.
+ */
+export interface SessionToolPolicy {
+  readonly computerControl: boolean;
+  readonly extraTools: ToolDefinition[];
+}
+
+export const DEFAULT_SESSION_TOOL_POLICY: SessionToolPolicy = {
+  computerControl: true,
+  extraTools: [],
+};
+
 export class PiRuntimeAdapter implements AgentRuntime {
   private readonly workingDirectory: string;
   private readonly modelRuntimePromise: Promise<ModelRuntime>;
@@ -141,10 +157,11 @@ export class PiRuntimeAdapter implements AgentRuntime {
   private readonly providerAuthGenerations = new Map<AuthProviderId, number>();
   private readonly localGrokModelIds = new Set<string>();
   private readonly activeComputerTurn = new AsyncLocalStorage<ActiveComputerTurn>();
-  // Additive product seam: extra custom tools contributed per conversation
-  // (e.g. the delegate tool for Main sessions). Child conversations receive
-  // none, so recursion is structurally excluded.
-  private delegationToolFactory?: (conversationId: string) => ToolDefinition[];
+  // Additive product seam: per-conversation session tool policy, decided at
+  // the createSession boundary. Delegated child conversations receive neither
+  // computer_control nor delegate; the default keeps every session unchanged.
+  private sessionToolPolicy: (conversationId: string) => SessionToolPolicy =
+    () => DEFAULT_SESSION_TOOL_POLICY;
   private disposed = false;
 
   constructor(
@@ -179,11 +196,12 @@ export class PiRuntimeAdapter implements AgentRuntime {
   }
 
   /**
-   * Additive seam for product-owned per-conversation custom tools. Called by
-   * ProductKernelRuntime; the base adapter stays usable without it.
+   * Additive seam for product-owned session tool policy (delegation V1,
+   * ADR 0009). Called once per session creation; other runtimes simply lack
+   * the method. The policy must stay cheap and synchronous.
    */
-  setDelegationToolFactory(factory: (conversationId: string) => ToolDefinition[]): void {
-    this.delegationToolFactory = factory;
+  setSessionToolPolicy(policy: (conversationId: string) => SessionToolPolicy): void {
+    this.sessionToolPolicy = policy;
   }
 
   async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
@@ -608,6 +626,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.ensureProviderAvailable(preference.provider);
 
     const capabilityConfiguration = PI_CAPABILITY_PROFILES[capabilityProfile];
+    const toolPolicy = this.sessionToolPolicy(conversationId);
     const { session } = await this.createSession({
       cwd: this.workingDirectory,
       modelRuntime,
@@ -616,10 +635,12 @@ export class PiRuntimeAdapter implements AgentRuntime {
       settingsManager,
       sessionManager: SessionManager.inMemory(this.workingDirectory),
       customTools: [
-        createComputerControlTool((action, signal) => (
-          this.performComputerAction(action, signal)
-        )) as unknown as ToolDefinition,
-        ...(this.delegationToolFactory?.(conversationId) ?? []),
+        ...(toolPolicy.computerControl
+          ? [createComputerControlTool((action, signal) => (
+              this.performComputerAction(action, signal)
+            )) as unknown as ToolDefinition]
+          : []),
+        ...toolPolicy.extraTools,
       ],
       ...capabilityConfiguration,
     });
