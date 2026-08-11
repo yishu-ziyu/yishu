@@ -11,7 +11,7 @@
 - `apps/clicky`：唯一正式 Clicky 源码、签名产物和安装入口，拥有用户可见的常驻存在、语音、TTS、权限与设置。
 - `apps/macos`：本仓库的开发壳和集成验证面；不得作为第二个常驻产品、登录项或正式安装源。
 - `packages/kernel`：唯一产品核心，拥有对话、记忆、规则、Action、Skill 与 TaskTruth。
-- `packages/runtime`：Pi `AgentRuntime` 适配器和版本化协议。Pi 是执行 harness，产品身份、关系记忆、权限、主动性和任务真相仍由奕枢拥有。
+- `packages/runtime`：Pi `AgentRuntime` 适配器和版本化协议。Pi 是唯一正式 Agent 循环；产品身份、关系记忆、权限、主动性和任务真相仍由奕枢拥有。
 - `packages/agent-core`：离线实验室，不是第二个产品核心，也不是正式 Clicky 的产品真相源。
 - Kairos：只保留在 Kairos 历史仓库中的旧 bridge 记录；Yishu 不依赖、不回退、不运行 Kairos，也不允许 `KairosBridgeClient`、SSE progress stream、`RunProgressPresenter` 或 `forceKairosRouting` 进入正式路径。
 - Agent Native：只作为 Action 方法论来源，不是 Swift 或 Node 依赖。Yishu 只吸收单一 typed Action、fresh target/observation、执行前 revalidate、结构化 receipt 和可见 read-back；不导入或复制其运行时。
@@ -78,9 +78,9 @@ Pi 身份验证保留在 Pi 自己的凭据存储中。奕枢不复制或打印�
 - `turn.start` + 后台 `trail.observe`（约 15s 元数据采样）喂养 `ContextTrail`
 - 默认 SQLite store（Application Support `Yishu/Store`）
 - `remember_how` 用 trail-replay 验证后再晋升 Skill；`run_skill` / `share_context` 生成 Context Capsule
-- Pi / AgentCore 只有在真实工具或电脑动作开始后才创建 Kernel `TaskTruth`；可见结果验证通过才记 `done`，未验证留在 `blocked`，纯对话不制造任务
+- Pi 只有在真实工具或电脑动作开始后才创建 Kernel `TaskTruth`；可见结果验证通过才记 `done`，未验证留在 `blocked`，纯对话不制造任务
 
-Pi 仍是执行 harness；Agent-Native 只作方法论。Cua 隔离任务单元、主动性引擎、完整 desktop skill 重放执行仍继续挂接。
+Pi 是唯一正式执行 harness；AgentCore 与 Runtime 完全解耦，Agent-Native 只作方法论。Cua 隔离任务单元、主动性引擎、完整 desktop skill 重放执行仍继续挂接。
 
 验收：
 
@@ -98,7 +98,7 @@ pnpm test
 仓库另有可独立运行的 `@yishu/agent-core`（`packages/agent-core`），用于验证 ReAct、
 沙箱工具、多 Agent、eval、轨迹和自我改进等实验。它不是奕枢的产品核心，也不拥有
 正式对话、记忆、任务或关系状态。成熟能力必须迁入 Kernel Action 或 Runtime adapter，
-通过正式 Clicky 验收后才算产品能力。Pi 仍是正式执行 harness。
+通过正式 Clicky 验收后才算产品能力。Pi 是唯一正式 Agent 循环。
 
 ```bash
 pnpm lab:agent:test
@@ -114,4 +114,4 @@ pnpm agent -- run "计算 17*19+3"
 - [三分钟试用](docs/agent-book/TRY_ME.md)
 - [v0-agent-book-harness 验收](docs/acceptance/v0-agent-book-harness.md)
 
-See [Unified product spine](docs/decisions/0010-unified-product-spine.md), [Product kernel](docs/product-kernel.md), [Architecture](docs/architecture.md), [Clicky integration](docs/clicky-integration.md), [persona contract](docs/persona.md), [Clicky presence research](docs/research/clicky-presence.md), and [vertical-slice acceptance](docs/acceptance/v0-context-voice.md).
+See [Nine-stage agent loop](docs/agent-loop.md), [Pi single-loop decision](docs/decisions/0011-pi-single-agent-loop.md), [Unified product spine](docs/decisions/0010-unified-product-spine.md), [Product kernel](docs/product-kernel.md), [Architecture](docs/architecture.md), [Clicky integration](docs/clicky-integration.md), [persona contract](docs/persona.md), [Clicky presence research](docs/research/clicky-presence.md), and [vertical-slice acceptance](docs/acceptance/v0-context-voice.md).

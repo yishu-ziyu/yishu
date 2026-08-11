@@ -1,13 +1,12 @@
 # ADR 0005: kernel 拥有产品真相
 
 Type: decision
-Status: current
-Verified: 21629d6 2026-08-10
-Review: 该决策被重新讨论或推翻时（只能由新 ADR supersede）
+Status: superseded
+Superseded-by: docs/decisions/0011-pi-single-agent-loop.md
 
 ## Status
 
-Accepted
+Superseded 2026-08-11. Kernel 真相所有权保留；旧的 Runtime → AgentCore 依赖描述由 ADR 0011 更新。
 
 ## Context
 

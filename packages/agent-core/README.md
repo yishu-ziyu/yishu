@@ -286,13 +286,13 @@ pnpm test
 
 ```text
 @yishu/agent-core  ──书义环 / CLI / eval / judge / evolve──▶ 可独立验收
-        │ 不替代
-        ▼
-@yishu/runtime     ──AgentRuntime + Pi──▶ 桌面任务真相
-        │
-        ▼
-二开 Clicky / apps/macos
+
+正式产品（无依赖箭头）
+Clicky ──▶ @yishu/kernel ──▶ @yishu/runtime / Pi
 ```
+
+AgentCore 不是 `AgentRuntime` 模式，`@yishu/runtime` 也不依赖本包。成熟实验能力只能按
+独立算法或产品端口迁入 Kernel/Runtime，并通过正式产品验收，不能把整套循环接回产品。
 
 能力对照与验收：
 

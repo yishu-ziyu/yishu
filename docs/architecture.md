@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: 2cfddf1 2026-08-11
+Verified: 23b2e07 2026-08-11
 Review: apps/ 或 packages/ 结构、ownership、数据流变化时
 
 ```text
@@ -63,13 +63,12 @@ flowchart LR
   U["User"] <--> B["Yishu body<br/>Clicky: voice, cursor, UI, permissions"]
   B <--> K["Yishu core<br/>Kernel: conversation truth, memory, rules, task truth"]
   K <--> E["Execution harness<br/>Pi: shipping model and tool loop"]
-  K -. experiments .-> L["Lab<br/>AgentCore / mock"]
-  E --> K
 ```
 
-The unification rule is therefore **one identity, one durable product truth,
-multiple replaceable executors**. Clicky owns a stable `conversationId` across
-app restarts. Each request ID is the turn ID, and its trace ID remains stable
+The unification rule is therefore **one identity, one durable product truth, and
+one shipping Agent loop: Pi**. Mock is only a protocol test double; AgentCore is
+a standalone laboratory and is not an `AgentRuntime` mode. Clicky owns a stable
+`conversationId` across app restarts. Each request ID is the turn ID, and its trace ID remains stable
 for start, steering, and cancellation. `ProductKernelRuntime` projects visible
 turns and safe typed execution events into Kernel's `Conversation` / `Turn` /
 `Event` ledger before it reports terminal success.
@@ -134,7 +133,7 @@ privacy, evidence bounds, and persistence policy. `response.completed` reaches
 conversation and local product actions do not manufacture `TaskTruth`—the
 latter already return a product-owned `ActionReceipt`.
 
-Pi and test runtimes remain replaceable event producers. Cancellation
+Pi and protocol test doubles remain replaceable event producers. Cancellation
 closes the request before delayed events can create or reopen a task, and
 runtime disposal waits for active event producers before the final store
 flush. The delegated-execution branch now projects parent-linked TaskTruth into

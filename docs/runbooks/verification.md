@@ -2,7 +2,7 @@
 
 Type: runbook
 Status: current
-Verified: 2cfddf1 2026-08-11
+Verified: 23b2e07 2026-08-11
 Review: 验证命令、CI workflow 或测试拓扑变化时
 
 ## 命令清单
@@ -22,6 +22,10 @@ pnpm product:verify
 `product:check` 包含产品边界守卫、Kernel/Runtime check + test 和 `swift test`。
 `product:verify` 额外运行正式 Clicky Xcode 测试与开发壳 headless 打包验证。
 完整工作区（含 AgentCore 实验室）仍运行 `pnpm test && pnpm run check`。
+
+产品边界守卫同时确认：正式 Clicky 固定启动 Pi、Runtime 不依赖 `@yishu/agent-core`、
+不存在 `AgentCoreRuntime` 产品接线。AgentCore 实验室不再是 Runtime pretest；它由完整
+工作区与 CI 的独立 laboratory 步骤验收。
 
 需要生成带稳定本地签名并内嵌 Runtime 的正式 Clicky bundle 时运行：
 
