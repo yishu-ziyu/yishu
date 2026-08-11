@@ -1,5 +1,10 @@
 # @yishu/kernel
 
+Type: architecture
+Status: current
+Verified: 21629d6 2026-08-10
+Review: kernel 公开能力或验收标准变化时
+
 Product kernel for Yishu: typed `YishuAction` registry, `ContextTrail`, evidence store (`YishuStore`), and `ContextCapsule` handoff.
 
 ## What this is

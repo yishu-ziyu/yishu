@@ -1,5 +1,9 @@
 # V0 验收：产品内核（@yishu/kernel）
 
+Type: acceptance
+Status: historical
+As-of: 2026-08-09
+
 ## 切片名称
 
 `v0-product-kernel`

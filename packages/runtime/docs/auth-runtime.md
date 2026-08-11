@@ -1,5 +1,10 @@
 # Yishu OAuth runtime boundary
 
+Type: architecture
+Status: current
+Verified: 21629d6 2026-08-10
+Review: auth-service / auth-store / auth-protocol 变化时
+
 The runtime exposes only the product-owned `openai-codex` and `xai` OAuth
 providers. `yishu-local-grok` remains the default loopback route. The xAI path
 is labelled `experimental_local_subscription` because Pi's local subscription

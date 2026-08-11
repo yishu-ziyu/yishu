@@ -1,5 +1,10 @@
 # Yishu product kernel v0.0.1
 
+Type: architecture
+Status: current
+Verified: 21629d6 2026-08-10
+Review: packages/kernel 能力、边界或工作流变化时
+
 ## Promise
 
 奕枢（Yishu）是一款持续存在的个人 Agent Super App。它共享用户正在发生的电脑场景，自然说话，主动形成判断，并在明确的信任关系中行动。

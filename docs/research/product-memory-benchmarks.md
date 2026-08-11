@@ -1,5 +1,9 @@
 # 同类个人 Agent 的记忆机制基准
 
+Type: research
+Status: historical
+As-of: 2026-08-09
+
 > 核对日期：2026-08-08
 >
 > 范围：ChatGPT、Claude（含 Claude Desktop）、Gemini（含 Android/Chrome 助手形态）、Microsoft Copilot（Windows/macOS 及 Microsoft 365 Copilot）、Perplexity Computer/Brain。

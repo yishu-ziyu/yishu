@@ -1,5 +1,9 @@
 # 奕枢自进化闭环（SSOT）
 
+Type: research
+Status: historical
+As-of: 2026-08-06
+
 本文件是设计真源。不是用户随口说的「调研→验证→验收→复盘」。
 依据：
 
