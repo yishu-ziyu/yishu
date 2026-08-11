@@ -23,7 +23,6 @@
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { wrapUntrustedContent } from "@yishu/agent-core";
 import type { SessionScope, TaskTruth, YishuKernel } from "@yishu/kernel";
 import {
   buildContextCapsule,
@@ -43,6 +42,7 @@ import type {
 import { PROTOCOL_VERSION, turnStartCommandSchema } from "./protocol.js";
 import { terminalTaskProgressKindFor } from "./task-progress.js";
 import { contextFrameToTrailSource } from "./trail-source.js";
+import { wrapUntrustedContent } from "./untrusted-content.js";
 import { createWebSearchTool } from "./web-search-tool.js";
 
 /** Delivery metadata describing what kind of result this is — never a task status. */

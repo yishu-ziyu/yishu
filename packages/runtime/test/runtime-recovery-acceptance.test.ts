@@ -138,7 +138,8 @@ test("acceptance: runtime can be terminated mid-turn and recovered without recei
     );
     assert.equal(staleReceiptResponse.payload?.code, "computer_action_not_pending");
     assert.equal(selectedRuntimeMode({ YISHU_RUNTIME_MODE: "mock", HANAKO_RUNTIME_MODE: "agent-core" }), "mock");
-    assert.equal(selectedRuntimeMode({ HANAKO_RUNTIME_MODE: "agent-core" }), "agent-core");
+    assert.equal(selectedRuntimeMode({ YISHU_RUNTIME_MODE: "agent-core" }), "pi");
+    assert.equal(selectedRuntimeMode({ HANAKO_RUNTIME_MODE: "agent-core" }), "pi");
     assert.equal(selectedRuntimeMode({}), "pi");
   } finally {
     await stopRuntime(second);

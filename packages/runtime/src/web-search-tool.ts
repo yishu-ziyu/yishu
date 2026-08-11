@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { wrapUntrustedContent } from "@yishu/agent-core";
 import { sanitizeVisibleText } from "@yishu/kernel";
+import { wrapUntrustedContent } from "./untrusted-content.js";
 
 const ANYSEARCH_ENDPOINT = "https://api.anysearch.com/mcp";
 const MAX_SEARCH_RESULT_CHARS = 12_000;

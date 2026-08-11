@@ -45,4 +45,8 @@ require_literal "apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift" 'envi
 reject_source_pattern '@yishu/agent-core|AgentCoreRuntime' apps/clicky/leanring-buddy
 reject_source_pattern 'KairosBridgeClient|RunProgressPresenter|forceKairosRouting' apps packages
 
+# Pi is the only production agent loop. The AgentCore book harness remains a
+# standalone laboratory and must not be linked back into the Runtime package.
+reject_source_pattern '@yishu/agent-core|AgentCoreRuntime' packages/runtime/src packages/runtime/package.json
+
 echo "Product boundary check passed: Clicky body -> Product Kernel -> Pi runtime"
