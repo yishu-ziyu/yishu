@@ -186,6 +186,7 @@ final class YishuAgentRuntimeClient {
     private(set) var lastProjectScope: YishuSessionScope?
 
     var onLifecycleEvent: ((YishuRuntimeLifecycleEvent) -> Void)?
+    var onDelegatedTaskPresenceEvent: ((YishuDelegatedTaskPresenceEvent) -> Void)?
 
     private var process: Process?
     private var inputHandle: FileHandle?
@@ -850,6 +851,25 @@ final class YishuAgentRuntimeClient {
         }
     }
 
+    func cancelDelegatedTask(
+        taskId: UUID,
+        mainConversationId: UUID,
+        reason: String = "user_cancelled"
+    ) throws {
+        try send(YishuDelegatedTaskCancelCommand(
+            schemaVersion: yishuRuntimeProtocolVersion,
+            type: "task.cancel",
+            requestId: UUID(),
+            traceId: UUID(),
+            sentAt: Date(),
+            payload: YishuDelegatedTaskCancelPayload(
+                taskId: taskId,
+                mainConversationId: mainConversationId,
+                reason: reason
+            )
+        ))
+    }
+
     /// Append a frame into the product ContextTrail without starting a Pi turn.
     /// Prefer metadata-only frames (empty screenshots) for background sampling.
     func observeTrail(contextFrame: YishuContextFrame) throws {
@@ -957,6 +977,11 @@ final class YishuAgentRuntimeClient {
         historyContinuations.count
     }
 
+    /// Test hook for spontaneous events that do not belong to a turn stream.
+    func dispatchRuntimeEventForTests(_ raw: [String: Any]) {
+        dispatch(raw)
+    }
+
     /// Test hook: complete a parked memory.forget with a store-confirmed result.
     func finishParkedMemoryForgetForTests(
         requestId: UUID,
@@ -1010,6 +1035,12 @@ final class YishuAgentRuntimeClient {
 
         if type == "runtime.ready" {
             onLifecycleEvent?(.ready(mode: payload["mode"] as? String ?? "unknown"))
+            return
+        }
+
+        if type == "task.presence.updated" {
+            guard let event = YishuDelegatedTaskPresenceEvent.decode(raw) else { return }
+            onDelegatedTaskPresenceEvent?(event)
             return
         }
 
@@ -1736,6 +1767,21 @@ private struct YishuTrailObservePayload: Encodable {
 }
 
 private struct YishuTurnCancelPayload: Encodable {
+    let reason: String
+}
+
+private struct YishuDelegatedTaskCancelCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuDelegatedTaskCancelPayload
+}
+
+private struct YishuDelegatedTaskCancelPayload: Encodable {
+    let taskId: UUID
+    let mainConversationId: UUID
     let reason: String
 }
 

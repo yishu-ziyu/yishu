@@ -86,7 +86,15 @@ case "$MODE" in
       fi
     }
     trap cleanup_verify EXIT
-    sleep 2
+    for _ in {1..40}; do
+      if pgrep -P "$VERIFY_PID" -x node >/dev/null; then
+        break
+      fi
+      if ! kill -0 "$VERIFY_PID" >/dev/null 2>&1; then
+        wait "$VERIFY_PID"
+      fi
+      sleep 0.25
+    done
     kill -0 "$VERIFY_PID"
     pgrep -P "$VERIFY_PID" -x node >/dev/null
     cleanup_verify

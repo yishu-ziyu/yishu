@@ -178,6 +178,10 @@ final class CompanionManager: ObservableObject {
     var responseOverlayViewModel: CompanionResponseOverlayViewModel {
         responseOverlayManager.viewModel
     }
+    private let agentPresenceWindowManager = AgentPresenceWindowManager()
+    var agentPresenceViewModel: AgentPresenceViewModel {
+        agentPresenceWindowManager.viewModel
+    }
     private let yishuPointerTrailMonitor = YishuPointerTrailMonitor()
     private lazy var yishuContextFrameCollector = YishuContextFrameCollector(
         pointerMonitor: yishuPointerTrailMonitor
@@ -788,6 +792,27 @@ final class CompanionManager: ObservableObject {
         bindShortcutTransitions()
         bindVoiceProxyAvailability()
         yishuPointerTrailMonitor.start()
+        agentPresenceWindowManager.onCancelTask = { [weak self] task in
+            guard let self else { return }
+            do {
+                try self.yishuAgentRuntimeClient.cancelDelegatedTask(
+                    taskId: task.id,
+                    mainConversationId: task.mainConversationId
+                )
+            } catch {
+                self.responseOverlayManager.showStaticMessage("暂时没能停止这项任务。")
+            }
+        }
+        agentPresenceWindowManager.onPresentResult = { [weak self] task in
+            guard let self else { return }
+            self.responseOverlayManager.showStaticMessage(
+                task.summary ?? task.statusLabel,
+                autoHideAfter: 12
+            )
+        }
+        yishuAgentRuntimeClient.onDelegatedTaskPresenceEvent = { [weak self] event in
+            self?.agentPresenceWindowManager.apply(event)
+        }
         yishuAgentRuntimeClient.onLifecycleEvent = { [weak self] event in
             switch event {
             case let .ready(mode):
@@ -799,6 +824,7 @@ final class CompanionManager: ObservableObject {
                 }
             case let .stopped(exitCode):
                 print("⚠️ 奕枢 Runtime stopped (\(exitCode))")
+                self?.agentPresenceWindowManager.stop()
             }
         }
         // Local voice proxy (8787) must be ready before the panel claims online.
@@ -996,6 +1022,7 @@ final class CompanionManager: ObservableObject {
         voiceProxyAvailabilityCancellable = nil
         yishuPointerTrailMonitor.stop()
         responseOverlayManager.hideOverlay()
+        agentPresenceWindowManager.stop()
         speechSpeedPreviewTask?.cancel()
         speechSpeedPreviewTask = nil
         elevenLabsTTSClient.stopPlayback()

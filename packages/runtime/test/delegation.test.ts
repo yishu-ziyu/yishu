@@ -17,6 +17,7 @@ import {
   DelegationCoordinator,
   ResultInbox,
   type DelegatedResult,
+  type DelegatedTaskPresenceUpdate,
   type MainTurnHandle,
 } from "../src/delegation.js";
 import {
@@ -90,6 +91,8 @@ class FakeChildHarness {
       verified: true,
     }));
   };
+
+  cancelTurn = async (): Promise<void> => {};
 }
 
 function makeCoordinator(
@@ -100,6 +103,7 @@ function makeCoordinator(
   const coordinator = new DelegationCoordinator({
     kernel,
     executeTurn: harness.executeTurn,
+    cancelTurn: harness.cancelTurn,
     ...(now ? { now } : {}),
   });
   return { coordinator, kernel };
@@ -192,6 +196,8 @@ test("delegate returns an accepted receipt immediately; child runs in background
     }));
   });
   const { coordinator, kernel } = makeCoordinator(harness);
+  const presence: DelegatedTaskPresenceUpdate[] = [];
+  coordinator.setPresenceSink((update) => presence.push(update));
   t.after(async () => {
     gate.resolve();
     await coordinator.dispose();
@@ -236,6 +242,10 @@ test("delegate returns an accepted receipt immediately; child runs in background
   const running = (await kernel.store.listTasks()).find((task) => task.id === taskId);
   assert.equal(running?.status, "running");
   assert.equal(running?.parentId, mainTurn.requestId);
+  assert.equal(presence[0]?.status, "running");
+  assert.equal(presence[0]?.taskId, taskId);
+  assert.equal(presence[0]?.mainConversationId, "conv-main");
+  assert.equal(presence[0]?.model, LOCAL_GROK_DEFAULT_MODEL);
 
   // A verified child completion settles done and enters the inbox.
   gate.resolve();
@@ -249,7 +259,72 @@ test("delegate returns an accepted receipt immediately; child runs in background
   assert.equal(consumed[0]?.resultKind, "succeeded");
   assert.equal(consumed[0]?.summary, "调研结论：三层记忆");
   assert.equal(consumed[0]?.parentId, mainTurn.requestId);
+  assert.equal(presence[1]?.status, "done");
+  assert.equal(presence[1]?.resultKind, "succeeded");
+  assert.equal(presence[1]?.summary, "调研结论：三层记忆");
   assert.equal(coordinator.consumeForTurn("conv-main").length, 0);
+});
+
+test("task.cancel stops only the matching running child and projects cancelled TaskTruth", async (t) => {
+  const harness = new FakeChildHarness();
+  const gate = deferred();
+  harness.handlers.push(async (emit) => {
+    await gate.promise;
+    emit(runtimeEvent("response.completed", randomUUID(), randomUUID(), {
+      text: "late result",
+      verified: true,
+    }));
+  });
+  const { coordinator, kernel } = makeCoordinator(harness);
+  const presence: DelegatedTaskPresenceUpdate[] = [];
+  coordinator.setPresenceSink((update) => presence.push(update));
+  t.after(async () => {
+    gate.resolve();
+    await coordinator.dispose();
+  });
+
+  const mainConversationId = randomUUID();
+  const mainTurn = makeMainTurn({ requestId: randomUUID() });
+  coordinator.noteMainTurn(mainConversationId, mainTurn);
+  const accepted = await delegateToolFor(coordinator, mainConversationId)
+    .execute("tool-call-cancel", { task: "停止这项研究" });
+
+  const wrongConversationAccepted = await coordinator.cancelDelegatedTask({
+    schemaVersion: 1,
+    type: "task.cancel",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      taskId: accepted.details.taskId,
+      mainConversationId: randomUUID(),
+      reason: "user_cancelled",
+    },
+  });
+  assert.equal(wrongConversationAccepted, false);
+
+  const cancelAccepted = await coordinator.cancelDelegatedTask({
+    schemaVersion: 1,
+    type: "task.cancel",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      taskId: accepted.details.taskId,
+      mainConversationId,
+      reason: "user_cancelled",
+    },
+  });
+  assert.equal(cancelAccepted, true);
+
+  await kernel.taskTruth.flush(accepted.details.taskId);
+  const task = (await kernel.store.listTasks()).find(
+    (candidate) => candidate.id === accepted.details.taskId,
+  );
+  assert.equal(task?.status, "cancelled");
+  assert.equal(coordinator.inbox.pendingCount(mainConversationId), 1);
+  assert.equal(presence.at(-1)?.status, "cancelled");
+  assert.equal(presence.at(-1)?.resultKind, "cancelled");
 });
 
 test("the Main frame and recent trail reach the child as capsule markers; screenshots, credentials, and hidden prompts do not", async (t) => {

@@ -18,6 +18,7 @@ import {
   computerActionResultCommandSchema,
   computerActionStatusSchema,
   conversationIdSchema,
+  delegatedTaskCancelCommandSchema,
   historyDeleteCommandSchema,
   historyListCommandSchema,
   historyOpenCommandSchema,
@@ -103,6 +104,26 @@ test("computer action result validates as a typed client command", () => {
 
   assert.equal(computerActionResultCommandSchema.parse(command).type, "computer.action.result");
   assert.equal(clientCommandSchema.parse(command).type, "computer.action.result");
+});
+
+test("task.cancel is scoped to one delegated task and Main conversation", () => {
+  const taskId = makeTurnStartCommand().requestId;
+  const mainConversationId = makeTurnStartCommand().traceId;
+  const command = {
+    schemaVersion: 1,
+    type: "task.cancel",
+    requestId: makeTurnStartCommand().requestId,
+    traceId: makeTurnStartCommand().traceId,
+    sentAt: new Date().toISOString(),
+    payload: { taskId, mainConversationId, reason: "user_cancelled" },
+  } as const;
+
+  assert.equal(delegatedTaskCancelCommandSchema.parse(command).payload.taskId, taskId);
+  assert.equal(clientCommandSchema.parse(command).type, "task.cancel");
+  assert.throws(() => delegatedTaskCancelCommandSchema.parse({
+    ...command,
+    payload: { ...command.payload, mainConversationId: "not-a-conversation" },
+  }));
 });
 
 test("computer action receipts round-trip the strict status, method, and code enums", () => {

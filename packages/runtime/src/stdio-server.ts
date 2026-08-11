@@ -29,6 +29,18 @@ const computerUsePort = new StdioComputerUsePort(emit);
 const runtime = createAgentRuntime(runtimeMode, { computerUse: computerUsePort });
 const authService = (runtime as AgentRuntime & { authService?: YishuAuthService }).authService;
 
+if (runtime instanceof ProductKernelRuntime) {
+  runtime.delegation.setPresenceSink((update) => {
+    emit(runtimeEvent(
+      "task.presence.updated",
+      reuseValidUuid(update.parentId),
+      randomUUID(),
+      update,
+      update.mainConversationId,
+    ));
+  });
+}
+
 const processRequestId = randomUUID();
 const processTraceId = randomUUID();
 emit(runtimeEvent("runtime.ready", processRequestId, processTraceId, {
@@ -329,6 +341,30 @@ lineReader.on("line", (line) => {
         message: "No pending computer action matches this result.",
       }));
     }
+    return;
+  }
+
+  if (command.type === "task.cancel") {
+    if (!(runtime instanceof ProductKernelRuntime)) {
+      emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "task.cancel requires product kernel (YISHU_PRODUCT_KERNEL not off).",
+      }));
+      return;
+    }
+    void runtime.cancelDelegatedTask(command).then((accepted) => {
+      if (!accepted) {
+        emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
+          code: "delegated_task_not_running",
+          message: "The delegated task is no longer running in this conversation.",
+        }));
+      }
+    }).catch((error) => {
+      emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
+        code: "delegated_task_cancel_failed",
+        message: safeRuntimeErrorMessage(error, "Unable to stop the delegated task."),
+      }));
+    });
     return;
   }
 

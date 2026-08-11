@@ -20,6 +20,7 @@ import {
 import type {
   ContextFrame,
   ConversationId,
+  DelegatedTaskCancelCommand,
   HistoryDeleteCommand,
   HistoryListCommand,
   HistoryOpenCommand,
@@ -115,6 +116,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     this.delegation = new DelegationCoordinator({
       kernel,
       executeTurn: (command, emit) => this.inner.startTurn(command, emit),
+      cancelTurn: (command, emit) => this.inner.cancelTurn(command, emit),
     });
     // Additive seam: PiRuntimeAdapter asks this coordinator for the session
     // tool policy at the createSession boundary (Main keeps computer_control
@@ -1176,6 +1178,10 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
     await this.suggestionTrackers.get(command.requestId)?.flush();
     await this.settleState(state);
+  }
+
+  async cancelDelegatedTask(command: DelegatedTaskCancelCommand): Promise<boolean> {
+    return this.delegation.cancelDelegatedTask(command);
   }
 
   async dispose(): Promise<void> {
