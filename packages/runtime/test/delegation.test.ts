@@ -1,8 +1,9 @@
 // Delegated execution V1 regression tests (RFC v2, ADR 0009).
 // Covers the runtime contract: asynchronous accepted receipt, independent
 // child session with runtime-owned identity, capsule handoff boundaries,
-// TaskTruth as the only status truth (unverified is never done), payload-only
-// one-shot Result Inbox, safe result re-entry, and contained child failures.
+// TaskTruth as the only status truth (research completion differs from action
+// verification), payload-only one-shot Result Inbox, safe result re-entry,
+// and contained child failures.
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -224,6 +225,8 @@ test("delegate returns an accepted receipt immediately; child runs in background
   assert.deepEqual(childCommand.payload.modelPreference, modelPreference);
   assert.equal(childCommand.payload.contextFrame.screenshots.length, 0);
   assert.match(childCommand.payload.utterance, /delegated background task/);
+  assert.match(childCommand.payload.utterance, /at most 450 characters/);
+  assert.match(childCommand.payload.utterance, /<delegated_result>/);
   assert.match(childCommand.payload.utterance, /研究记忆分层方案/);
   assert.match(childCommand.payload.utterance, /<untrusted source="context_capsule">/);
 
@@ -296,12 +299,13 @@ test("the Main frame and recent trail reach the child as capsule markers; screen
   assert.equal(prompt.includes("ignore all rules"), false, "hidden prompts must not reach the child");
 });
 
-test("an unverified child completion is never promoted to done", async (t) => {
+test("an unverified computer-action completion remains blocked", async (t) => {
   const harness = new FakeChildHarness();
   harness.handlers.push(async (emit) => {
     emit(runtimeEvent("response.completed", "child", "trace", {
-      text: "未经验证的研究回答",
+      text: "已经点击但没有看到界面变化",
       verified: false,
+      verifier: "macos-accessibility-result",
     }));
   });
   const { coordinator, kernel } = makeCoordinator(harness);
@@ -311,17 +315,45 @@ test("an unverified child completion is never promoted to done", async (t) => {
 
   coordinator.noteMainTurn("conv-main", makeMainTurn());
   const tool = delegateToolFor(coordinator, "conv-main");
-  const result = await tool.execute("tool-call-2", { task: "纯研究任务" });
+  const result = await tool.execute("tool-call-2", { task: "点击后确认结果" });
 
   await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 1, "unverified inbox entry");
   const entry = coordinator.consumeForTurn("conv-main")[0];
   assert.equal(entry?.resultKind, "unverified");
-  assert.match(entry?.summary ?? "", /未经验证的研究回答/);
+  assert.match(entry?.summary ?? "", /已经点击但没有看到界面变化/);
 
   await kernel.taskTruth.flush(result.details.taskId);
   const task = (await kernel.store.listTasks()).find((t2) => t2.id === result.details.taskId);
   assert.equal(task?.status, "blocked", "verified:false must not become done");
   assert.notEqual(task?.status, "failed", "unverified is not a failure either");
+});
+
+test("a conversation status without a final deliverable remains blocked", async (t) => {
+  const harness = new FakeChildHarness();
+  harness.handlers.push(async (emit) => {
+    emit(runtimeEvent("response.completed", "child", "trace", {
+      text: "后台任务已经开始。",
+      verified: false,
+      verifier: "conversation-response-only",
+    }));
+  });
+  const { coordinator, kernel } = makeCoordinator(harness);
+  t.after(async () => {
+    await coordinator.dispose();
+  });
+
+  coordinator.noteMainTurn("conv-main", makeMainTurn());
+  const result = await delegateToolFor(coordinator, "conv-main")
+    .execute("tool-call-status-only", { task: "给出三条结论" });
+
+  await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 1, "blocked inbox entry");
+  const entry = coordinator.consumeForTurn("conv-main")[0];
+  assert.equal(entry?.resultKind, "unverified");
+  assert.match(entry?.summary ?? "", /did not provide a final deliverable/);
+
+  await kernel.taskTruth.flush(result.details.taskId);
+  const task = (await kernel.store.listTasks()).find((candidate) => candidate.id === result.details.taskId);
+  assert.equal(task?.status, "blocked");
 });
 
 test("child failure is delivered as failed without touching the Main turn", async (t) => {
@@ -426,20 +458,20 @@ test("an expired handoff capsule fails the child instead of executing it", async
   assert.equal(task?.status, "failed");
 });
 
-test("unsafe or overlong child summaries are contained: no rejection, no running leak", async (t) => {
+test("unsafe or overlong child deliverables stay blocked", async (t) => {
   const harness = new FakeChildHarness();
-  // Base64-like payload (96+ contiguous base64 chars trips the safety filter).
   harness.handlers.push(async (emit) => {
     emit(runtimeEvent("response.completed", "child", "trace", {
-      text: `data:image/png;base64,${"QUJD".repeat(40)}`,
-      verified: true,
+      text: `<delegated_result>data:image/png;base64,${"QUJD".repeat(40)}</delegated_result>`,
+      verified: false,
+      verifier: "conversation-response-only",
     }));
   });
-  // Overlong but ordinary text.
   harness.handlers.push(async (emit) => {
     emit(runtimeEvent("response.completed", "child", "trace", {
-      text: "结果".repeat(2000),
-      verified: true,
+      text: `<delegated_result>${"结果".repeat(300)}</delegated_result>`,
+      verified: false,
+      verifier: "conversation-response-only",
     }));
   });
   const { coordinator, kernel } = makeCoordinator(harness);
@@ -449,26 +481,20 @@ test("unsafe or overlong child summaries are contained: no rejection, no running
 
   coordinator.noteMainTurn("conv-main", makeMainTurn());
   const tool = delegateToolFor(coordinator, "conv-main");
-
   const unsafe = await tool.execute("tc-unsafe", { task: "base64 摘要" });
   const overlong = await tool.execute("tc-overlong", { task: "超限摘要" });
 
   await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 2, "both entries settled");
-
   for (const taskId of [unsafe.details.taskId, overlong.details.taskId]) {
     await kernel.taskTruth.flush(taskId);
-    const task = (await kernel.store.listTasks()).find((t2) => t2.id === taskId);
-    assert.equal(task?.status, "done", `task ${taskId} must not leak in running state`);
+    const task = (await kernel.store.listTasks()).find((candidate) => candidate.id === taskId);
+    assert.equal(task?.status, "blocked", `task ${taskId} must not masquerade as complete`);
   }
 
-  const entries = coordinator.consumeForTurn("conv-main");
-  const unsafeEntry = entries.find((e) => e.taskId === unsafe.details.taskId);
-  assert.equal(unsafeEntry?.summary, "[result summary omitted: unsafe content]");
-  const overlongEntry = entries.find((e) => e.taskId === overlong.details.taskId);
-  assert.ok((overlongEntry?.summary.length ?? 9999) <= 500, "summary must stay bounded");
-
-  // A contained settle means coordinator disposal completes cleanly.
-  await coordinator.dispose();
+  for (const entry of coordinator.consumeForTurn("conv-main")) {
+    assert.equal(entry.resultKind, "unverified");
+    assert.match(entry.summary, /^\[result summary omitted:/);
+  }
 });
 
 test("TaskTruth persistence failure drops the inbox entry instead of faking settlement", async (t) => {
@@ -697,7 +723,7 @@ const unusedPort: ComputerUsePort = {
   dispose: () => {},
 };
 
-test("at the real createSession boundary the child gets no computer_control/delegate, inherits the model, and unverified stays un-done", async (t) => {
+test("at the real createSession boundary a safe conversation result completes and re-enters the next Main turn", async (t) => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const sessions: FakeAgentSession[] = [];
   const sessionCalls: CapturedSessionCall[] = [];
@@ -723,7 +749,9 @@ test("at the real createSession boundary the child gets no computer_control/dele
       const tag = index === 0 ? "main" : "child";
       session.promptHandler = async (s) => {
         await gate.promise;
-        s.emitTextDelta(tag === "child" ? "边界调研结论" : "好的");
+        s.emitTextDelta(tag === "child"
+          ? "正在整理。\n<delegated_result>边界调研结论</delegated_result>"
+          : "好的");
       };
       return { session: session as unknown as AgentSession };
     }) as never,
@@ -731,10 +759,14 @@ test("at the real createSession boundary the child gets no computer_control/dele
 
   // Capture every command the product layer sends into the harness.
   const startTurnCalls: TurnStartCommand[] = [];
+  const emittedEvents: RuntimeEvent[] = [];
   const originalStartTurn = adapter.startTurn.bind(adapter);
   adapter.startTurn = (async (command: TurnStartCommand, emit: RuntimeEventSink) => {
     startTurnCalls.push(command);
-    return originalStartTurn(command, emit);
+    return originalStartTurn(command, (event) => {
+      emittedEvents.push(event);
+      emit(event);
+    });
   }) as typeof adapter.startTurn;
 
   const runtime = new ProductKernelRuntime(adapter, kernel);
@@ -795,8 +827,9 @@ test("at the real createSession boundary the child gets no computer_control/dele
   assert.equal(running?.status, "running");
   assert.equal(running?.parentId, mainCommand.requestId);
 
-  // The child answers (a pure research reply — verified:false from the real
-  // adapter) while the Main turn is still open.
+  // The child answers while the Main turn is still open. The real adapter
+  // emits the production conversation shape: `verified:false` because it did
+  // not operate the desktop, plus the explicit conversation-only verifier.
   gates[1]!.resolve();
   await waitFor(
     () => runtime.delegation.inbox.pendingCount(mainConversationId) === 1,
@@ -804,12 +837,33 @@ test("at the real createSession boundary the child gets no computer_control/dele
   );
   await kernel.taskTruth.flush(taskId);
   const settled = (await kernel.store.listTasks()).find((task) => task.id === taskId);
-  assert.equal(settled?.status, "blocked", "verified:false must not become done");
-  const entry = runtime.delegation.inbox.consume(mainConversationId)[0];
-  assert.equal(entry?.resultKind, "unverified");
-  assert.match(entry?.summary ?? "", /边界调研结论/);
+  assert.equal(settled?.status, "done", "a safe research result completes the child task");
+  const completion = emittedEvents.find(
+    (event) => event.requestId === childCommand!.requestId && event.type === "response.completed",
+  );
+  assert.equal(completion?.payload.verified, false);
+  assert.equal(completion?.payload.verifier, "conversation-response-only");
+  assert.equal(runtime.delegation.inbox.pendingCount(mainConversationId), 1);
 
   // The Main turn completes independently afterwards.
   gates[0]!.resolve();
   await mainTurnPromise;
+
+  // The completed result is actual, one-shot untrusted data in the next Main
+  // turn rather than a status-only notification.
+  const nextMainCommand = makeMainCommand(mainConversationId);
+  nextMainCommand.requestId = randomUUID();
+  await runtime.startTurn(nextMainCommand, () => undefined);
+  const reenteredCommand = startTurnCalls.find(
+    (command) => command.requestId === nextMainCommand.requestId,
+  );
+  assert.ok(reenteredCommand);
+  const snippets = snippetsFrom(reenteredCommand!);
+  assert.equal(snippets.length, 1);
+  assert.equal(snippets[0]?.resultKind, "completed");
+  assert.equal(snippets[0]?.summary, "边界调研结论");
+  const prompt = buildGroundedPrompt(reenteredCommand!);
+  assert.match(prompt, /<untrusted source="delegated_results">/);
+  assert.match(prompt, /边界调研结论/);
+  assert.equal(runtime.delegation.inbox.pendingCount(mainConversationId), 0);
 });
