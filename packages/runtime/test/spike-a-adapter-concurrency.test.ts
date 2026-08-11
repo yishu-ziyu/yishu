@@ -1,0 +1,359 @@
+// Spike A — Pi Session Concurrency, Layer 1: Yishu runtime concurrency semantics.
+// Pass criteria A1–A6 are defined in docs/spikes/2026-08-10-delegation-concurrency.md.
+// The fake harness below is copied from pi-runtime-adapter.test.ts so this spike
+// stays self-contained and disposable.
+
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { test, type TestContext } from "node:test";
+import type {
+  AgentSession,
+  ModelRuntime,
+} from "@earendil-works/pi-coding-agent";
+import type { ComputerUsePort } from "../src/computer-use-port.js";
+import {
+  PiRuntimeAdapter,
+  type PiRuntimeAdapterOptions,
+} from "../src/pi-runtime-adapter.js";
+import {
+  PROTOCOL_VERSION,
+  type RuntimeEvent,
+  type TurnStartCommand,
+} from "../src/protocol.js";
+import { makeTurnStartCommand } from "./fixtures.js";
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T | PromiseLike<T>): void;
+  reject(error: unknown): void;
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+type FakeSessionEvent = {
+  type: string;
+  assistantMessageEvent?: { type: string; delta?: string };
+};
+
+class FakeAgentSession {
+  private static nextId = 0;
+  readonly sessionId = `spike-a-session-${++FakeAgentSession.nextId}`;
+  readonly agent: { state: { errorMessage?: string } } = { state: {} };
+  readonly promptStarted = deferred();
+  abortCount = 0;
+  promptHandler: (session: FakeAgentSession) => Promise<void> = async () => {};
+  private readonly abortGate = deferred();
+  private aborted = false;
+  private readonly listeners = new Set<(event: FakeSessionEvent) => void>();
+
+  subscribe(listener: (event: FakeSessionEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  emitTextDelta(delta: string): void {
+    for (const listener of [...this.listeners]) {
+      listener({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta },
+      });
+    }
+  }
+
+  async prompt(): Promise<void> {
+    this.promptStarted.resolve();
+    // Real AgentSession.abort() settles an in-flight prompt; mirror that so
+    // the adapter's cancelled-path checks run instead of hanging forever.
+    await Promise.race([this.promptHandler(this), this.abortGate.promise]);
+  }
+
+  async steer(): Promise<void> {}
+
+  async abort(): Promise<void> {
+    this.abortCount += 1;
+    if (!this.aborted) {
+      this.aborted = true;
+      this.abortGate.resolve();
+    }
+  }
+
+  dispose(): void {}
+}
+
+interface FakeHarness {
+  readonly adapterOptions: PiRuntimeAdapterOptions;
+  readonly sessions: FakeAgentSession[];
+  waitForNextSession(): Promise<FakeAgentSession>;
+}
+
+function createFakeHarness(): FakeHarness {
+  const sessions: FakeAgentSession[] = [];
+  const sessionWaiters: Array<(session: FakeAgentSession) => void> = [];
+  const modelRuntime = {
+    getProvider: (_providerId: string) => undefined,
+    registerProvider: (_providerId: string) => {},
+    getModel: (provider: string, modelId: string) => ({ provider, id: modelId }),
+  };
+  return {
+    sessions,
+    waitForNextSession: () => new Promise((resolve) => {
+      sessionWaiters.push(resolve);
+    }),
+    adapterOptions: {
+      modelRuntimePromise: Promise.resolve(modelRuntime as unknown as ModelRuntime),
+      createSession: (async () => {
+        const session = new FakeAgentSession();
+        sessions.push(session);
+        for (const waiter of sessionWaiters.splice(0)) {
+          waiter(session);
+        }
+        return { session: session as unknown as AgentSession };
+      }) as NonNullable<PiRuntimeAdapterOptions["createSession"]>,
+    },
+  };
+}
+
+const unusedPort: ComputerUsePort = {
+  perform: async () => ({ succeeded: false, verified: false, message: "unused" }),
+  resolve: () => false,
+  cancelRequest: () => {},
+  dispose: () => {},
+};
+
+async function makeAdapter(
+  harness: FakeHarness,
+): Promise<{ adapter: PiRuntimeAdapter; workdir: string }> {
+  const workdir = await mkdtemp(path.join(tmpdir(), "yishu-spike-a-"));
+  const adapter = new PiRuntimeAdapter(workdir, unusedPort, harness.adapterOptions);
+  return { adapter, workdir };
+}
+
+function cleanupAfter(t: TestContext, adapter: PiRuntimeAdapter, workdir: string): void {
+  t.after(async () => {
+    await adapter.dispose();
+    await rm(workdir, { recursive: true, force: true });
+  });
+}
+
+function makeCommand(conversationId: string, requestId: string): TurnStartCommand {
+  const command = makeTurnStartCommand();
+  command.requestId = requestId;
+  command.payload.conversationId = conversationId;
+  return command;
+}
+
+function assertEventOwnership(
+  events: readonly RuntimeEvent[],
+  requestId: string,
+  label: string,
+): void {
+  for (const event of events) {
+    assert.equal(
+      event.requestId,
+      requestId,
+      `${label}: event ${event.type} leaked across requestIds`,
+    );
+  }
+}
+
+test("A1/A2/A3/A5: B starts while A is in flight; sessions, events, completion stay isolated", async (t) => {
+  const harness = createFakeHarness();
+  const gateA = deferred();
+  const gateB = deferred();
+  // Sessions are created in turn-start order: conv-a first, conv-b second.
+  harness.adapterOptions.createSession = (async () => {
+    const session = new FakeAgentSession();
+    harness.sessions.push(session);
+    const gate = harness.sessions.length === 1 ? gateA : gateB;
+    const tag = harness.sessions.length === 1 ? "A" : "B";
+    session.promptHandler = async (s) => {
+      await gate.promise;
+      s.emitTextDelta(`reply-from-${tag}`);
+    };
+    return { session: session as unknown as AgentSession };
+  }) as NonNullable<PiRuntimeAdapterOptions["createSession"]>;
+
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const commandA = makeCommand("conv-a", "req-a");
+  const commandB = makeCommand("conv-b", "req-b");
+  const eventsA: RuntimeEvent[] = [];
+  const eventsB: RuntimeEvent[] = [];
+
+  const turnA = adapter.startTurn(commandA, (event) => eventsA.push(event));
+  const sessionA = await waitForSessionAt(harness.sessions, 0);
+  await sessionA.promptStarted.promise;
+
+  // A1: A has not completed (gateA still pending) — start B now.
+  const turnB = adapter.startTurn(commandB, (event) => eventsB.push(event));
+  const sessionB = await waitForSessionAt(harness.sessions, 1);
+  await sessionB.promptStarted.promise;
+
+  // A2: distinct session objects and identities.
+  assert.equal(harness.sessions.length, 2);
+  assert.notEqual(sessionA, sessionB);
+  assert.notEqual(sessionA.sessionId, sessionB.sessionId);
+
+  // A5: B completes first, independently of A.
+  gateB.resolve();
+  await turnB;
+  const completedB = eventsB.find((event) => event.type === "response.completed");
+  assert.ok(completedB, "B must complete while A is still gated");
+  assert.equal(completedB.requestId, "req-b");
+  assert.equal(completedB.payload.text, "reply-from-B");
+  assert.ok(
+    !eventsA.some((event) => event.type === "response.completed"),
+    "A must still be running when B completed",
+  );
+
+  // A completes afterwards, independently.
+  gateA.resolve();
+  await turnA;
+  const completedA = eventsA.find((event) => event.type === "response.completed");
+  assert.ok(completedA);
+  assert.equal(completedA.requestId, "req-a");
+  assert.equal(completedA.payload.text, "reply-from-A");
+
+  // A3: every emitted event belongs to its own requestId; no cross-talk.
+  assertEventOwnership(eventsA, "req-a", "A");
+  assertEventOwnership(eventsB, "req-b", "B");
+  assert.ok(!completedA.payload.text.includes("reply-from-B"));
+  assert.ok(!completedB.payload.text.includes("reply-from-A"));
+});
+
+test("A4: cancelTurn(A) cancels A but leaves concurrently running B intact", async (t) => {
+  const harness = createFakeHarness();
+  const gateA = deferred();
+  const gateB = deferred();
+  harness.adapterOptions.createSession = (async () => {
+    const session = new FakeAgentSession();
+    harness.sessions.push(session);
+    if (harness.sessions.length === 1) {
+      session.promptHandler = () => gateA.promise;
+    } else {
+      session.promptHandler = async (s) => {
+        await gateB.promise;
+        s.emitTextDelta("B-survived");
+      };
+    }
+    return { session: session as unknown as AgentSession };
+  }) as NonNullable<PiRuntimeAdapterOptions["createSession"]>;
+
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const commandA = makeCommand("conv-a", "req-a");
+  const commandB = makeCommand("conv-b", "req-b");
+  const eventsA: RuntimeEvent[] = [];
+  const eventsB: RuntimeEvent[] = [];
+
+  const turnA = adapter.startTurn(commandA, (event) => eventsA.push(event));
+  const sessionA = await waitForSessionAt(harness.sessions, 0);
+  await sessionA.promptStarted.promise;
+  const turnB = adapter.startTurn(commandB, (event) => eventsB.push(event));
+  const sessionB = await waitForSessionAt(harness.sessions, 1);
+  await sessionB.promptStarted.promise;
+
+  await adapter.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: "req-a",
+    traceId: commandA.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "spike_cancel_a" },
+  }, (event) => eventsA.push(event));
+  gateA.resolve();
+  await turnA;
+
+  assert.ok(sessionA.abortCount >= 1, "cancel A must abort session A");
+  assert.ok(
+    eventsA.some(
+      (event) => event.type === "turn.cancelled" && event.requestId === "req-a",
+    ),
+    "A must observe its own turn.cancelled",
+  );
+  assert.ok(
+    !eventsA.some((event) => event.type === "response.completed"),
+    "cancelled A must not complete",
+  );
+
+  // B is untouched and completes normally.
+  assert.equal(sessionB.abortCount, 0, "cancel A must not abort session B");
+  assert.ok(
+    !eventsB.some((event) => event.type === "turn.cancelled"),
+    "B must not observe cancellation",
+  );
+  gateB.resolve();
+  await turnB;
+  const completedB = eventsB.find((event) => event.type === "response.completed");
+  assert.ok(completedB, "B must complete after A was cancelled");
+  assert.equal(completedB.payload.text, "B-survived");
+
+  assertEventOwnership(eventsA, "req-a", "A");
+  assertEventOwnership(eventsB, "req-b", "B");
+});
+
+test("A6: dispose aborts every in-flight session and stops event flow", async (t) => {
+  const harness = createFakeHarness();
+  const gates: Deferred<void>[] = [];
+  harness.adapterOptions.createSession = (async () => {
+    const session = new FakeAgentSession();
+    harness.sessions.push(session);
+    const gate = deferred();
+    gates.push(gate);
+    session.promptHandler = () => gate.promise;
+    return { session: session as unknown as AgentSession };
+  }) as NonNullable<PiRuntimeAdapterOptions["createSession"]>;
+
+  const { adapter, workdir } = await makeAdapter(harness);
+  t.after(async () => {
+    await rm(workdir, { recursive: true, force: true });
+  });
+
+  const eventsA: RuntimeEvent[] = [];
+  const eventsB: RuntimeEvent[] = [];
+  const turnA = adapter.startTurn(makeCommand("conv-a", "req-a"), (event) => eventsA.push(event));
+  const sessionA = await waitForSessionAt(harness.sessions, 0);
+  await sessionA.promptStarted.promise;
+  const turnB = adapter.startTurn(makeCommand("conv-b", "req-b"), (event) => eventsB.push(event));
+  const sessionB = await waitForSessionAt(harness.sessions, 1);
+  await sessionB.promptStarted.promise;
+
+  await adapter.dispose();
+  for (const gate of gates) gate.resolve();
+  await Promise.all([turnA, turnB]);
+
+  assert.ok(sessionA.abortCount >= 1, "dispose must abort session A");
+  assert.ok(sessionB.abortCount >= 1, "dispose must abort session B");
+  assert.ok(
+    !eventsA.some((event) => event.type === "response.completed" || event.type === "turn.failed"),
+    "disposed A must not reach a normal terminal event",
+  );
+  assert.ok(
+    !eventsB.some((event) => event.type === "response.completed" || event.type === "turn.failed"),
+    "disposed B must not reach a normal terminal event",
+  );
+});
+
+async function waitForSessionAt(
+  sessions: FakeAgentSession[],
+  index: number,
+): Promise<FakeAgentSession> {
+  while (sessions.length <= index) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return sessions[index]!;
+}
