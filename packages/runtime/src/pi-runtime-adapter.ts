@@ -141,6 +141,10 @@ export class PiRuntimeAdapter implements AgentRuntime {
   private readonly providerAuthGenerations = new Map<AuthProviderId, number>();
   private readonly localGrokModelIds = new Set<string>();
   private readonly activeComputerTurn = new AsyncLocalStorage<ActiveComputerTurn>();
+  // Additive product seam: extra custom tools contributed per conversation
+  // (e.g. the delegate tool for Main sessions). Child conversations receive
+  // none, so recursion is structurally excluded.
+  private delegationToolFactory?: (conversationId: string) => ToolDefinition[];
   private disposed = false;
 
   constructor(
@@ -172,6 +176,14 @@ export class PiRuntimeAdapter implements AgentRuntime {
         endProviderTransition: (provider, kind) => this.endProviderTransition(provider, kind),
       },
     );
+  }
+
+  /**
+   * Additive seam for product-owned per-conversation custom tools. Called by
+   * ProductKernelRuntime; the base adapter stays usable without it.
+   */
+  setDelegationToolFactory(factory: (conversationId: string) => ToolDefinition[]): void {
+    this.delegationToolFactory = factory;
   }
 
   async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
@@ -603,9 +615,12 @@ export class PiRuntimeAdapter implements AgentRuntime {
       resourceLoader,
       settingsManager,
       sessionManager: SessionManager.inMemory(this.workingDirectory),
-      customTools: [createComputerControlTool((action, signal) => (
-        this.performComputerAction(action, signal)
-      )) as unknown as ToolDefinition],
+      customTools: [
+        createComputerControlTool((action, signal) => (
+          this.performComputerAction(action, signal)
+        )) as unknown as ToolDefinition,
+        ...(this.delegationToolFactory?.(conversationId) ?? []),
+      ],
       ...capabilityConfiguration,
     });
 

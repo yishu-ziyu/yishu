@@ -38,10 +38,12 @@ import type { YishuAuthService } from "./auth-service.js";
 import { RuntimeTaskProgressTracker } from "./task-progress.js";
 import { RuntimeSuggestionTracker } from "./suggestion-loop.js";
 import {
+  attachDelegatedResults,
   attachRecalledMemories,
   attachRecalledMind,
   type PromptMemorySnippet,
 } from "./context-prompt.js";
+import { DelegationCoordinator, type DelegatedResult } from "./delegation.js";
 
 type TerminalKind = "completed" | "cancelled" | "failed";
 
@@ -90,6 +92,8 @@ export class ProductKernelRuntime implements AgentRuntime {
   private readonly activeRequestIds = new Set<string>();
   private readonly activeTurns = new Map<string, TurnLedgerState>();
   private readonly activeTurnOperations = new Set<Promise<void>>();
+  /** Runtime side of delegated execution; public like `kernel` for tests/UI seams. */
+  readonly delegation: DelegationCoordinator;
   private ledgerTail: Promise<void> = Promise.resolve();
   private disposed = false;
 
@@ -104,6 +108,22 @@ export class ProductKernelRuntime implements AgentRuntime {
     private readonly computerUsePort?: ComputerUsePort,
   ) {
     this.kernel = kernel;
+    // Runtime side of delegated execution (RFC v2 / ADR 0009): child turns run
+    // directly on the inner harness with their own conversation identity; the
+    // kernel keeps the only task-status truth.
+    this.delegation = new DelegationCoordinator({
+      kernel,
+      executeTurn: (command, emit) => this.inner.startTurn(command, emit),
+    });
+    // Additive seam: PiRuntimeAdapter contributes the delegate tool per Main
+    // session; other AgentRuntime implementations simply lack the method. The
+    // factory stays structurally typed so Pi-specific tool types never leak
+    // into this product wrapper.
+    (
+      this.inner as {
+        setDelegationToolFactory?: (factory: (conversationId: string) => unknown[]) => void;
+      }
+    ).setDelegationToolFactory?.((conversationId) => this.delegation.delegateToolFor(conversationId));
   }
 
   observeTrail(command: TrailObserveCommand, emit: RuntimeEventSink): void {
@@ -656,6 +676,9 @@ export class ProductKernelRuntime implements AgentRuntime {
     if (suggestionTracker) {
       this.suggestionTrackers.set(state.command.requestId, suggestionTracker);
     }
+    // Register the active Main turn so the delegate tool can link child
+    // parentage while this turn runs on the harness.
+    this.delegation.noteMainTurn(state.conversationId, state.command.requestId, state.sessionScope);
 
     try {
       // Cancel/dispose may close the gate during prepare or recall.  Never start
@@ -683,12 +706,18 @@ export class ProductKernelRuntime implements AgentRuntime {
         await this.settleState(state);
         return;
       }
-      const commandForInner = attachRecalledMind(
-        attachRecalledMemories(
-          state.command,
-          recalled.map(toPromptMemorySnippet),
+      // Delegated child results re-enter the Main conversation here: one-shot,
+      // payload-only, and never into private sessions.
+      const delegatedResults = this.delegatedResultsForOrdinaryTurn(state);
+      const commandForInner = attachDelegatedResults(
+        attachRecalledMind(
+          attachRecalledMemories(
+            state.command,
+            recalled.map(toPromptMemorySnippet),
+          ),
+          mindLessons,
         ),
-        mindLessons,
+        delegatedResults,
       );
 
       // Mark started before the last terminal check so a concurrent cancelTurn
@@ -717,6 +746,7 @@ export class ProductKernelRuntime implements AgentRuntime {
         }
       }
     } finally {
+      this.delegation.clearMainTurn(state.conversationId, state.command.requestId);
       try {
         await tracker?.flush();
       } catch {
@@ -1157,6 +1187,9 @@ export class ProductKernelRuntime implements AgentRuntime {
     // A runtime may dispose its session before its startTurn promise settles.
     // Wait for every producer before taking the final durable snapshot.
     await Promise.allSettled([...this.activeTurnOperations]);
+    // Drain delegated children after the inner harness is down: their settle
+    // path writes TaskTruth, so they must finish before the final snapshot.
+    await this.delegation.dispose();
     await Promise.allSettled([...this.taskTrackers.values()].map((tracker) => tracker.flush()));
     await Promise.allSettled(
       [...this.suggestionTrackers.values()].map((tracker) => tracker.flush()),
@@ -1504,6 +1537,21 @@ export class ProductKernelRuntime implements AgentRuntime {
         mind.markdown,
         state.command.payload.utterance,
       );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Ordinary turns consume pending delegated child results (one-shot).
+   * Private sessions never receive them: private delegations are refused at
+   * the tool boundary, and inbox entries are keyed to the delegating
+   * conversation anyway.
+   */
+  private delegatedResultsForOrdinaryTurn(state: TurnLedgerState): DelegatedResult[] {
+    if (state.sessionScope.kind === "private") return [];
+    try {
+      return this.delegation.consumeForTurn(state.conversationId);
     } catch {
       return [];
     }
