@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: 21629d6 2026-08-10
+Verified: 607688d 2026-08-11
 Review: apps/ 或 packages/ 结构、ownership、数据流变化时
 
 ```text
@@ -62,7 +62,8 @@ user sees only Yishu:
 flowchart LR
   U["User"] <--> B["Yishu body<br/>Clicky: voice, cursor, UI, permissions"]
   B <--> K["Yishu core<br/>Kernel: conversation truth, memory, rules, task truth"]
-  K <--> E["Execution harness<br/>Pi or AgentCore: model and tool loop"]
+  K <--> E["Execution harness<br/>Pi: shipping model and tool loop"]
+  K -. experiments .-> L["Lab<br/>AgentCore / mock"]
   E --> K
 ```
 
@@ -98,8 +99,10 @@ is required before multi-runtime execution can claim exactly-once semantics.
 The durable ledger stores user-visible input, final assistant output, and a
 small allowlist of typed receipts/status metadata. Streaming deltas, tool
 arguments, screenshots, audio, hidden reasoning, credentials, and arbitrary
-provider payloads are not persisted. This foundation does not yet provide a
-history/recovery UI or automatic long-term memory retrieval.
+provider payloads are not persisted. Clicky now provides personal history
+list/open/delete, personal memory list/forget, and bounded scoped memory recall.
+Project management UI, conflict/expiry review, export, and durable delegated
+result delivery remain incomplete.
 
 Agent Native is a design-methodology source only, not a Swift or Node
 dependency. We borrow the shape of one typed Action, a fresh
@@ -131,11 +134,12 @@ privacy, evidence bounds, and persistence policy. `response.completed` reaches
 conversation and local product actions do not manufacture `TaskTruth`—the
 latter already return a product-owned `ActionReceipt`.
 
-Pi and AgentCore therefore remain replaceable event producers. Cancellation
+Pi and test runtimes remain replaceable event producers. Cancellation
 closes the request before delayed events can create or reopen a task, and
 runtime disposal waits for active event producers before the final store
-flush. The Clicky task UI and cross-request retry/parent linkage remain later
-product surfaces; persistence is not itself a visible task manager.
+flush. The delegated-execution branch now projects parent-linked TaskTruth into
+Clicky Agent Presence. Durable result acknowledgement, restart recovery, and a
+reopenable task result surface remain later product work.
 
 ## Capability profiles
 
@@ -150,7 +154,24 @@ The presence of a restricted conversation profile does not remove tools from Yis
 
 `apps/clicky` carries the shipping interaction identity `com.yishu.yishu-buddy` and is the only formal source and install path for Clicky. The standalone `Yishu.app` in this repository remains a test harness with `com.yishu.yishu-lab`; it must not be installed as another login item or left listening beside the canonical app. The shipping Clicky build owns ContextFrame collection and starts the bundled Pi runtime behind its existing `CompanionManager`.
 
-The current Grok selector and local 8317 route are preserved as model policy. Clicky sends only an allowlisted `{ provider, model }` preference; `PiRuntimeAdapter` maps it into a product-owned custom provider fixed to `http://127.0.0.1:8787/v1`. Neither arbitrary base URLs nor headers cross the runtime protocol. The old local `/chat` route remains a controlled continuity fallback while a physical push-to-talk turn is still a manual acceptance gate.
+The current Grok selector and local 8317 route are preserved as model policy. Clicky sends only an allowlisted `{ provider, model }` preference; `PiRuntimeAdapter` maps it into a product-owned custom provider fixed to `http://127.0.0.1:8787/v1`. Neither arbitrary base URLs nor headers cross the runtime protocol. The old local `/chat` route remains a controlled continuity fallback while a physical push-to-talk turn is still a manual acceptance gate. It is a transitional bypass: ADR 0010 requires moving fallback behind Runtime so it uses the same Kernel ledger before the product expands further.
+
+## Unified product spine
+
+ADR 0010 makes the intended development shape explicit:
+
+`Clicky body → versioned protocol → Kernel product truth/actions → Runtime adapters → verified presence`.
+
+Current exceptions are tracked as migration work rather than alternate architecture:
+
+- Clicky's direct `/chat` fallback and short `conversationHistory` cache;
+- Swift-owned named-click decision/execution before Kernel routing;
+- Runtime-memory delegated Result Inbox;
+- Runtime calls into Kernel's raw store instead of a product service facade;
+- AgentCore's optional runtime path and transitive shipping dependency.
+
+New capabilities must not copy these exceptions. They enter through a Kernel
+capability and one typed execution port, then prove their final visible result.
 
 ## Context frame
 
