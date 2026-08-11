@@ -2,7 +2,7 @@
 
 Type: runbook
 Status: current
-Verified: 21629d6 2026-08-10
+Verified: 23b2e07 2026-08-11
 Review: agent-core CLI 行为或命令变化时
 
 基于书中公式：**Agent = LLM + 上下文 + 工具**。
@@ -15,7 +15,7 @@ Review: agent-core CLI 行为或命令变化时
 - `pnpm agent:eval` → **7/7**（含 knowledge + knowledge-write）
 - `pnpm agent:judge` → gold 7/7 + judge 7/7 + Wilson/bootstrap CI
 - `pnpm agent:evolve` → 离线自进化一轮（gate + scoreboard）
-- runtime 单测 → **22** 通过
+- AgentCore 已与正式 Runtime 解耦，只能通过本页 CLI 作为实验室运行
 
 ## 1. 安装
 
@@ -168,17 +168,15 @@ pnpm agent -- --llm=openai judge-eval --judge=llm
 
 没有 Key 时不要设 `YISHU_AGENT_LLM=openai`，否则会报错退出。
 
-## 6. 产品 Runtime 切 agent-core
+## 6. 与正式产品的边界
 
-`packages/runtime` 的 `createAgentRuntime` 支持三种模式：`pi`（默认）/ `mock` / `agent-core`。
+`packages/agent-core` 不能切换为产品 Runtime。正式 `createAgentRuntime` 只有：
 
-```bash
-export YISHU_RUNTIME_MODE=agent-core
-# 之后 createAgentRuntime() → AgentCoreRuntime（包装 YishuAgent）
-```
+- `pi`：唯一正式 Agent 循环；
+- `mock`：无模型工具循环的协议测试替身。
 
-实现：`packages/runtime/src/agent-core-runtime.ts`。
-产品代码仍只依赖 `AgentRuntime` 协议，不直接 import agent-core 类型。
+旧的 `YISHU_RUNTIME_MODE=agent-core` 不再有效，会按未知值回落到 `pi`。
+成熟实验能力必须迁入 Kernel/Runtime 的独立产品模块并通过 `pnpm product:check` 和真实 Clicky 验收，不能把 AgentCore 整套循环重新接回产品。
 
 ## 7. 文档
 
