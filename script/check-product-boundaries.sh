@@ -40,6 +40,7 @@ require_literal "apps/macos/Resources/Info.plist" '<string>com.yishu.yishu-lab</
 # The canonical Clicky source always starts Pi behind the Product Kernel.
 require_literal "apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift" 'environment["YISHU_RUNTIME_MODE"] = "pi"'
 require_literal "apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift" 'environment["YISHU_PRODUCT_KERNEL"] = environment["YISHU_PRODUCT_KERNEL"] ?? "1"'
+require_literal "apps/clicky/scripts/run-local.sh" 'rm -rf -- "$bundle_root"'
 
 # Shipping Swift must not import the laboratory executor or resurrect Kairos.
 reject_source_pattern '@yishu/agent-core|AgentCoreRuntime' apps/clicky/leanring-buddy
@@ -48,5 +49,10 @@ reject_source_pattern 'KairosBridgeClient|RunProgressPresenter|forceKairosRoutin
 # Pi is the only production agent loop. The AgentCore book harness remains a
 # standalone laboratory and must not be linked back into the Runtime package.
 reject_source_pattern '@yishu/agent-core|AgentCoreRuntime' packages/runtime/src packages/runtime/package.json
+
+# Neither the canonical Clicky bundle nor the development shell may build or
+# copy the standalone AgentCore laboratory into an app bundle.
+reject_source_pattern '@yishu/agent-core|packages/agent-core|AgentCoreRuntime' apps/clicky/scripts/run-local.sh script/build_and_run.sh
+reject_source_pattern '^pnpm --dir "\$ROOT_DIR" build$' script/build_and_run.sh
 
 echo "Product boundary check passed: Clicky body -> Product Kernel -> Pi runtime"
