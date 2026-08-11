@@ -2,7 +2,7 @@
 
 Type: decision
 Status: current
-Verified: 607688d 2026-08-11
+Verified: 2cfddf1 2026-08-11
 Review: 该决策被重新讨论或推翻时（只能由新 ADR supersede）
 
 ## Status

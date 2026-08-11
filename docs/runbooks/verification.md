@@ -2,7 +2,7 @@
 
 Type: runbook
 Status: current
-Verified: 607688d 2026-08-11
+Verified: 2cfddf1 2026-08-11
 Review: 验证命令、CI workflow 或测试拓扑变化时
 
 ## 命令清单
