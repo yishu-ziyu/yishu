@@ -15,7 +15,9 @@ import {
   type RecalledMemory,
   type TrailSourceFrame,
   type SessionScope,
+  type TaskExecutionContract,
   type YishuKernel,
+  createTaskExecutionContract,
 } from "@yishu/kernel";
 import type {
   ContextFrame,
@@ -37,6 +39,8 @@ import type { AgentRuntime, RuntimeEventSink } from "./runtime-port.js";
 import type { ComputerUsePort } from "./computer-use-port.js";
 import type { YishuAuthService } from "./auth-service.js";
 import { RuntimeTaskProgressTracker } from "./task-progress.js";
+import { attachTaskExecutionContract } from "./task-contract.js";
+import { trustedExternalReceiptFor } from "./trusted-task-receipt.js";
 import { RuntimeSuggestionTracker } from "./suggestion-loop.js";
 import {
   attachDelegatedResults,
@@ -53,6 +57,31 @@ function terminalKindForStatus(status: ConversationTurn["status"]): TerminalKind
   if (status === "completed") return "completed";
   if (status === "cancelled") return "cancelled";
   return "failed";
+}
+
+const COMPUTER_EFFECT_INTENT = /(?:\b(?:click|press|open|close|type|enter|select|drag|scroll|send|delete|move|rename|create|save|execute)\b|点击|打开|关闭|输入|选择|拖动|滚动|发送|删除|移动|重命名|创建|保存|执行)/iu;
+
+function contractForOrdinaryTurn(command: TurnStartCommand): TaskExecutionContract {
+  const objective = sanitizeVisibleText(command.payload.utterance, "task objective")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 160);
+  const externalEffect = COMPUTER_EFFECT_INTENT.test(command.payload.utterance);
+  return createTaskExecutionContract({
+    objective: objective || "完成本轮任务",
+    successMode: externalEffect ? "external_effect" : "read_only_delivery",
+    authority: externalEffect ? "reversible" : "automatic",
+    risk: externalEffect ? "medium" : "low",
+    maxAttempts: 1,
+  });
+}
+
+function trustedExternalVerification(
+  event: RuntimeEvent,
+): { source: "action_receipt"; verified: boolean } | undefined {
+  if (event.type !== "response.completed") return undefined;
+  const verified = trustedExternalReceiptFor(event);
+  return verified === undefined ? undefined : { source: "action_receipt", verified };
 }
 
 interface TurnLedgerState {
@@ -72,6 +101,7 @@ interface TurnLedgerState {
   terminalPersistence?: Promise<void>;
   terminalDelivered: boolean;
   ledgerError?: unknown;
+  contract?: TaskExecutionContract;
 }
 
 interface ReplayRecord {
@@ -97,6 +127,7 @@ export class ProductKernelRuntime implements AgentRuntime {
   /** Runtime side of delegated execution; public like `kernel` for tests/UI seams. */
   readonly delegation: DelegationCoordinator;
   private ledgerTail: Promise<void> = Promise.resolve();
+  private readonly recoveryReady: Promise<void>;
   private disposed = false;
 
   /** Forward the optional auth capability without making the kernel own OAuth. */
@@ -117,7 +148,17 @@ export class ProductKernelRuntime implements AgentRuntime {
       kernel,
       executeTurn: (command, emit) => this.inner.startTurn(command, emit),
       cancelTurn: (command, emit) => this.inner.cancelTurn(command, emit),
+      ...("releaseConversationSession" in this.inner
+        && typeof (this.inner as { releaseConversationSession?: unknown }).releaseConversationSession === "function"
+        ? {
+            releaseConversationSession: (conversationId: string) => {
+              (this.inner as unknown as { releaseConversationSession(id: string): void })
+                .releaseConversationSession(conversationId);
+            },
+          }
+        : {}),
     });
+    this.recoveryReady = this.recoverDurableDelegationState();
     // Additive seam: PiRuntimeAdapter asks this coordinator for the session
     // tool policy at the createSession boundary (Main keeps computer_control
     // and gets delegate; delegated children get neither). Other AgentRuntime
@@ -502,7 +543,6 @@ export class ProductKernelRuntime implements AgentRuntime {
       }, existing?.conversationId ?? command.payload.conversationId ?? command.requestId));
       return;
     }
-
     const sessionScope = normalizeSessionScope(command.payload.sessionScope);
     const state: TurnLedgerState = {
       command,
@@ -515,6 +555,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       productActionCancelRequested: false,
       innerStarted: false,
       terminalDelivered: false,
+      contract: contractForOrdinaryTurn(command),
     };
     this.activeRequestIds.add(command.requestId);
     this.activeTurns.set(command.requestId, state);
@@ -534,6 +575,12 @@ export class ProductKernelRuntime implements AgentRuntime {
 
     if (state.durable) {
       try {
+        await this.recoveryReady;
+        await this.reconcileClaimedDeliveries(false);
+        if (state.terminalKind) {
+          await this.settleState(state);
+          return;
+        }
         const preparation = this.prepareTurn(state);
         state.preparePromise = preparation;
         const replay = await preparation;
@@ -673,7 +720,7 @@ export class ProductKernelRuntime implements AgentRuntime {
 
   private async runInnerTurn(state: TurnLedgerState): Promise<void> {
     const tracker = state.durable
-      ? new RuntimeTaskProgressTracker(this.kernel.taskTruth, state.command)
+      ? new RuntimeTaskProgressTracker(this.kernel.taskTruth, state.command, state.contract)
       : undefined;
     if (tracker) this.taskTrackers.set(state.command.requestId, tracker);
     const suggestionTracker = state.durable
@@ -722,8 +769,8 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
       // Delegated child results re-enter the Main conversation here: one-shot,
       // payload-only, and never into private sessions.
-      const delegatedResults = this.delegatedResultsForOrdinaryTurn(state);
-      const commandForInner = attachDelegatedResults(
+      const delegatedResults = await this.delegatedResultsForOrdinaryTurn(state);
+      const commandForInner = attachTaskExecutionContract(attachDelegatedResults(
         attachRecalledMind(
           attachRecalledMemories(
             state.command,
@@ -732,8 +779,7 @@ export class ProductKernelRuntime implements AgentRuntime {
           mindLessons,
         ),
         delegatedResults,
-      );
-
+      ), state.contract!);
       // Mark started before the last terminal check so a concurrent cancelTurn
       // will invoke inner.cancelTurn and unblock a gated startTurn.
       state.innerStarted = true;
@@ -743,8 +789,22 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
 
       try {
+        const admission = tracker?.requestAttempt({
+          proposedAuthority: state.contract?.authority ?? "automatic",
+          proposedRisk: state.contract?.risk ?? "low",
+        });
+        if (admission?.decision === "escalate") {
+          this.acceptRuntimeEvent(state, runtimeEvent(
+            "turn.failed",
+            state.command.requestId,
+            state.traceId,
+            { code: "task_attempt_escalation_required", reason: admission.reason },
+          ));
+          await this.settleState(state);
+          return;
+        }
         await this.inner.startTurn(commandForInner, (event) => {
-          tracker?.observe(event);
+          tracker?.observe(event, trustedExternalVerification(event));
           suggestionTracker?.observe(event);
           this.acceptRuntimeEvent(state, event);
         });
@@ -1490,6 +1550,19 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
       return;
     }
+    // ResultInbox settlement follows, but does not participate in, the Main
+    // turn's durable terminal transaction. A failed ack/release keeps the
+    // claim for startup reconciliation; it must never contradict a completed
+    // conversation turn with a visible failure.
+    try {
+      if (state.terminalKind === "completed") {
+        await this.delegation.inbox.ack(state.command.requestId, new Date().toISOString());
+      } else {
+        await this.delegation.inbox.release(state.command.requestId);
+      }
+    } catch {
+      // Recovery inspects the durable claimTurnId status on next startup.
+    }
     if (state.pendingTerminal && !state.terminalDelivered) {
       state.emit(sanitizeClientEvent(state.pendingTerminal) ?? state.pendingTerminal);
       state.terminalDelivered = true;
@@ -1569,12 +1642,121 @@ export class ProductKernelRuntime implements AgentRuntime {
    * the tool boundary, and inbox entries are keyed to the delegating
    * conversation anyway.
    */
-  private delegatedResultsForOrdinaryTurn(state: TurnLedgerState): DelegatedResult[] {
+  private async delegatedResultsForOrdinaryTurn(state: TurnLedgerState): Promise<DelegatedResult[]> {
     if (state.sessionScope.kind === "private") return [];
     try {
-      return this.delegation.consumeForTurn(state.conversationId);
+      return await this.delegation.claimForTurn(state.conversationId, state.command.requestId);
     } catch {
       return [];
+    }
+  }
+
+  /** Typed, durable task projection used by task.list after sidecar restart. */
+  async listDelegatedTasks(mainConversationId: string): Promise<import("./delegation.js").DelegatedTaskPresenceUpdate[]> {
+    await this.recoveryReady;
+    await this.reconcileClaimedDeliveries(false);
+    await this.delegation.reconcilePendingSettlements();
+    const [tasks, results] = await Promise.all([
+      this.kernel.store.listTasks(),
+      this.kernel.store.listDelegatedResults({ mainConversationId }),
+    ]);
+    const resultByTask = new Map(results.map((result) => [result.taskId, result]));
+    return tasks
+      .filter((task) => task.mainConversationId !== undefined
+        && task.parentId !== undefined
+        && task.evidence.some((entry) => entry.startsWith("delegate:accepted:"))
+        && task.mainConversationId.toLowerCase() === mainConversationId.toLowerCase())
+      .sort((left, right) =>
+        right.updatedAt.localeCompare(left.updatedAt)
+        || right.createdAt.localeCompare(left.createdAt)
+        || left.id.localeCompare(right.id))
+      .slice(0, 64)
+      .map((task) => {
+        const result = resultByTask.get(task.id);
+        return {
+          taskId: task.id,
+          parentId: task.parentId!,
+          mainConversationId: task.mainConversationId!,
+          title: task.title,
+          status: task.status,
+          createdAt: task.createdAt,
+          updatedAt: task.updatedAt,
+          ...(result === undefined ? {} : {
+            resultKind: result.resultKind,
+            summary: result.summary,
+            sequence: result.sequence,
+          }),
+        };
+      });
+  }
+
+  private async recoverDurableDelegationState(): Promise<void> {
+    await this.reconcileClaimedDeliveries(true);
+    const running = (await this.kernel.store.listTasks()).filter((task) =>
+      task.status === "running"
+      && task.mainConversationId !== undefined
+      && task.parentId !== undefined
+      && task.evidence.some((entry) => entry.startsWith("delegate:accepted:")),
+    );
+    for (const task of running) {
+      const parentId = task.parentId;
+      const mainConversationId = task.mainConversationId;
+      if (parentId === undefined || mainConversationId === undefined) continue;
+      const observedAt = new Date().toISOString();
+      await this.kernel.taskTruth.recordWithDelegatedResult({
+        taskId: task.id,
+        title: task.title,
+        kind: "failed",
+        observedAt,
+        evidence: `delegate:failed:${task.id}:runtime_restart`,
+        parentId,
+        mainConversationId,
+        sessionScope: task.sessionScope,
+        ...(task.contract !== undefined ? { contract: task.contract } : {}),
+      }, {
+        taskId: task.id,
+        parentId,
+        mainConversationId,
+        resultKind: "failed",
+        summary: "后台任务因运行时重启中断，未自动重试。",
+        completedAt: observedAt,
+        sequence: [],
+      });
+    }
+  }
+
+  private async reconcileClaimedDeliveries(recoverOpen: boolean): Promise<void> {
+    const claimed = await this.kernel.store.listDelegatedResults({ claimedOnly: true });
+    for (const result of claimed) {
+      if (!result.claimTurnId || result.deliveryTurnId) continue;
+      const turn = await this.kernel.store.getConversationTurn(result.claimTurnId);
+      if (turn?.status === "completed") {
+        await this.kernel.store.ackDelegatedResults(result.claimTurnId);
+        continue;
+      }
+      if (
+        turn?.status === "open"
+        && (recoverOpen || !this.activeRequestIds.has(result.claimTurnId))
+      ) {
+        await this.kernel.store.appendConversationEvent({
+          id: randomUUID(),
+          conversationId: turn.conversationId,
+          turnId: turn.id,
+          type: "turn.failed",
+          payload: { code: "recovery_required" },
+        });
+        await this.kernel.store.upsertConversationTurn({
+          id: turn.id,
+          conversationId: turn.conversationId,
+          status: "failed",
+          ...(turn.traceId !== undefined ? { traceId: turn.traceId } : {}),
+        });
+        await this.kernel.store.releaseDelegatedResults(result.claimTurnId);
+        continue;
+      }
+      if (turn == null || turn.status === "failed" || turn.status === "cancelled") {
+        await this.kernel.store.releaseDelegatedResults(result.claimTurnId);
+      }
     }
   }
 

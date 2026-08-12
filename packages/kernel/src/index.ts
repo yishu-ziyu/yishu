@@ -8,6 +8,7 @@ export * from "./store/index.js";
 export * from "./actions/index.js";
 export * from "./mind/index.js";
 export * from "./task-truth.js";
+export * from "./task-contract.js";
 export * from "./session-scope.js";
 export {
   createYishuKernel,

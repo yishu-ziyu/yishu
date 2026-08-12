@@ -310,6 +310,18 @@ export const delegatedTaskCancelCommandSchema = z.object({
   }),
 });
 
+/** Restore delegated-task presence for one Main conversation after restart. */
+export const delegatedTaskListCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("task.list"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    mainConversationId: conversationIdSchema,
+  }).strict(),
+}).strict();
+
 export const computerActionResultCommandSchema = z.object({
   schemaVersion: z.literal(PROTOCOL_VERSION),
   type: z.literal("computer.action.result"),
@@ -481,6 +493,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   turnSteerCommandSchema,
   turnCancelCommandSchema,
   delegatedTaskCancelCommandSchema,
+  delegatedTaskListCommandSchema,
   computerActionResultCommandSchema,
   runtimePingCommandSchema,
   trailObserveCommandSchema,
@@ -506,6 +519,7 @@ export type TurnStartCommand = z.infer<typeof turnStartCommandSchema>;
 export type TurnSteerCommand = z.infer<typeof turnSteerCommandSchema>;
 export type TurnCancelCommand = z.infer<typeof turnCancelCommandSchema>;
 export type DelegatedTaskCancelCommand = z.infer<typeof delegatedTaskCancelCommandSchema>;
+export type DelegatedTaskListCommand = z.infer<typeof delegatedTaskListCommandSchema>;
 export type ComputerAction = z.infer<typeof computerActionSchema>;
 export type ComputerActionStatus = z.infer<typeof computerActionStatusSchema>;
 export type ComputerActionMethod = z.infer<typeof computerActionMethodSchema>;
@@ -545,6 +559,8 @@ export type RuntimeEventType =
   | "turn.cancelled"
   | "turn.failed"
   | "task.presence.updated"
+  | "task.listed"
+  | "task.cancel.accepted"
   | "runtime.error"
   | "trail.appended"
   | "trail.skipped"

@@ -358,11 +358,36 @@ lineReader.on("line", (line) => {
           code: "delegated_task_not_running",
           message: "The delegated task is no longer running in this conversation.",
         }));
+      } else {
+        emit(runtimeEvent("task.cancel.accepted", command.requestId, command.traceId, {
+          taskId: command.payload.taskId,
+          mainConversationId: command.payload.mainConversationId,
+        }, command.payload.mainConversationId));
       }
     }).catch((error) => {
       emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
         code: "delegated_task_cancel_failed",
         message: safeRuntimeErrorMessage(error, "Unable to stop the delegated task."),
+      }));
+    });
+    return;
+  }
+
+  if (command.type === "task.list") {
+    if (!(runtime instanceof ProductKernelRuntime)) {
+      emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "task.list requires product kernel (YISHU_PRODUCT_KERNEL not off).",
+      }));
+      return;
+    }
+    void runtime.listDelegatedTasks(command.payload.mainConversationId).then((tasks) => {
+      emit(runtimeEvent("task.listed", command.requestId, command.traceId, { tasks },
+        command.payload.mainConversationId));
+    }).catch((error) => {
+      emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
+        code: "delegated_task_list_failed",
+        message: safeRuntimeErrorMessage(error, "Unable to restore delegated tasks."),
       }));
     });
     return;

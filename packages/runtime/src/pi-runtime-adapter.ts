@@ -48,6 +48,9 @@ import {
   type TurnSteerCommand,
 } from "./protocol.js";
 import type { AgentRuntime, RuntimeEventSink } from "./runtime-port.js";
+import { evaluateActionBoundary, taskExecutionContractFromCommand } from "./task-contract.js";
+import type { TaskExecutionContract } from "@yishu/kernel";
+import { markTrustedExternalReceipt } from "./trusted-task-receipt.js";
 
 type RuntimeModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 
@@ -57,8 +60,10 @@ interface ActiveComputerTurn {
   intentId: string;
   basisFrameId: string;
   directComputerAction: boolean;
+  contract?: TaskExecutionContract;
   emit: RuntimeEventSink;
   actionCount: number;
+  allActionsVerified: boolean;
   lastResult?: ComputerActionResult;
 }
 
@@ -204,6 +209,16 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.sessionToolPolicy = policy;
   }
 
+  /** Release only sessions whose cache key belongs to this conversation. */
+  releaseConversationSession(conversationId: string): void {
+    const suffix = `:${conversationId}`;
+    for (const [key, session] of this.sessions.entries()) {
+      if (!key.endsWith(suffix)) continue;
+      session.dispose();
+      this.sessions.delete(key);
+    }
+  }
+
   async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
     if (this.disposed) {
       emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
@@ -336,14 +351,19 @@ export class PiRuntimeAdapter implements AgentRuntime {
       ...(preference.provider === LOCAL_GROK_PROVIDER ? { baseUrl: LOCAL_GROK_BASE_URL } : {}),
     }));
 
+    const taskContract = taskExecutionContractFromCommand(command);
     const computerTurn: ActiveComputerTurn = {
       requestId: command.requestId,
       traceId: command.traceId,
       intentId: randomUUID(),
       basisFrameId: command.payload.contextFrame.frameId,
       directComputerAction,
+      ...(taskContract !== undefined
+        ? { contract: taskContract }
+        : {}),
       emit,
       actionCount: 0,
+      allActionsVerified: true,
     };
 
     try {
@@ -397,13 +417,16 @@ export class PiRuntimeAdapter implements AgentRuntime {
           throw new Error("Pi completed the turn without a user-visible response.");
         }
 
-        emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        const completion = runtimeEvent("response.completed", command.requestId, command.traceId, {
           text: streamedText,
-          verified: computerTurn.lastResult?.verified ?? false,
+          verified: computerTurn.actionCount > 0 && computerTurn.allActionsVerified,
           verifier: computerTurn.actionCount > 0
             ? "macos-accessibility-result"
             : "conversation-response-only",
-        }));
+        });
+        emit(computerTurn.actionCount > 0
+          ? markTrustedExternalReceipt(completion, computerTurn.allActionsVerified)
+          : completion);
       });
     } catch (error) {
       if (this.isRequestCancelled(command.requestId)) return;
@@ -488,6 +511,29 @@ export class PiRuntimeAdapter implements AgentRuntime {
     if (!activeTurn) throw new Error("Computer action has no active turn context.");
 
     const attemptId = randomUUID();
+    if (activeTurn.contract !== undefined) {
+      const admission = evaluateActionBoundary(activeTurn.contract, {
+        proposedAuthority: "reversible",
+        proposedRisk: "medium",
+      });
+      if (admission.decision === "escalate") {
+        const refusal: ComputerActionResult = {
+          succeeded: false,
+          verified: false,
+          status: "blocked",
+          code: "runtime_error",
+          method: "unknown",
+          attemptId,
+          message: `Computer action requires escalation: ${admission.reason}.`,
+        };
+        throw new ComputerActionError(refusal.message, {
+          status: refusal.status!,
+          code: refusal.code!,
+          method: refusal.method!,
+          attemptId,
+        }, refusal);
+      }
+    }
     if (activeTurn.directComputerAction && activeTurn.actionCount >= 1) {
       const refusal: ComputerActionResult = {
         succeeded: false,
@@ -520,6 +566,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
         effectClass: "write",
       }, signal);
       activeTurn.lastResult = result;
+      activeTurn.allActionsVerified &&= result.verified === true;
       return result;
     } catch (error) {
       const actionError = error instanceof ComputerActionError ? error : undefined;
@@ -532,6 +579,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
         method: actionError?.method ?? "unknown",
         attemptId: actionError?.attemptId ?? attemptId,
       };
+      activeTurn.allActionsVerified = false;
       throw error;
     }
   }

@@ -3,6 +3,14 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { createYishuKernel, type DelegateResult } from "../src/index.js";
 
+const DELEGATE_CONTRACT = {
+  objective: "背景任务",
+  successMode: "read_only_delivery",
+  authority: "automatic",
+  risk: "low",
+  maxAttempts: 1,
+} as const;
+
 test("delegate action registers a parent-linked child TaskTruth and accepts immediately", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const projectId = randomUUID();
@@ -11,6 +19,8 @@ test("delegate action registers a parent-linked child TaskTruth and accepts imme
     input: {
       title: "研究 Yishu memory 方案",
       parentId: "main-turn-req-1",
+      mainConversationId: randomUUID(),
+      contract: { ...DELEGATE_CONTRACT, objective: "研究 Yishu memory 方案" },
       sessionScope: { kind: "project", projectId },
     },
   });
@@ -40,6 +50,8 @@ test("delegate action refuses private sessions", async () => {
     input: {
       title: "私密任务",
       parentId: "main-turn-req-2",
+      mainConversationId: randomUUID(),
+      contract: { ...DELEGATE_CONTRACT, objective: "私密任务" },
       sessionScope: { kind: "private" },
     },
   });
@@ -53,7 +65,12 @@ test("delegate action defaults to personal scope when none is given", async () =
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const receipt = await kernel.registry.invoke("delegate", {
     caller: "pi",
-    input: { title: "背景调研", parentId: "main-turn-req-3" },
+    input: {
+      title: "背景调研",
+      parentId: "main-turn-req-3",
+      mainConversationId: randomUUID(),
+      contract: { ...DELEGATE_CONTRACT },
+    },
   });
 
   assert.equal(receipt.status, "ok");
@@ -66,8 +83,8 @@ test("delegate action defaults to personal scope when none is given", async () =
 test("delegate action rejects an empty title or parent id", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   for (const input of [
-    { title: "   ", parentId: "p" },
-    { title: "任务", parentId: "" },
+    { title: "   ", parentId: "p", mainConversationId: randomUUID(), contract: DELEGATE_CONTRACT },
+    { title: "任务", parentId: "", mainConversationId: randomUUID(), contract: DELEGATE_CONTRACT },
   ]) {
     const receipt = await kernel.registry.invoke("delegate", { caller: "pi", input });
     assert.notEqual(receipt.status, "ok");

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { PI_CAPABILITY_PROFILES } from "../src/capability-profiles.js";
 import { buildGroundedPrompt } from "../src/context-prompt.js";
@@ -123,6 +124,22 @@ test("task.cancel is scoped to one delegated task and Main conversation", () => 
   assert.throws(() => delegatedTaskCancelCommandSchema.parse({
     ...command,
     payload: { ...command.payload, mainConversationId: "not-a-conversation" },
+  }));
+});
+
+test("task.list accepts only one strict Main conversation payload", () => {
+  const command = {
+    schemaVersion: 1,
+    type: "task.list",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { mainConversationId: randomUUID() },
+  } as const;
+  assert.equal(clientCommandSchema.parse(command).type, "task.list");
+  assert.throws(() => clientCommandSchema.parse({
+    ...command,
+    payload: { ...command.payload, limit: 10 },
   }));
 });
 

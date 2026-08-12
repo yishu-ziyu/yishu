@@ -3,12 +3,22 @@ import { randomUUID } from "node:crypto";
 import { defineYishuAction } from "../action/define.js";
 import type { TaskTruthProjector } from "../task-truth.js";
 import { normalizeSessionScope } from "../session-scope.js";
+import type { TaskExecutionContract } from "../task-contract.js";
 
 const delegateInputSchema = z.object({
   /** Short human-readable task title, e.g. "研究 Yishu memory 方案". */
   title: z.string().trim().min(1).max(200),
   /** The parent task id this delegated task belongs to (main turn task). */
   parentId: z.string().trim().min(1).max(160),
+  /** Durable Main-conversation owner used for restart recovery and result routing. */
+  mainConversationId: z.string().trim().min(1).max(160),
+  contract: z.object({
+    objective: z.string().trim().min(1).max(160),
+    successMode: z.enum(["read_only_delivery", "external_effect"]),
+    authority: z.enum(["automatic", "reversible", "standing_mandate", "explicit_approval"]),
+    risk: z.enum(["low", "medium", "high", "critical"]),
+    maxAttempts: z.literal(1),
+  }).strict(),
   sessionScope: z
     .discriminatedUnion("kind", [
       z.object({ kind: z.literal("personal") }),
@@ -57,6 +67,8 @@ export function createDelegateAction(deps: { taskTruth: TaskTruthProjector }) {
         observedAt: ctx.now.toISOString(),
         evidence: `delegate:accepted:${taskId}`,
         parentId: ctx.input.parentId,
+        mainConversationId: ctx.input.mainConversationId,
+        contract: ctx.input.contract as TaskExecutionContract,
         sessionScope,
       });
       return { accepted: true, taskId };

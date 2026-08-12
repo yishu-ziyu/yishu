@@ -23,12 +23,22 @@
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { SessionScope, TaskTruth, YishuKernel } from "@yishu/kernel";
+import type {
+  DelegatedResultRecord,
+  DelegatedTaskSequenceStep,
+  SessionScope,
+  TaskTruth,
+  TaskExecutionContract,
+  YishuKernel,
+  YishuStorePort,
+} from "@yishu/kernel";
 import {
   buildContextCapsule,
   parseContextCapsule,
   serializeContextCapsule,
   sanitizeVisibleText,
+  createTaskExecutionContract,
+  evaluateTaskCompletion,
 } from "@yishu/kernel";
 import type { SessionToolPolicy } from "./pi-runtime-adapter.js";
 import type {
@@ -55,6 +65,7 @@ export interface DelegatedResult {
   /** Bounded, sanitized, user-presentable summary. */
   summary: string;
   completedAt: string;
+  sequence: DelegatedTaskSequenceStep[];
 }
 
 /** A transport-only projection of product-owned TaskTruth for Clicky. */
@@ -70,6 +81,7 @@ export interface DelegatedTaskPresenceUpdate {
   model?: string;
   resultKind?: DelegatedResultKind;
   summary?: string;
+  sequence?: DelegatedTaskSequenceStep[];
 }
 
 const MAX_RESULT_SUMMARY = 500;
@@ -125,23 +137,37 @@ function finalDelegatedResult(raw: string): string | undefined {
  * (restart loss recorded as technical debt); TaskTruth is the durable truth.
  */
 export class ResultInbox {
-  private readonly entries = new Map<string, DelegatedResult[]>();
+  constructor(private readonly store: YishuStorePort) {}
 
-  put(conversationId: string, entry: DelegatedResult): void {
-    const list = this.entries.get(conversationId) ?? [];
-    list.push(entry);
-    this.entries.set(conversationId, list);
+  async put(conversationId: string, entry: DelegatedResult): Promise<void> {
+    await this.store.putDelegatedResult({
+      ...entry,
+      mainConversationId: conversationId,
+    });
   }
 
-  /** One-shot consume: returns every pending result and clears the queue. */
-  consume(conversationId: string): DelegatedResult[] {
-    const list = this.entries.get(conversationId) ?? [];
-    if (list.length > 0) this.entries.delete(conversationId);
-    return list;
+  claim(
+    conversationId: string,
+    turnId: string,
+    claimedAt?: string,
+  ): Promise<DelegatedResultRecord[]> {
+    return this.store.claimDelegatedResults(conversationId, turnId, claimedAt);
   }
 
-  pendingCount(conversationId: string): number {
-    return this.entries.get(conversationId)?.length ?? 0;
+  ack(turnId: string, deliveredAt?: string): Promise<number> {
+    return this.store.ackDelegatedResults(turnId, deliveredAt);
+  }
+
+  release(turnId: string): Promise<number> {
+    return this.store.releaseDelegatedResults(turnId);
+  }
+
+  async pendingCount(conversationId: string): Promise<number> {
+    const entries = await this.store.listDelegatedResults({
+      mainConversationId: conversationId,
+      includeDelivered: false,
+    });
+    return entries.filter((entry) => entry.claimTurnId === undefined).length;
   }
 }
 
@@ -159,6 +185,8 @@ export interface DelegationCoordinatorDeps {
   executeTurn: (command: TurnStartCommand, emit: (event: RuntimeEvent) => void) => Promise<void>;
   /** Cancel one child turn on that same harness. */
   cancelTurn: (command: TurnCancelCommand, emit: (event: RuntimeEvent) => void) => Promise<void>;
+  /** Release one completed child Pi session without touching Main sessions. */
+  releaseConversationSession?: (conversationId: string) => void;
   now?: () => Date;
 }
 
@@ -172,6 +200,7 @@ interface ChildExecutionInput {
   childConversationId: string;
   createdAt: string;
   modelPreference?: ModelPreference;
+  contract: TaskExecutionContract;
 }
 
 interface RunningChild {
@@ -181,6 +210,8 @@ interface RunningChild {
   executionStarted: boolean;
   cancellationRequested: boolean;
   settled: boolean;
+  sequence: DelegatedTaskSequenceStep[];
+  pendingTerminal?: { kind: DelegatedTerminalKind; summary: string };
 }
 
 /**
@@ -190,8 +221,9 @@ export class DelegationCoordinator {
   private readonly kernel: YishuKernel;
   private readonly executeTurn: DelegationCoordinatorDeps["executeTurn"];
   private readonly cancelTurn: DelegationCoordinatorDeps["cancelTurn"];
+  private readonly releaseConversationSession: ((conversationId: string) => void) | undefined;
   private readonly now: () => Date;
-  readonly inbox = new ResultInbox();
+  readonly inbox: ResultInbox;
   private readonly mainTurns = new Map<string, MainTurnHandle>();
   /** Runtime-owned child identity: child conversationId -> taskId. */
   private readonly childConversations = new Map<string, string>();
@@ -204,7 +236,9 @@ export class DelegationCoordinator {
     this.kernel = deps.kernel;
     this.executeTurn = deps.executeTurn;
     this.cancelTurn = deps.cancelTurn;
+    this.releaseConversationSession = deps.releaseConversationSession;
     this.now = deps.now ?? (() => new Date());
+    this.inbox = new ResultInbox(deps.kernel.store);
   }
 
   setPresenceSink(sink?: (update: DelegatedTaskPresenceUpdate) => void): void {
@@ -222,8 +256,17 @@ export class DelegationCoordinator {
   }
 
   /** Results consumed by the next Main turn's prompt assembly. */
-  consumeForTurn(conversationId: string): DelegatedResult[] {
-    return this.inbox.consume(conversationId);
+  async claimForTurn(conversationId: string, turnId: string): Promise<DelegatedResult[]> {
+    await this.reconcilePendingSettlements();
+    const claimed = await this.inbox.claim(conversationId, turnId, this.now().toISOString());
+    return claimed.map(({ taskId, parentId, resultKind, summary, completedAt, sequence }) => ({
+      taskId,
+      parentId,
+      resultKind,
+      summary,
+      completedAt,
+      sequence,
+    }));
   }
 
   /** Cancel a running child without confusing its task id with a turn id. */
@@ -232,7 +275,7 @@ export class DelegationCoordinator {
     if (!child || child.input.mainConversationId !== command.payload.mainConversationId) {
       return false;
     }
-    if (child.settled) return false;
+    if (child.settled || child.pendingTerminal !== undefined) return false;
     if (child.cancellationRequested) return true;
     child.cancellationRequested = true;
 
@@ -277,6 +320,17 @@ export class DelegationCoordinator {
     this.childConversations.clear();
     this.runningChildrenByTaskId.clear();
     this.presenceSink = undefined;
+  }
+
+  /** Retry child terminal commits that survived a transient store failure. */
+  async reconcilePendingSettlements(): Promise<void> {
+    const pending = [...this.runningChildrenByTaskId.values()]
+      .filter((child) => !child.settled && child.pendingTerminal !== undefined);
+    for (const child of pending) {
+      const terminal = child.pendingTerminal!;
+      await this.settleChild(child.input, terminal.kind, terminal.summary);
+      if (child.settled) this.runningChildrenByTaskId.delete(child.input.taskId);
+    }
   }
 
   private createDelegateTool(conversationId: string): ToolDefinition {
@@ -362,6 +416,14 @@ export class DelegationCoordinator {
       input: {
         title: input.title,
         parentId: input.mainTurn.requestId,
+        mainConversationId: input.mainConversationId,
+        contract: createTaskExecutionContract({
+          objective: input.title,
+          successMode: "read_only_delivery",
+          authority: "automatic",
+          risk: "low",
+          maxAttempts: 1,
+        }),
         sessionScope: input.mainTurn.sessionScope,
       },
       now: acceptedAt,
@@ -389,6 +451,13 @@ export class DelegationCoordinator {
       ...(input.mainTurn.modelPreference !== undefined
         ? { modelPreference: input.mainTurn.modelPreference }
         : {}),
+      contract: taskTruth.contract ?? createTaskExecutionContract({
+        objective: taskTruth.title,
+        successMode: "read_only_delivery",
+        authority: "automatic",
+        risk: "low",
+        maxAttempts: 1,
+      }),
     };
     // Runtime-owned child identity, registered before the session can exist.
     this.childConversations.set(childInput.childConversationId, childInput.taskId);
@@ -397,10 +466,12 @@ export class DelegationCoordinator {
       executionStarted: false,
       cancellationRequested: false,
       settled: false,
+      sequence: [],
     });
     this.emitPresence({
       ...this.presenceBase(taskTruth, childInput),
       status: taskTruth.status,
+      sequence: [],
     });
 
     // runChild is designed to never reject; the catch is a final guarantee
@@ -412,7 +483,11 @@ export class DelegationCoordinator {
     this.runningChildren.add(childPromise);
     void childPromise.finally(() => {
       this.runningChildren.delete(childPromise);
-      this.runningChildrenByTaskId.delete(childInput.taskId);
+      if (this.runningChildrenByTaskId.get(childInput.taskId)?.settled === true) {
+        this.runningChildrenByTaskId.delete(childInput.taskId);
+      }
+      this.releaseConversationSession?.(childInput.childConversationId);
+      this.childConversations.delete(childInput.childConversationId);
     });
 
     return { accepted: true, taskId: output.taskId };
@@ -448,11 +523,33 @@ export class DelegationCoordinator {
         }
         let observed: { kind: DelegatedTerminalKind; summary: string } | undefined;
         await this.executeTurn(command, (event) => {
-          const ordinaryKind = terminalTaskProgressKindFor(event);
+          const step = sequenceStepFor(event);
+          if (step && runningChild) {
+            runningChild.sequence.push(step);
+            this.emitPresence({
+              taskId: input.taskId,
+              parentId: input.parentId,
+              mainConversationId: input.mainConversationId,
+              title: input.title,
+              status: "running",
+              createdAt: input.createdAt,
+              updatedAt: event.occurredAt,
+              sequence: [...runningChild.sequence],
+            });
+          }
+          const ordinaryKind = terminalTaskProgressKindFor(event, input.contract);
           if (ordinaryKind === undefined) return;
-          const isConversationResult = ordinaryKind === "unverified"
-            && event.type === "response.completed"
-            && event.payload.verified === false
+          if (
+            event.type === "response.completed"
+            && input.contract.successMode === "read_only_delivery"
+            && event.payload.verifier !== undefined
+            && event.payload.verifier !== "conversation-response-only"
+          ) {
+            const result = boundedResultSummary(summaryForTerminalEvent(event));
+            observed = { kind: "unverified", summary: result.summary };
+            return;
+          }
+          const isConversationResult = event.type === "response.completed"
             && event.payload.verifier === "conversation-response-only";
           if (isConversationResult) {
             const deliverable = finalDelegatedResult(String(event.payload.text ?? ""));
@@ -461,8 +558,11 @@ export class DelegationCoordinator {
               return;
             }
             const result = boundedResultSummary(deliverable);
+            const completion = evaluateTaskCompletion(input.contract, {
+              responseText: result.hasSafeDeliverableResult ? deliverable : "",
+            });
             observed = {
-              kind: result.hasSafeDeliverableResult ? "completed" : "unverified",
+              kind: completion,
               summary: result.summary,
             };
             return;
@@ -492,19 +592,29 @@ export class DelegationCoordinator {
   ): Promise<void> {
     const runningChild = this.runningChildrenByTaskId.get(input.taskId);
     if (runningChild?.settled) return;
-    if (runningChild) runningChild.settled = true;
+    if (runningChild) runningChild.pendingTerminal = { kind, summary: rawSummary };
 
     const observedAt = this.now().toISOString();
     const summary = boundedResultSummary(rawSummary).summary || `[${RESULT_KIND_FOR[kind]}]`;
     let projected: TaskTruth | null;
     try {
-      projected = await this.kernel.taskTruth.record({
+      projected = await this.kernel.taskTruth.recordWithDelegatedResult({
         taskId: input.taskId,
         title: input.title,
         kind,
         observedAt,
         evidence: `delegate:${kind}:${input.taskId}`,
         sessionScope: input.sessionScope,
+        mainConversationId: input.mainConversationId,
+        contract: input.contract,
+      }, {
+        taskId: input.taskId,
+        parentId: input.parentId,
+        mainConversationId: input.mainConversationId,
+        resultKind: RESULT_KIND_FOR[kind],
+        summary,
+        completedAt: observedAt,
+        sequence: [...(runningChild?.sequence ?? [])],
       });
       await this.kernel.taskTruth.flush(input.taskId);
     } catch {
@@ -515,19 +625,22 @@ export class DelegationCoordinator {
     if (!projected) {
       return;
     }
+    if (runningChild) runningChild.settled = true;
+    if (runningChild) delete runningChild.pendingTerminal;
     const result: DelegatedResult = {
       taskId: input.taskId,
       parentId: input.parentId,
       resultKind: RESULT_KIND_FOR[kind],
       summary,
       completedAt: observedAt,
+      sequence: [...(runningChild?.sequence ?? [])],
     };
-    this.inbox.put(input.mainConversationId, result);
     this.emitPresence({
       ...this.presenceBase(projected, input),
       status: projected.status,
       resultKind: result.resultKind,
       summary: result.summary,
+      sequence: result.sequence,
     });
   }
 
@@ -620,6 +733,26 @@ export class DelegationCoordinator {
     } catch {
       // Presence is a projection only. UI transport failure must not alter task execution.
     }
+  }
+}
+
+function sequenceStepFor(event: RuntimeEvent): DelegatedTaskSequenceStep | undefined {
+  switch (event.type) {
+    case "turn.started":
+      return { id: event.eventId, label: "后台任务已开始", status: "running", occurredAt: event.occurredAt, sourceEventId: event.eventId };
+    case "tool.started":
+      return { id: event.eventId, label: "正在使用工具", status: "running", occurredAt: event.occurredAt, sourceEventId: event.eventId };
+    case "tool.completed":
+      return { id: event.eventId, label: event.payload.isError === true ? "工具执行失败" : "工具执行完成", status: event.payload.isError === true ? "failed" : "passed", occurredAt: event.occurredAt, sourceEventId: event.eventId };
+    case "response.completed":
+      return { id: event.eventId, label: "结果已生成", status: "passed", occurredAt: event.occurredAt, sourceEventId: event.eventId };
+    case "turn.failed":
+    case "runtime.error":
+      return { id: event.eventId, label: "后台任务失败", status: "failed", occurredAt: event.occurredAt, sourceEventId: event.eventId };
+    case "turn.cancelled":
+      return { id: event.eventId, label: "后台任务已停止", status: "failed", occurredAt: event.occurredAt, sourceEventId: event.eventId };
+    default:
+      return undefined;
   }
 }
 

@@ -129,32 +129,37 @@ function delegateToolFor(
   return policy.extraTools[0] as unknown as ExecutableTool;
 }
 
-test("ResultInbox is payload-only, conversation-scoped, and one-shot", () => {
-  const inbox = new ResultInbox();
+test("ResultInbox is durable, conversation-scoped, and claim/ack based", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inbox = new ResultInbox(kernel.store);
   const entry: DelegatedResult = {
     taskId: "task-1",
     parentId: "req-1",
     resultKind: "unverified",
     summary: "结果摘要",
     completedAt: new Date().toISOString(),
+    sequence: [],
   };
-  inbox.put("conv-a", entry);
+  await inbox.put("conv-a", entry);
 
   // Delivery metadata only — no second task-status truth may sneak in.
   assert.deepEqual(Object.keys(entry).sort(), [
     "completedAt",
     "parentId",
     "resultKind",
+    "sequence",
     "summary",
     "taskId",
   ]);
 
-  assert.equal(inbox.pendingCount("conv-a"), 1);
-  assert.equal(inbox.consume("conv-b").length, 0, "results never cross conversations");
-  const consumed = inbox.consume("conv-a");
+  assert.equal(await inbox.pendingCount("conv-a"), 1);
+  assert.equal((await inbox.claim("conv-b", "turn-b")).length, 0, "results never cross conversations");
+  const consumed = await inbox.claim("conv-a", "turn-a");
   assert.equal(consumed.length, 1);
   assert.equal(consumed[0]?.resultKind, "unverified");
-  assert.equal(inbox.consume("conv-a").length, 0, "consume must be one-shot");
+  assert.equal((await inbox.claim("conv-a", "turn-other")).length, 0, "a live claim excludes another turn");
+  assert.equal(await inbox.ack("turn-a"), 1);
+  assert.equal(await inbox.pendingCount("conv-a"), 0);
 });
 
 test("runtime-owned child identity gives child only web search", async (t) => {
@@ -247,22 +252,23 @@ test("delegate returns an accepted receipt immediately; child runs in background
   assert.equal(presence[0]?.mainConversationId, "conv-main");
   assert.equal(presence[0]?.model, LOCAL_GROK_DEFAULT_MODEL);
 
-  // A verified child completion settles done and enters the inbox.
+  // A conversation-only child with a safe deliverable completes (not verified).
   gate.resolve();
-  await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 1, "inbox entry");
+  await waitFor(async () => await coordinator.inbox.pendingCount("conv-main") === 1, "inbox entry");
   await kernel.taskTruth.flush(taskId);
   const done = (await kernel.store.listTasks()).find((task) => task.id === taskId);
   assert.equal(done?.status, "done");
 
-  const consumed = coordinator.consumeForTurn("conv-main");
+  const consumed = await coordinator.claimForTurn("conv-main", randomUUID());
   assert.equal(consumed.length, 1);
-  assert.equal(consumed[0]?.resultKind, "succeeded");
+  assert.equal(consumed[0]?.resultKind, "completed");
   assert.equal(consumed[0]?.summary, "调研结论：三层记忆");
   assert.equal(consumed[0]?.parentId, mainTurn.requestId);
-  assert.equal(presence[1]?.status, "done");
-  assert.equal(presence[1]?.resultKind, "succeeded");
-  assert.equal(presence[1]?.summary, "调研结论：三层记忆");
-  assert.equal(coordinator.consumeForTurn("conv-main").length, 0);
+  const terminalPresence = presence.find((update) => update.resultKind !== undefined);
+  assert.equal(terminalPresence?.status, "done");
+  assert.equal(terminalPresence?.resultKind, "completed");
+  assert.equal(terminalPresence?.summary, "调研结论：三层记忆");
+  assert.equal((await coordinator.claimForTurn("conv-main", randomUUID())).length, 0);
 });
 
 test("task.cancel stops only the matching running child and projects cancelled TaskTruth", async (t) => {
@@ -322,7 +328,7 @@ test("task.cancel stops only the matching running child and projects cancelled T
     (candidate) => candidate.id === accepted.details.taskId,
   );
   assert.equal(task?.status, "cancelled");
-  assert.equal(coordinator.inbox.pendingCount(mainConversationId), 1);
+  assert.equal(await coordinator.inbox.pendingCount(mainConversationId), 1);
   assert.equal(presence.at(-1)?.status, "cancelled");
   assert.equal(presence.at(-1)?.resultKind, "cancelled");
 });
@@ -392,8 +398,8 @@ test("an unverified computer-action completion remains blocked", async (t) => {
   const tool = delegateToolFor(coordinator, "conv-main");
   const result = await tool.execute("tool-call-2", { task: "点击后确认结果" });
 
-  await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 1, "unverified inbox entry");
-  const entry = coordinator.consumeForTurn("conv-main")[0];
+  await waitFor(async () => await coordinator.inbox.pendingCount("conv-main") === 1, "unverified inbox entry");
+  const entry = (await coordinator.claimForTurn("conv-main", randomUUID()))[0];
   assert.equal(entry?.resultKind, "unverified");
   assert.match(entry?.summary ?? "", /已经点击但没有看到界面变化/);
 
@@ -421,8 +427,8 @@ test("a conversation status without a final deliverable remains blocked", async 
   const result = await delegateToolFor(coordinator, "conv-main")
     .execute("tool-call-status-only", { task: "给出三条结论" });
 
-  await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 1, "blocked inbox entry");
-  const entry = coordinator.consumeForTurn("conv-main")[0];
+  await waitFor(async () => await coordinator.inbox.pendingCount("conv-main") === 1, "blocked inbox entry");
+  const entry = (await coordinator.claimForTurn("conv-main", randomUUID()))[0];
   assert.equal(entry?.resultKind, "unverified");
   assert.match(entry?.summary ?? "", /did not provide a final deliverable/);
 
@@ -449,8 +455,8 @@ test("child failure is delivered as failed without touching the Main turn", asyn
   const result = await tool.execute("tool-call-3", { task: "会失败的任务" });
   assert.equal(result.details.accepted, true);
 
-  await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 1, "failed inbox entry");
-  const entry = coordinator.consumeForTurn("conv-main")[0];
+  await waitFor(async () => await coordinator.inbox.pendingCount("conv-main") === 1, "failed inbox entry");
+  const entry = (await coordinator.claimForTurn("conv-main", randomUUID()))[0];
   assert.equal(entry?.resultKind, "failed");
   assert.match(entry?.summary ?? "", /model unavailable/);
 
@@ -473,8 +479,8 @@ test("child cancellation is delivered as cancelled, never as failure", async (t)
   const tool = delegateToolFor(coordinator, "conv-main");
   const result = await tool.execute("tool-call-4", { task: "会被取消的任务" });
 
-  await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 1, "cancelled inbox entry");
-  const entry = coordinator.consumeForTurn("conv-main")[0];
+  await waitFor(async () => await coordinator.inbox.pendingCount("conv-main") === 1, "cancelled inbox entry");
+  const entry = (await coordinator.claimForTurn("conv-main", randomUUID()))[0];
   assert.equal(entry?.resultKind, "cancelled");
 
   await kernel.taskTruth.flush(result.details.taskId);
@@ -522,8 +528,8 @@ test("an expired handoff capsule fails the child instead of executing it", async
   const tool = delegateToolFor(coordinator, "conv-main");
   const result = await tool.execute("tool-call-5", { task: "过期的交接" });
 
-  await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 1, "expired inbox entry");
-  const entry = coordinator.consumeForTurn("conv-main")[0];
+  await waitFor(async () => await coordinator.inbox.pendingCount("conv-main") === 1, "expired inbox entry");
+  const entry = (await coordinator.claimForTurn("conv-main", randomUUID()))[0];
   assert.equal(entry?.resultKind, "failed");
   assert.match(entry?.summary ?? "", /expired/);
   assert.equal(harness.calls.length, 0, "an expired capsule must never reach the harness");
@@ -559,37 +565,38 @@ test("unsafe or overlong child deliverables stay blocked", async (t) => {
   const unsafe = await tool.execute("tc-unsafe", { task: "base64 摘要" });
   const overlong = await tool.execute("tc-overlong", { task: "超限摘要" });
 
-  await waitFor(() => coordinator.inbox.pendingCount("conv-main") === 2, "both entries settled");
+  await waitFor(async () => await coordinator.inbox.pendingCount("conv-main") === 2, "both entries settled");
   for (const taskId of [unsafe.details.taskId, overlong.details.taskId]) {
     await kernel.taskTruth.flush(taskId);
     const task = (await kernel.store.listTasks()).find((candidate) => candidate.id === taskId);
     assert.equal(task?.status, "blocked", `task ${taskId} must not masquerade as complete`);
   }
 
-  for (const entry of coordinator.consumeForTurn("conv-main")) {
+  for (const entry of await coordinator.claimForTurn("conv-main", randomUUID())) {
     assert.equal(entry.resultKind, "unverified");
     assert.match(entry.summary, /^\[result summary omitted:/);
   }
 });
 
-test("TaskTruth persistence failure drops the inbox entry instead of faking settlement", async (t) => {
+test("a transient terminal-store failure reconciles in the same process", async (t) => {
   const harness = new FakeChildHarness();
   const { coordinator, kernel } = makeCoordinator(harness);
   t.after(async () => {
     await coordinator.dispose();
   });
-  const originalRecord = kernel.taskTruth.record.bind(kernel.taskTruth);
-  let poisoned = false;
-  kernel.taskTruth.record = (signal) => {
-    if (poisoned && signal.kind !== "start") {
+  const originalRecord = kernel.taskTruth.recordWithDelegatedResult.bind(kernel.taskTruth);
+  let poisonNextTerminal = false;
+  kernel.taskTruth.recordWithDelegatedResult = (signal, delegatedResult) => {
+    if (poisonNextTerminal && signal.kind !== "start") {
+      poisonNextTerminal = false;
       return Promise.reject(new Error("store unavailable"));
     }
-    return originalRecord(signal);
+    return originalRecord(signal, delegatedResult);
   };
 
   coordinator.noteMainTurn("conv-main", makeMainTurn());
   const tool = delegateToolFor(coordinator, "conv-main");
-  poisoned = true;
+  poisonNextTerminal = true;
   const result = await tool.execute("tool-call-6", { task: "真相不可用" });
   assert.equal(result.details.accepted, true);
 
@@ -597,9 +604,21 @@ test("TaskTruth persistence failure drops the inbox entry instead of faking sett
   // Give the settle path a chance to attempt the write.
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(
-    coordinator.inbox.pendingCount("conv-main"),
+    await coordinator.inbox.pendingCount("conv-main"),
     0,
     "no inbox entry may pretend a task settled when TaskTruth is unavailable",
+  );
+  assert.equal(
+    (await kernel.store.listTasks()).find((task) => task.id === result.details.taskId)?.status,
+    "running",
+  );
+
+  await coordinator.reconcilePendingSettlements();
+  assert.equal(await coordinator.inbox.pendingCount("conv-main"), 1);
+  assert.equal(
+    (await kernel.store.listTasks()).find((task) => task.id === result.details.taskId)?.status,
+    "done",
+    "the pending terminal is committed without waiting for process restart",
   );
 });
 
@@ -628,7 +647,7 @@ test("dispose while a child is mid-flight settles it as cancelled, deterministic
   await kernel.taskTruth.flush(result.details.taskId);
   const task = (await kernel.store.listTasks()).find((t2) => t2.id === result.details.taskId);
   assert.equal(task?.status, "cancelled", "a dispose-killed child must reach a terminal state");
-  const entry = coordinator.consumeForTurn("conv-main")[0];
+  const entry = (await coordinator.claimForTurn("conv-main", randomUUID()))[0];
   assert.equal(entry?.resultKind, "cancelled");
 });
 
@@ -676,8 +695,9 @@ test("a delegated result re-enters exactly the next Main turn prompt, wrapped as
     resultKind: "unverified",
     summary: "调研结论：三层记忆架构",
     completedAt: new Date().toISOString(),
+    sequence: [],
   };
-  runtime.delegation.inbox.put("conv-main", entry);
+  await runtime.delegation.inbox.put("conv-main", entry);
 
   await runtime.startTurn(makeMainCommand("conv-main"), () => undefined);
   assert.equal(inner.received.length, 1);
@@ -708,12 +728,13 @@ test("private turns never receive delegated results", async (t) => {
     await runtime.dispose();
   });
 
-  runtime.delegation.inbox.put("conv-private", {
+  await runtime.delegation.inbox.put("conv-private", {
     taskId: "task-10",
     parentId: "req-parent-10",
     resultKind: "succeeded",
     summary: "不应注入私密会话",
     completedAt: new Date().toISOString(),
+    sequence: [],
   });
 
   await runtime.startTurn(makeMainCommand("conv-private", { kind: "private" }), () => undefined);
@@ -908,7 +929,7 @@ test("at the real createSession boundary a safe conversation result completes an
   // not operate the desktop, plus the explicit conversation-only verifier.
   gates[1]!.resolve();
   await waitFor(
-    () => runtime.delegation.inbox.pendingCount(mainConversationId) === 1,
+    async () => await runtime.delegation.inbox.pendingCount(mainConversationId) === 1,
     "child result delivered",
   );
   await kernel.taskTruth.flush(taskId);
@@ -919,7 +940,7 @@ test("at the real createSession boundary a safe conversation result completes an
   );
   assert.equal(completion?.payload.verified, false);
   assert.equal(completion?.payload.verifier, "conversation-response-only");
-  assert.equal(runtime.delegation.inbox.pendingCount(mainConversationId), 1);
+  assert.equal(await runtime.delegation.inbox.pendingCount(mainConversationId), 1);
 
   // The Main turn completes independently afterwards.
   gates[0]!.resolve();
@@ -941,5 +962,5 @@ test("at the real createSession boundary a safe conversation result completes an
   const prompt = buildGroundedPrompt(reenteredCommand!);
   assert.match(prompt, /<untrusted source="delegated_results">/);
   assert.match(prompt, /边界调研结论/);
-  assert.equal(runtime.delegation.inbox.pendingCount(mainConversationId), 0);
+  assert.equal(await runtime.delegation.inbox.pendingCount(mainConversationId), 0);
 });
