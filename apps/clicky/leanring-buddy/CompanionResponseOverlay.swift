@@ -4,7 +4,7 @@
 //
 //  Streaming response state and the cursor-attached response presence.
 //  The visual surface is rendered inside each screen's existing click-through
-//  overlay so the triangle, text, and navigation share one spatial anchor.
+//  overlay so Yishu's body, thinking feedback, and answer share one anchor.
 //
 
 import AppKit
@@ -13,12 +13,23 @@ import SwiftUI
 
 // MARK: - View Model
 
+enum CompanionResponsePresentationPhase: Equatable {
+    case hidden
+    case thinking
+    case response
+    case message
+}
+
 @MainActor
 final class CompanionResponseOverlayViewModel: ObservableObject {
     @Published var streamingResponseText: String = ""
     /// Optional durable-memory source line shown under the answer.
     @Published var memorySourceText: String = ""
-    @Published var isShowingResponse: Bool = false
+    @Published var presentationPhase: CompanionResponsePresentationPhase = .hidden
+
+    var isShowingResponse: Bool {
+        presentationPhase != .hidden
+    }
 }
 
 // MARK: - State Controller
@@ -30,18 +41,28 @@ final class CompanionResponseOverlayManager {
     private var autoHideWorkItem: DispatchWorkItem?
     private var clearTextWorkItem: DispatchWorkItem?
 
-    func showOverlayAndBeginStreaming() {
+    /// Keep one visible turn alive while ASR, context capture, and the model
+    /// hand work off to one another. The answer replaces this phase in place.
+    func showThinking() {
         cancelScheduledHide()
         viewModel.streamingResponseText = ""
         viewModel.memorySourceText = ""
 
-        withAnimation(.easeOut(duration: 0.18)) {
-            viewModel.isShowingResponse = true
+        withAnimation(.easeOut(duration: 0.14)) {
+            viewModel.presentationPhase = .thinking
         }
+    }
+
+    func showOverlayAndBeginStreaming() {
+        showThinking()
     }
 
     func updateStreamingText(_ accumulatedText: String) {
         viewModel.streamingResponseText = accumulatedText
+        guard !accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        viewModel.presentationPhase = .response
     }
 
     func updateMemorySourceText(_ text: String?) {
@@ -67,7 +88,7 @@ final class CompanionResponseOverlayManager {
         viewModel.memorySourceText = ""
         viewModel.streamingResponseText = trimmed
         withAnimation(.easeOut(duration: 0.18)) {
-            viewModel.isShowingResponse = true
+            viewModel.presentationPhase = .message
         }
         guard seconds > 0 else { return }
         let hideWorkItem = DispatchWorkItem { [weak self] in
@@ -79,14 +100,14 @@ final class CompanionResponseOverlayManager {
 
     func hideOverlay() {
         cancelScheduledHide()
-        viewModel.isShowingResponse = false
+        viewModel.presentationPhase = .hidden
         viewModel.streamingResponseText = ""
         viewModel.memorySourceText = ""
     }
 
     private func fadeOutAndHide() {
         withAnimation(.easeInOut(duration: 0.32)) {
-            viewModel.isShowingResponse = false
+            viewModel.presentationPhase = .hidden
         }
 
         // Keep the final glyphs alive until the opacity transition finishes.
@@ -115,29 +136,16 @@ struct CompanionResponsePresenceView: View {
     private let responseCornerRadius: CGFloat = 19
 
     var body: some View {
-        Group {
-            if attachesToRightOfCursor {
-                HStack(alignment: .top, spacing: -2) {
-                    spectralConnector
-                        .padding(.top, 9)
-                    responseSurface
-                }
-            } else {
-                HStack(alignment: .top, spacing: -2) {
-                    responseSurface
-                    spectralConnector
-                        .padding(.top, 9)
-                }
-            }
-        }
-        .opacity(viewModel.isShowingResponse ? 1 : 0)
-        .scaleEffect(
-            viewModel.isShowingResponse ? 1 : 0.965,
-            anchor: attachesToRightOfCursor ? .topLeading : .topTrailing
-        )
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.isShowingResponse)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+        responseSurface
+            .opacity(viewModel.isShowingResponse ? 1 : 0)
+            .scaleEffect(
+                viewModel.isShowingResponse ? 1 : 0.965,
+                anchor: attachesToRightOfCursor ? .topLeading : .topTrailing
+            )
+            .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.isShowingResponse)
+            .animation(.spring(response: 0.3, dampingFraction: 0.88), value: viewModel.presentationPhase)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 
     private var responseSurface: some View {
@@ -197,7 +205,16 @@ struct CompanionResponsePresenceView: View {
     }
 
     private var responseContentWidth: CGFloat {
-        guard !viewModel.streamingResponseText.isEmpty else { return 34 }
+        switch viewModel.presentationPhase {
+        case .hidden, .thinking:
+            return 34
+        case .response:
+            // One stable measure prevents every token batch from moving the
+            // response surface while it is growing line by line.
+            return 282
+        case .message:
+            break
+        }
 
         let singleLineText = viewModel.streamingResponseText
             .replacingOccurrences(of: "\n", with: " ") as NSString
@@ -208,22 +225,6 @@ struct CompanionResponsePresenceView: View {
         return min(max(measuredWidth, 176), 282)
     }
 
-    private var spectralConnector: some View {
-        Capsule(style: .continuous)
-            .fill(
-                LinearGradient(
-                    colors: [
-                        DS.Colors.overlayCursorBlue,
-                        DS.Colors.overlaySpectralViolet,
-                        DS.Colors.overlaySpectralMagenta.opacity(0.82)
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
-            .frame(width: 13, height: 3)
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.72), radius: 5, x: 0, y: 0)
-    }
 }
 
 // MARK: - Typer Reveal

@@ -302,15 +302,12 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Streaming text and the pointer share this overlay and one anchor.
-            // The short spectral seam overlaps the triangle, so the two surfaces
-            // move as one presence instead of chasing the mouse in separate windows.
+            // Streaming text and the thinking-orb share this overlay and one anchor.
+            // A small stable gap groups the body and response without reviving the
+            // decorative connector that belonged to the retired triangle cursor.
             if buddyIsVisibleOnThisScreen,
                buddyNavigationMode == .followingCursor,
-               responseOverlayViewModel.isShowingResponse,
-               companionManager.voiceState != .listening,
-               companionManager.voiceState != .processing
-                    || !responseOverlayViewModel.streamingResponseText.isEmpty {
+               responseOverlayViewModel.isShowingResponse {
                 CompanionResponsePresenceView(
                     viewModel: responseOverlayViewModel,
                     attachesToRightOfCursor: responseAttachesToRightOfCursor
@@ -327,6 +324,10 @@ struct BlueCursorView: View {
                 .animation(
                     .spring(response: 0.2, dampingFraction: 0.72, blendDuration: 0),
                     value: cursorPosition
+                )
+                .animation(
+                    .spring(response: 0.3, dampingFraction: 0.88, blendDuration: 0),
+                    value: responsePresenceSize
                 )
                 .onPreferenceChange(ResponsePresenceSizePreferenceKey.self) { newSize in
                     guard newSize.width > 0, newSize.height > 0 else { return }
@@ -353,7 +354,6 @@ struct BlueCursorView: View {
                         : nil,
                     value: cursorPosition
                 )
-                .animation(.easeInOut(duration: 0.16), value: companionManager.visualState)
 
             // Apple Speech shadow text is a tiny listening-only hint. It is
             // never reused as a final response, TTS input, or computer action.
@@ -427,7 +427,7 @@ struct BlueCursorView: View {
         }
     }
 
-    /// Whether the buddy triangle should be visible on this screen.
+    /// Whether Yishu's thinking-orb should be visible on this screen.
     /// True when cursor is on this screen during normal following, or
     /// when navigating/pointing at a target on this screen. When another
     /// screen is navigating (detectedElementScreenLocation is set but this
@@ -449,17 +449,19 @@ struct BlueCursorView: View {
 
     /// The response prefers the cursor's right side, then mirrors at the edge.
     private var responseAttachesToRightOfCursor: Bool {
-        cursorPosition.x + 5 + responsePresenceSize.width <= screenFrame.width - 12
+        cursorPosition.x + responseAnchorOffset + responsePresenceSize.width <= screenFrame.width - 12
     }
 
-    /// Keep the arrow at the response surface's upper corner and clamp the
-    /// material to the current screen without breaking their shared seam.
+    private var responseAnchorOffset: CGFloat { 18 }
+
+    /// Top-align the response with the 20 px thinking-orb and clamp both sides
+    /// to the current screen while preserving an 8 px visual gap.
     private var responsePresencePosition: CGPoint {
         let horizontalCenter: CGFloat
         if responseAttachesToRightOfCursor {
-            horizontalCenter = cursorPosition.x + 5 + responsePresenceSize.width / 2
+            horizontalCenter = cursorPosition.x + responseAnchorOffset + responsePresenceSize.width / 2
         } else {
-            horizontalCenter = cursorPosition.x - 5 - responsePresenceSize.width / 2
+            horizontalCenter = cursorPosition.x - responseAnchorOffset - responsePresenceSize.width / 2
         }
 
         let preferredVerticalCenter = cursorPosition.y - 10 + responsePresenceSize.height / 2
@@ -779,6 +781,25 @@ struct YishuThinkingOrbView: View {
     let state: YishuVisualState
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            YishuThinkingOrbCanvas(state: state)
+                .id(state)
+                .transition(.opacity)
+        }
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.22),
+            value: state
+        )
+        .accessibilityHidden(true)
+    }
+}
+
+private struct YishuThinkingOrbCanvas: View {
+    let state: YishuVisualState
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -824,7 +845,6 @@ struct YishuThinkingOrbView: View {
                 }
             }
         }
-        .accessibilityHidden(true)
     }
 
     private func orbColor(white: Double, alpha: Double) -> Color {
