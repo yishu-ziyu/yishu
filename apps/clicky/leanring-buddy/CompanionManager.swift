@@ -112,7 +112,10 @@ final class CompanionManager: ObservableObject {
         category: "computer-action"
     )
 
-    @Published private(set) var voiceState: CompanionVoiceState = .idle
+    @Published private(set) var voiceState: CompanionVoiceState = .idle {
+        didSet { updateVisualState() }
+    }
+    @Published private(set) var visualState: YishuVisualState = .breathing
     @Published private(set) var lastTranscript: String?
     @Published private(set) var livePartialTranscript = ""
     @Published private(set) var currentAudioPowerLevel: CGFloat = 0
@@ -227,6 +230,12 @@ final class CompanionManager: ObservableObject {
     private var currentResponseTask: Task<Void, Never>?
     private var activeVoiceTurnToken: UUID?
     private var activeRuntimeRequestId: UUID?
+    private var runtimeVisualPhase: YishuRuntimeVisualPhase = .idle {
+        didSet { updateVisualState() }
+    }
+    private var turnVisualPhase: YishuTurnVisualPhase = .idle {
+        didSet { updateVisualState() }
+    }
     /// At most one computer action may be consumed for a voice turn. A Pi
     /// response can still contain a point tag after its action event; that tag
     /// must not replay the same click in `presentVoiceResponse`.
@@ -246,6 +255,7 @@ final class CompanionManager: ObservableObject {
     private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
+    private var delegatedPresenceCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     /// True while Control+Option (or configured PTT) is physically held.
@@ -271,6 +281,23 @@ final class CompanionManager: ObservableObject {
     /// Current durable conversation id owned by the runtime client.
     var currentConversationId: UUID {
         yishuAgentRuntimeClient.currentConversationId
+    }
+
+    private var routedVisualState: YishuVisualState {
+        YishuVisualStateRouter.route(YishuVisualStateInputs(
+            voiceState: voiceState,
+            runtimePhase: runtimeVisualPhase,
+            turnPhase: turnVisualPhase,
+            delegatedPresence: YishuVisualStateRouter.route(
+                delegatedTasks: agentPresenceViewModel.tasks
+            )
+        ))
+    }
+
+    private func updateVisualState() {
+        let nextState = routedVisualState
+        guard visualState != nextState else { return }
+        visualState = nextState
     }
 
     var sessionScopeLabel: String {
@@ -797,6 +824,7 @@ final class CompanionManager: ObservableObject {
         bindAudioPowerLevel()
         bindShortcutTransitions()
         bindVoiceProxyAvailability()
+        bindDelegatedPresenceObservation()
         yishuPointerTrailMonitor.start()
         agentPresenceWindowManager.onCancelTask = { [weak self] task in
             guard let self else { return }
@@ -820,6 +848,7 @@ final class CompanionManager: ObservableObject {
             self?.agentPresenceWindowManager.apply(event)
         }
         yishuAgentRuntimeClient.onLifecycleEvent = { [weak self] event in
+            self?.updateRuntimeVisualPhase(for: event)
             switch event {
             case let .ready(mode):
                 print("🧠 奕枢 Runtime ready (\(mode))")
@@ -838,11 +867,13 @@ final class CompanionManager: ObservableObject {
             await self?.voiceProxySupervisor.ensureStarted()
         }
         do {
+            runtimeVisualPhase = .connecting
             try yishuAgentRuntimeClient.start()
             startContextTrailSampling()
         } catch {
             // A voice turn will retry once, then use the credential-isolated
             // direct Grok fallback so push-to-talk never becomes silent.
+            runtimeVisualPhase = .idle
             print("⚠️ 奕枢 Runtime unavailable; voice fallback remains available")
         }
         // Eagerly touch the Claude API so its TLS warmup handshake completes
@@ -877,6 +908,18 @@ final class CompanionManager: ObservableObject {
             .sink { [weak self] availability in
                 self?.voiceProxyAvailability = availability
             }
+    }
+
+    private func bindDelegatedPresenceObservation() {
+        delegatedPresenceCancellable = agentPresenceViewModel.$tasks
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateVisualState()
+            }
+    }
+
+    private func updateRuntimeVisualPhase(for event: YishuRuntimeLifecycleEvent) {
+        runtimeVisualPhase = YishuVisualStateRouter.route(runtimeEvent: event)
     }
 
     #if DEBUG
@@ -1026,6 +1069,8 @@ final class CompanionManager: ObservableObject {
         voiceProxySupervisor.stop()
         voiceProxyAvailabilityCancellable?.cancel()
         voiceProxyAvailabilityCancellable = nil
+        delegatedPresenceCancellable?.cancel()
+        delegatedPresenceCancellable = nil
         yishuPointerTrailMonitor.stop()
         responseOverlayManager.hideOverlay()
         agentPresenceWindowManager.stop()
@@ -1178,6 +1223,7 @@ final class CompanionManager: ObservableObject {
                 guard self.voiceState != .responding else { return }
 
                 if isFinalizing {
+                    self.turnVisualPhase = .finalizingSpeech
                     self.voiceState = .processing
                 } else if isRecording {
                     self.voiceState = .listening
@@ -1185,6 +1231,7 @@ final class CompanionManager: ObservableObject {
                     // Keep waveform from key-down through session start / hold.
                     self.voiceState = .listening
                 } else {
+                    self.turnVisualPhase = .idle
                     self.voiceState = .idle
                     // If the user pressed and released the hotkey without
                     // saying anything, no response task runs — schedule the
@@ -1436,6 +1483,7 @@ final class CompanionManager: ObservableObject {
 
         ensureOverlayVisibleForVoiceFeedback()
         responseOverlayManager.showStaticMessage("没听清，请再说一次。")
+        turnVisualPhase = .idle
         voiceState = .idle
         scheduleTransientHideIfNeeded()
     }
@@ -1480,10 +1528,12 @@ final class CompanionManager: ObservableObject {
                     currentResponseTask = nil
                 }
                 if !Task.isCancelled && activeVoiceTurnToken == nil {
+                    turnVisualPhase = .idle
                     voiceState = .idle
                     scheduleTransientHideIfNeeded()
                 }
             }
+            turnVisualPhase = directIntent ? .searchingContext : .observingContext
             voiceState = .processing
             if directIntent {
                 await waitForDirectClickPrewarm()
@@ -1504,6 +1554,7 @@ final class CompanionManager: ObservableObject {
                 }
                 timing.mark("runtime_fallback_start", reason: reason.rawValue)
             }
+            turnVisualPhase = .observingContext
             let capturedContext = await yishuContextFrameCollector.capture()
             timing.mark(
                 "context_capture",
@@ -1515,6 +1566,7 @@ final class CompanionManager: ObservableObject {
 
             guard !Task.isCancelled else { return }
             do {
+                turnVisualPhase = .reasoning
                 let response = try await respondThroughYishuRuntime(
                     transcript: transcript,
                     contextFrame: capturedContext.frame,
@@ -2089,9 +2141,14 @@ final class CompanionManager: ObservableObject {
         try await withTaskCancellationHandler {
             for try await event in turn.events {
                 switch event {
-                case .started, .toolStarted, .toolCompleted:
-                    break
+                case .started:
+                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                case .toolStarted:
+                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                case .toolCompleted:
+                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
                 case let .memoryUsed(items):
+                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
                     usedMemories = items
                     applyMemorySourceNotice(Self.formatMemorySourceNotice(items))
                 case let .computerActionRequested(request):
@@ -2102,6 +2159,7 @@ final class CompanionManager: ObservableObject {
                     // Consume the runtime action before awaiting the actuator;
                     // the final model text must not replay it via a POINT tag.
                     activeTurnConsumedComputerAction = true
+                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
                     timing?.mark(
                         "pi_action_arrival",
                         reason: "computer_action",
@@ -2133,6 +2191,7 @@ final class CompanionManager: ObservableObject {
                     )
                     try yishuAgentRuntimeClient.completeComputerAction(request, result: result)
                 case let .responseDelta(delta):
+                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
                     accumulatedText += delta
                     // Direct-click turns stay buffered until the action/result
                     // decision is known; this prevents model tool markup from
@@ -2143,8 +2202,10 @@ final class CompanionManager: ObservableObject {
                         )
                     }
                 case let .completed(text, _):
+                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
                     completedText = text
                 case .cancelled:
+                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
                     throw CancellationError()
                 }
             }
@@ -2177,6 +2238,7 @@ final class CompanionManager: ObservableObject {
             responseOverlayManager.updateStreamingText(finalText)
         }
         responseOverlayManager.finishStreaming()
+        turnVisualPhase = .shapingOutput
         return finalText
     }
 
@@ -2220,6 +2282,7 @@ final class CompanionManager: ObservableObject {
         }
 
         responseOverlayManager.showOverlayAndBeginStreaming()
+        turnVisualPhase = .composingResponse
         let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
         let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
             images: labeledImages,
@@ -2240,6 +2303,7 @@ final class CompanionManager: ObservableObject {
             responseOverlayManager.updateStreamingText(safeResponseText)
         }
         responseOverlayManager.finishStreaming()
+        turnVisualPhase = .shapingOutput
         try await presentVoiceResponse(
             safeResponseText,
             transcript: transcript,
@@ -2260,11 +2324,13 @@ final class CompanionManager: ObservableObject {
         // derives a separate readable version later so links remain visible
         // without being spelled out aloud.
         let safeResponseText = Self.scrubToolMarkup(from: fullResponseText)
+        turnVisualPhase = .shapingOutput
         let parseResult = Self.parsePointingCoordinates(from: safeResponseText)
         let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
         var spokenText = parseResult.spokenText
 
         if parseResult.coordinate != nil {
+            turnVisualPhase = .shapingOutput
             voiceState = .idle
         }
 
@@ -2294,6 +2360,7 @@ final class CompanionManager: ObservableObject {
                   !activeTurnConsumedComputerAction,
                   let pointCoordinate = parseResult.coordinate {
             activeTurnConsumedComputerAction = true
+            turnVisualPhase = .performingAction
             let request = YishuComputerActionRequest(
                 requestId: UUID(),
                 traceId: UUID(),
@@ -2313,6 +2380,7 @@ final class CompanionManager: ObservableObject {
                 request,
                 screenCaptures: screenCaptures
             )
+            turnVisualPhase = .confirmingToolResult
             activeTurnLastComputerActionResult = result
             timing?.mark(
                 "actuator_readback",
@@ -2348,6 +2416,7 @@ final class CompanionManager: ObservableObject {
         // Runtime/local streaming may have been buffered for a direct click;
         // publish only the scrubbed final state before history and speech.
         responseOverlayManager.updateStreamingText(spokenText)
+        turnVisualPhase = .shapingOutput
         responseOverlayManager.finishStreaming()
         timing?.mark(
             "overlay",
@@ -2374,6 +2443,7 @@ final class CompanionManager: ObservableObject {
                     ttsText,
                     speed: speechSpeed
                 )
+                turnVisualPhase = .shapingOutput
                 voiceState = .responding
                 timing?.mark("tts_complete", reason: "ok")
             } catch {
@@ -2754,6 +2824,7 @@ final class CompanionManager: ObservableObject {
     private func cancelActiveRuntimeTurn(reason: String) {
         guard let requestId = activeRuntimeRequestId else { return }
         activeRuntimeRequestId = nil
+        turnVisualPhase = .idle
         try? yishuAgentRuntimeClient.cancelTurn(requestId: requestId, reason: reason)
     }
 
