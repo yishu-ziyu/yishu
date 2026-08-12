@@ -78,11 +78,12 @@ Pi 身份验证保留在 Pi 自己的凭据存储中。奕枢不复制或打印�
 - 后台任务结果以 SQLite（默认）或 JSON 持久化：Main turn 领取后，只在该 turn 终态落盘成功后确认交付，失败或取消会释放领取；Runtime 重启遇到孤立 running 子任务时 fail closed，不自动续跑
 - 后台任务终态在用户空闲 3 秒后主动显示并口播一次；不伪造新 turn、不提前消费 Result Inbox，所以“第二条为什么？”仍能沿同一结果继续
 - 明确的“下次切回这个应用时提醒我…”会持久化为一次性提醒；只有创建后的离开观测才能 armed，返回时原子完成并主动送达一次
-- 普通纯对话按句串行 TTS，首句无需等待模型终态；桌面动作与模糊动作话术一律 final-only，PTT 打断后从 fresh turn 开始
+- 普通纯对话按句串行 TTS，首句无需等待模型终态；再次按下 PTT 会立即停掉旧语音并撤下旧显示。只有旧轮是纯对话且尚未产生桌面动作时，新话才在同一会话中接续；涉及屏幕、动作或判断不清时，会重新采集现场并另起一轮。运行层和 Clicky 两层分别拦住旧回答与旧动作
+- 当前插话不是让底层模型在任意字词处立即停下：模型在安全的回答边界切换，但用户听到和看到的切换是立即的；真人 Control + Option PTT 整链仍待人工验收
 - 桌面闭环除 verified click 外，已接通类型化 `finder_history_back` 和对当前前台 AX 可写控件的 `set_text`；执行前重验 target，receipt 不持久化输入原文
 - Clicky 只保留 Pi 一套对话大脑；Runtime 失败有界重启后会如实报失败，不再绕过 Kernel 切到独立 `/chat` 会话
 
-Pi 是唯一正式执行 harness；AgentCore 与 Runtime 完全解耦，Agent-Native 只作方法论。Desktop 执行已有进程内、无队列的独占 lease。当前已是“看见 → 记住 → 行动 → 等条件 → 主动回来 → 继续追问”的最小持续伴侣闭环；分布式 / 多 Runtime exactly-once、真正 checkpoint resume、通用 initiative/scheduler、完整 browser/file/desktop skill 面与 generation-aware 同 turn 全双工语音仍是下一阶段边界。
+Pi 是唯一正式执行 harness；AgentCore 与 Runtime 完全解耦，Agent-Native 只作方法论。Desktop 执行已有进程内、无队列的独占 lease。当前已是“看见 → 记住 → 行动 → 等条件 → 主动回来 → 继续追问”的最小持续伴侣闭环；分布式 / 多 Runtime exactly-once、真正 checkpoint resume、通用 initiative/scheduler、完整 browser/file/desktop skill 面与底层模型任意字词级的即时中断仍是下一阶段边界。
 
 验收：
 
