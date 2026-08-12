@@ -1550,6 +1550,8 @@ final class CompanionManager: ObservableObject {
             }
             turnVisualPhase = directIntent ? .searchingContext : .observingContext
             voiceState = .processing
+            ensureOverlayVisibleForVoiceFeedback()
+            responseOverlayManager.showThinking()
             if directIntent {
                 await waitForDirectClickPrewarm()
             }
@@ -2441,6 +2443,9 @@ final class CompanionManager: ObservableObject {
         responseOverlayManager.updateStreamingText(spokenText)
         turnVisualPhase = .shapingOutput
         responseOverlayManager.finishStreaming()
+        // The spoken answer begins here. Previously this flipped only after
+        // playback completed, making the visible state lag behind the voice.
+        voiceState = .responding
         timing?.mark(
             "overlay",
             reason: "updated",
