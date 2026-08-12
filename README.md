@@ -10,7 +10,7 @@
 
 - `apps/clicky`：唯一正式 Clicky 源码、签名产物和安装入口，拥有用户可见的常驻存在、语音、TTS、权限与设置。
 - `Sources/YishuContext`：跨 App/Runtime 的 Swift 证据协议，不拥有 UI、权限或启动生命周期。
-- `packages/kernel`：唯一产品核心，拥有对话、记忆、规则、Action、Skill 与 TaskTruth。
+- `packages/kernel`：唯一产品核心，拥有对话、记忆、规则、Action、Skill、TaskTruth 与持久化 Result Inbox。
 - `packages/runtime`：Pi `AgentRuntime` 适配器和版本化协议。Pi 是唯一正式 Agent 循环；产品身份、关系记忆、权限、主动性和任务真相仍由奕枢拥有。
 - `packages/agent-core`：离线实验室，不是第二个产品核心，也不是正式 Clicky 的产品真相源。
 - Kairos：只保留在 Kairos 历史仓库中的旧 bridge 记录；Yishu 不依赖、不回退、不运行 Kairos，也不允许 `KairosBridgeClient`、SSE progress stream、`RunProgressPresenter` 或 `forceKairosRouting` 进入正式路径。
@@ -72,9 +72,11 @@ Pi 身份验证保留在 Pi 自己的凭据存储中。奕枢不复制或打印�
 - `turn.start` + 后台 `trail.observe`（约 15s 元数据采样）喂养 `ContextTrail`
 - 默认 SQLite store（Application Support `Yishu/Store`）
 - `remember_how` 用 trail-replay 验证后再晋升 Skill；`run_skill` / `share_context` 生成 Context Capsule
-- Pi 只有在真实工具或电脑动作开始后才创建 Kernel `TaskTruth`；可见结果验证通过才记 `done`，未验证留在 `blocked`，纯对话不制造任务
+- 每个 request 带一份不可变 `TaskExecutionContract`，只允许一次产品级 attempt；真人点击“从头重试”会创建新 request，不伪装续跑原任务
+- Pi 只有在真实工具或电脑动作开始后才创建 Kernel `TaskTruth`；只读任务交付非空结果即记 `completed`，外部改变只接受进程内可信执行器 receipt / fresh read-back 为 `verified`，其余留在 `blocked`
+- 后台任务结果以 SQLite（默认）或 JSON 持久化：Main turn 领取后，只在该 turn 终态落盘成功后确认交付，失败或取消会释放领取；Runtime 重启遇到孤立 running 子任务时 fail closed，不自动续跑
 
-Pi 是唯一正式执行 harness；AgentCore 与 Runtime 完全解耦，Agent-Native 只作方法论。Cua 隔离任务单元、主动性引擎、完整 desktop skill 重放执行仍继续挂接。
+Pi 是唯一正式执行 harness；AgentCore 与 Runtime 完全解耦，Agent-Native 只作方法论。Desktop 执行已有进程内、无队列的独占 lease；分布式 / 多 Runtime exactly-once、真正 checkpoint resume、Cua 隔离执行面、完整 desktop skill 重放与主动性仍在边界外。
 
 验收：
 

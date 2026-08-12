@@ -135,6 +135,19 @@ pnpm test
 - Clicky 中可见的任务列表、暂停/重试 UI，以及跨 request 的 parent/retry 关联
 - 主动 initiative 触发与 standing mandate UI
 
+## 2026-08-12 Current delta
+
+这是对历史切片的增量记录，不改写 2026-08-09 的验收事实。当前代码已增加：
+
+- 不可变 `TaskExecutionContract`：目标、成功模式、授权、风险与每 request 一次产品 attempt；真人重试必须发起新 request。
+- 通用终态判定：只读任务交付非空结果即为 `completed`；外部改变只有进程内可信 actuator receipt 或 fresh read-back 可成为 `verified`，普通 wire 字段不足以信任。
+- Result Inbox 在 SQLite 与 JSON store 中持久化；终态 TaskTruth 与 result 原子写入，Main turn 用 claim 读取，自身终态落盘后才 ack，失败或取消则 release。
+- Runtime 重启时，孤立 running 子任务 fail closed 为 failed 并生成 durable result，不自动重试；已完成 Main turn 的 claim 会 ack，非终态 claim 会 release。
+- 每个 delegated child 在终态、取消、异常或 dispose 后释放其 Pi session；Desktop action 共享一个进程内、无队列的 token/epoch lease。
+- Clicky 有 `task.list` snapshot、`task.cancel.accepted` 确认、真实 typed event 驱动的 `SystemSequence`，以及诚实中断文案。没有 checkpoint 时只允许“从头重试”或“开始新方向”。
+
+仍未验收的是真实用户面：安装后的 Clicky 中 PTT → 思考光点 → TTS、任务卡交互与 `SystemSequence` 布局、真实 App/sidecar 重启后的一次交付、以及签名 / TCC / 登录项 / UserDefaults 连续性。分布式 / 多进程 exactly-once、真正 checkpoint resume、raw-store facade、project UI / conflict / export、skill replay / initiative 也仍在当前切片外。
+
 ## 完成定义
 
 上表 When→Y 均可在单测中复现；三条命令通过；文档路径真实：本文件、`docs/product-kernel.md`、`docs/architecture.md`、`README.md` Current boundary、`packages/kernel/README.md`。

@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: 23b2e07 2026-08-11
+Verified: 4b1e3b1 2026-08-12
 Review: Pi SDK 版本、九阶段产品规则、Runtime 工厂、Kernel 真相边界或 AgentCore 定位变化时
 
 ## 结论
@@ -34,25 +34,25 @@ flowchart LR
 
 | 阶段 | 已确认的产品规则 | Pi 判断 | 奕枢正式落点 |
 |---|---|---|---|
-| 1. 用户提出目标 | 清楚且低风险直接开始；歧义只问真正阻塞的问题；长任务、高风险或不可逆动作先确认目标、边界和验收结果 | **Pi 原生 + 产品拥有**。`prompt`、`steer` 和 `followUp` 能接收或修正自然语言目标；是否必须提问、是否可行动是产品权限与风险政策 | Clicky 收口输入；Kernel 保存原始目标、范围、授权和成功条件；Pi 负责理解与下一步决策 |
+| 1. 用户提出目标 | 清楚且低风险直接开始；歧义只问真正阻塞的问题；长任务、高风险或不可逆动作先确认目标、边界和验收结果 | **Pi 原生 + 产品拥有**。`prompt`、`steer` 和 `followUp` 能接收或修正自然语言目标；是否必须提问、是否可行动是产品权限与风险政策 | Clicky 收口输入；Kernel 用不可变 `TaskExecutionContract` 固定 objective、success mode、authority、risk 和一次产品 attempt；Pi 负责理解与下一步决策 |
 | 2. 获取当前现场 | 默认使用完成任务所需的最小新鲜现场；扩大到其他窗口、历史、私密或敏感内容时受范围和权限控制 | **Pi 扩展**。Pi 接受文本、图片、custom message 和 context hook，但不提供奕枢的桌面传感器、证据来源、置信度和过期语义 | Clicky 采集 `ContextFrame`；Kernel `ContextTrail` 保存脱敏证据；Runtime 把有界现场注入 Pi |
 | 3. 判断下一步 | 不逐步播报隐藏推理；直接做低风险可逆步骤，只在关键检查点、阻塞、风险变化或需要决定时更新用户 | **Pi 原生**。Pi 自带 model-tool 循环、turn events、steering/follow-up 队列和上下文压缩 | Pi 选择执行步骤；Kernel/Clicky 只投影短、可见、可追踪的任务状态，不暴露链式思考 |
 | 4. 选择并调用工具 | 用户不需要挑选工具、Skill、MCP 或后台 Agent；能力扩大、敏感访问和高风险动作必须经过产品授权 | **Pi 原生 + Pi 扩展**。内置工具选择、custom tools、Skills、extensions 和运行时 active-tool 切换均已存在 | Runtime 用 capability profile 和 session tool policy 装配 Pi；Kernel Action/authority 决定产品权限；Swift 执行 macOS 动作 |
-| 5. 获取行动结果 | 工具返回成功不能直接视为现实结果成功；必须取得新观察、结构化回执或外部可见证据 | **Pi 原生但不足**。Pi 有 `tool_execution_*` 和 tool result，可继续推理；它不知道桌面或外部世界是否真的改变 | Runtime/Swift 产出 `ActionReceipt` 与 fresh verification；Kernel 只接受有界 evidence，未验证结果保持 blocked |
-| 6. 根据结果继续或调整 | 低风险、可逆且仍在原授权内时自主换方法；重复失败、权限扩大、成本或风险显著变化时停止并询问 | **Pi 原生 + 产品拥有**。Pi 会把 tool error 回注循环，支持 steer、follow-up、abort，并可对瞬时模型错误自动 retry；任务尝试预算和风险升级不是 Pi 的产品决定 | Pi 负责同一授权内的策略调整；Kernel authority、任务政策和 typed cancellation 限制边界 |
-| 7. 判断整个任务是否完成 | 回到最初目标和成功条件，验证最终可观察结果；某一步成功不等于任务完成 | **产品拥有**。Pi 能在无更多 tool call 时结束 Agent run，但这只代表模型停止，不代表用户结果已达成 | Kernel `TaskTruth` 和验收证据决定 done/blocked/failed；重复 request 回放产品记录，不能重复执行动作 |
+| 5. 获取行动结果 | 工具返回成功不能直接视为现实结果成功；必须取得新观察、结构化回执或外部可见证据 | **Pi 原生但不足**。Pi 有 `tool_execution_*` 和 tool result，可继续推理；它不知道桌面或外部世界是否真的改变 | 只读交付需非空结果；外部改变只接受进程内标记的 actuator receipt 或 fresh read-back；普通 wire `verified` 不能提升完成度 |
+| 6. 根据结果继续或调整 | 低风险、可逆且仍在原授权内时自主换方法；重复失败、权限扩大、成本或风险显著变化时停止并询问 | **Pi 原生 + 产品拥有**。Pi 会把 tool error 回注循环，支持 steer、follow-up、abort，并可对瞬时模型错误自动 retry；任务尝试预算和风险升级不是 Pi 的产品决定 | 每个 request 在发送 Pi 前消耗唯一的产品 attempt；authority 改变、risk 提高或预算用尽都升级而不再发送；Pi 内部 transport/model retry 不算新产品 attempt |
+| 7. 判断整个任务是否完成 | 回到最初目标和成功条件，验证最终可观察结果；某一步成功不等于任务完成 | **产品拥有**。Pi 能在无更多 tool call 时结束 Agent run，但这只代表模型停止，不代表用户结果已达成 | Kernel 按 `TaskExecutionContract` 投影 `completed` / `verified` / `blocked` / `failed`；重复 request 只回放产品记录，真人“从头重试”必须创建新 request |
 | 8. 把结果告诉用户 | 优先说明发生了什么、证据是什么、还有什么未确认或需要用户决定；语音不朗读协议、URL 噪声或隐藏推理 | **Pi 原生 + 产品拥有**。Pi 提供流式文本和 lifecycle events；内容清洗、TTS、Presence 与最终责任表达属于产品 | Runtime 投影 typed events；Clicky 浮层、Presence 和 TTS 呈现；Kernel 保存最终可见输出和有界回执 |
 | 9. 保存、记住并继续 | 后台自动整理、合并和更新长期记忆；自动产生候选能力并经测试、对比、回归后采用或回滚；用户可查看、修改、删除、关闭或撤销；敏感信息、权限扩大、高风险习惯和重大行为变化先询问 | **Pi 扩展但产品拥有**。Pi 有 session JSONL、compaction、Skills 加载和资源 reload；这些不是产品长期记忆、能力治理或用户控制面 | Kernel evidence store 拥有记忆、Learning、Skill、Mandate 和 provenance；能力采用必须走产品 gate；Clicky 应提供“记住了什么”“最近学会了什么”入口 |
 
 ## 当前产品缺口
 
-- 阶段 1 的显式成功条件、风险预算和授权范围还没有统一成一个完整的产品对象。
-- 阶段 5 到 7 已有桌面动作回执与 `TaskTruth` 门禁，但通用任务的最终验收器仍不完整。
-- 阶段 6 的自主重试存在 Pi retry 与局部策略，产品级尝试预算和风险升级策略仍需统一。
+- `TaskExecutionContract` 目前只有“只读交付”和“外部改变”两种成功模式，且每个 request 固定一次产品 attempt；它不是通用 workflow/checkpoint 引擎。
+- 任务中断后不保存可续跑 checkpoint；Clicky 只能由真人发起新 request 从头重试，或开始新方向。
+- 分布式 / 多进程 exactly-once 仍未实现；Desktop lease 只保护当前 Runtime 进程。
 - 阶段 9 已有记忆 list/forget、bounded recall、Learning/Skill 数据结构和实验室 evolution gate；
   记忆编辑/总开关、“最近学会了什么”、能力禁用/撤销和自动候选采用流水线尚未完成。
 - Pi 的 session persistence 是可用 SDK 能力，但正式产品当前故意使用 in-memory Pi session；
-  durable conversation/task truth 只在 Kernel，不能把 Pi JSONL 当恢复真相。
+  durable conversation/task truth 与 Result Inbox 只在 Kernel，子 session 终态后立即释放，不能把 Pi JSONL 当恢复真相。
 
 ## AgentCore 处置
 
