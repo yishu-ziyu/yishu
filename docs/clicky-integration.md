@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: 21629d6 2026-08-10
+Verified: c268654 2026-08-13
 Review: apps/clicky 与 runtime/sidecar 接线变化时
 
 ## Decision
