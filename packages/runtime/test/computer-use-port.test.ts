@@ -148,7 +148,8 @@ test("computer-use port rejects a stale attempt receipt without settling the act
 });
 
 test("computer-use timeout preserves a failed receipt code for the adapter", async () => {
-  const port = new StdioComputerUsePort(() => {}, 5);
+  const events: RuntimeEvent[] = [];
+  const port = new StdioComputerUsePort((event) => events.push(event), 5);
   const pendingResult = port.perform({ action: "left_click", x: 1, y: 1 }, {
     requestId: randomUUID(),
     traceId: randomUUID(),
@@ -160,7 +161,157 @@ test("computer-use timeout preserves a failed receipt code for the adapter", asy
     assert.equal(error.code, "timeout");
     return true;
   });
+
+  const afterTimeout = port.perform({ action: "left_click", x: 2, y: 2 }, {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+  });
+  assert.equal(events.length, 2, "a new action acquires immediately after timeout");
   port.dispose();
+  await assert.rejects(afterTimeout, /disposed/);
+});
+
+test("one shared port blocks concurrent Pi and Kernel desktop actions without queueing", async () => {
+  const events: RuntimeEvent[] = [];
+  const port = new StdioComputerUsePort((event) => events.push(event), 1_000);
+  const piRequestId = randomUUID();
+  const piTraceId = randomUUID();
+
+  const piAction = port.perform({ action: "left_click", x: 10, y: 20 }, {
+    requestId: piRequestId,
+    traceId: piTraceId,
+  });
+  const busyResult = await port.perform({
+    action: "finder_history_back",
+    x: 0,
+    y: 0,
+    targetBundleId: "com.apple.finder",
+    targetPid: 4242,
+  }, {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+  });
+
+  assert.deepEqual(busyResult, {
+    succeeded: false,
+    verified: false,
+    status: "blocked",
+    code: "runtime_error",
+    method: "unknown",
+    attemptId: busyResult.attemptId,
+    message: "Desktop is busy with another computer action.",
+  });
+  assert.ok(busyResult.attemptId);
+  assert.equal(events.length, 1, "busy action must not emit or enter a queue");
+
+  const requested = computerActionRequestedPayloadSchema.parse(events[0]?.payload);
+  assert.equal(port.resolve({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "computer.action.result",
+    requestId: piRequestId,
+    traceId: piTraceId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      actionId: requested.actionId,
+      succeeded: true,
+      verified: true,
+      message: "Clicked.",
+      attemptId: requested.attemptId,
+    },
+  }), true);
+  await piAction;
+  assert.equal(events.length, 1, "the blocked action must not run after the lease is released");
+  const afterResolve = port.perform({ action: "left_click", x: 30, y: 40 }, {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+  });
+  assert.equal(events.length, 2, "a new action acquires immediately after resolve");
+  port.dispose();
+  await assert.rejects(afterResolve, /disposed/);
+});
+
+test("the default desktop lease is shared by every Stdio port in the process", async () => {
+  const firstEvents: RuntimeEvent[] = [];
+  const secondEvents: RuntimeEvent[] = [];
+  const firstPort = new StdioComputerUsePort((event) => firstEvents.push(event), 1_000);
+  const secondPort = new StdioComputerUsePort((event) => secondEvents.push(event), 1_000);
+  const firstRequestId = randomUUID();
+  const first = firstPort.perform({ action: "left_click", x: 1, y: 1 }, {
+    requestId: firstRequestId,
+    traceId: randomUUID(),
+  });
+
+  const busy = await secondPort.perform({ action: "left_click", x: 2, y: 2 }, {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+  });
+  assert.equal(busy.status, "blocked");
+  assert.equal(secondEvents.length, 0);
+
+  firstPort.cancelRequest(firstRequestId);
+  await assert.rejects(first, (error: unknown) => {
+    assert.ok(error instanceof ComputerActionError);
+    assert.equal(error.status, "cancelled");
+    return true;
+  });
+  const afterRelease = secondPort.perform({ action: "left_click", x: 3, y: 3 }, {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+  });
+  assert.equal(secondEvents.length, 1);
+  secondPort.dispose();
+  await assert.rejects(afterRelease, /disposed/);
+  firstPort.dispose();
+});
+
+test("computer-use cancellation releases the desktop lease", async () => {
+  const events: RuntimeEvent[] = [];
+  const port = new StdioComputerUsePort((event) => events.push(event), 1_000);
+  const controller = new AbortController();
+  const first = port.perform({ action: "left_click", x: 1, y: 1 }, {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+  }, controller.signal);
+
+  controller.abort();
+  await assert.rejects(first, (error: unknown) => {
+    assert.ok(error instanceof ComputerActionError);
+    assert.equal(error.status, "cancelled");
+    return true;
+  });
+
+  const second = port.perform({ action: "left_click", x: 2, y: 2 }, {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+  });
+  assert.equal(events.length, 2, "a new action acquires immediately after cancellation");
+  port.dispose();
+  await assert.rejects(second, /disposed/);
+});
+
+test("computer-use emit exceptions release the desktop lease", async () => {
+  const events: RuntimeEvent[] = [];
+  let throwOnce = true;
+  const port = new StdioComputerUsePort((event) => {
+    if (throwOnce) {
+      throwOnce = false;
+      throw new Error("emit failed");
+    }
+    events.push(event);
+  }, 1_000);
+
+  await assert.rejects(port.perform({ action: "left_click", x: 1, y: 1 }, {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+  }), /emit failed/);
+
+  const second = port.perform({ action: "left_click", x: 2, y: 2 }, {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+  });
+  assert.equal(events.length, 1, "a new action acquires immediately after the exception");
+  port.dispose();
+  await assert.rejects(second, /disposed/);
 });
 
 test("computer_control tool delegates to the product-owned port", async () => {
