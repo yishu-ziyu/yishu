@@ -20,6 +20,8 @@ Accepted 2026-08-11
 
 统一不等于把所有代码合并成一个模块。统一的是身份、入口、产品真相、能力协议和验收闭环。
 
+> 2026-08-12 更新：本节记录的开发壳已由 ADR 0012 退役；本 ADR 的其余产品主干决策不变。
+
 ## Decision
 
 奕枢采用一条单一产品主干：
@@ -44,8 +46,9 @@ Runtime adapters
 - `packages/runtime` 是协议网关和执行适配层。它可以管理执行会话和短生命周期 transport
   状态，但不得成为记忆、任务、关系或结果交付的最终事实源。
 - Pi 是正式执行 harness。执行器可以替换，产品身份和状态所有权不可随执行器替换。
-- `packages/agent-core`、mock runtime 和 `apps/macos` 是实验或验证设施，不是并行产品核心。
-  实验能力只有迁入 Kernel/Runtime 的正式端口后才算进入产品。
+- `packages/agent-core` 与 mock runtime 是实验或验证设施，不是并行产品核心；原
+  `apps/macos` 开发壳已由 ADR 0012 退役。实验能力只有迁入 Kernel/Runtime 的正式端口并
+  进入唯一 Clicky App 后才算进入产品。
 - 快路径可以预计算 observation 或优化 latency，但不能绕过 authority、TaskTruth、
   ActionReceipt 和可见 read-back。Swift 继续执行 macOS 动作，决策和结果归档回到主干。
 - continuity fallback 必须位于 Runtime adapter 后面，继续经过同一 Kernel ledger。

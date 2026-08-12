@@ -8,7 +8,7 @@ Review: 产品不变量、架构边界或验证拓扑变化时
 ## Product invariants
 
 - 奕枢（Yishu）是唯一持续存在的用户可见身份；Hanako 是已吸收的人格设计来源，不是第二个产品或对外身份；专家 Agent 留在后台。 → docs/decisions/0001-yishu-single-identity.md
-- `apps/clicky` 是奕枢唯一正式 Clicky 源码与安装源，保留其 bundle identity、TCC 权限、登录项、UserDefaults、鼠标伴随、语音与 TTS；本仓库的 `apps/macos` 只是默认不占用全局快捷键的开发壳。 → docs/decisions/0002-clicky-canonical-shell.md
+- `apps/clicky` 是奕枢唯一 macOS App 源码、构建、安装与可见验收入口，保留其 bundle identity、TCC 连续性、登录项、UserDefaults、鼠标伴随、语音与 TTS；不得重建第二个 macOS App。 → docs/decisions/0012-single-macos-app-source.md
 - Voice and spatial presence are primary interfaces, not add-ons.
 - Context is evidence: every context item carries source, capture time, confidence, and expiry semantics. → docs/decisions/0006-context-is-evidence.md
 - Keep the user cursor, Yishu's visible pointer, and background execution input as separate channels.
@@ -21,8 +21,8 @@ Review: 产品不变量、架构边界或验证拓扑变化时
 
 ## Architecture boundaries
 
-- The canonical Clicky macOS app at `apps/clicky` owns shipping presence, voice, permissions, TTS, user settings, source, and installation; `apps/macos` in this repository is an integration harness only. → docs/decisions/0002-clicky-canonical-shell.md
-- `YishuContext` owns the portable evidence model; the canonical app will supply its production collector.
+- The Clicky macOS app at `apps/clicky` owns presence, voice, permissions, TTS, user settings, source, installation, and visible acceptance. Tests and build configurations must not create a second App implementation. → docs/decisions/0012-single-macos-app-source.md
+- `YishuContext` owns the portable evidence model in the root Swift package; Clicky supplies its production collector.
 - `packages/kernel` owns the product layer above turns: `YishuAction` registry, `ContextTrail`, evidence store (`MemoryClaim` / Learning / Skill / Mandate / TaskTruth), and `ContextCapsule`; Voice / UI / initiative / MCP / CLI / Pi share product actions, not fork handlers. → docs/decisions/0011-pi-single-agent-loop.md
 - `packages/runtime` owns the Pi adapter and the versioned runtime protocol (`AgentRuntime` remains turn-centric execution).
 - Product code depends on `AgentRuntime` for turns and on `@yishu/kernel` for product capabilities; Pi-specific types stay inside `PiRuntimeAdapter`.
@@ -37,7 +37,7 @@ pnpm test
 pnpm run check
 pnpm --filter @yishu/kernel test
 swift test
-./script/build_and_run.sh --verify
+pnpm product:verify
 ```
 
 For user-visible changes, launch the app and inspect the real floating presence. A build alone is not product acceptance.

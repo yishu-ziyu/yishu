@@ -8,23 +8,17 @@ let package = Package(
         .macOS(.v14),
     ],
     products: [
-        .executable(name: "Yishu", targets: ["Yishu"]),
         .library(name: "YishuContext", targets: ["YishuContext"]),
     ],
     targets: [
         .target(
             name: "YishuContext",
-            path: "apps/macos/Sources/YishuContext"
-        ),
-        .executableTarget(
-            name: "Yishu",
-            dependencies: ["YishuContext"],
-            path: "apps/macos/Sources/YishuApp"
+            path: "Sources/YishuContext"
         ),
         .testTarget(
             name: "YishuContextTests",
             dependencies: ["YishuContext"],
-            path: "apps/macos/Tests/YishuContextTests"
+            path: "Tests/YishuContextTests"
         ),
     ],
     swiftLanguageVersions: [.v5]

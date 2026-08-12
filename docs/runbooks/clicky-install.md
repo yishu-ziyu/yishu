@@ -25,4 +25,4 @@ Review: apps/clicky/scripts/ 或签名/TCC 流程变化时
 
 ## 登录项
 
-SMAppService 登录项由正式 Clicky.app 拥有；开发壳（`apps/macos`）不得注册登录项。
+SMAppService 登录项只由 Clicky.app 拥有。仓库不维护第二个 macOS App 或登录项。

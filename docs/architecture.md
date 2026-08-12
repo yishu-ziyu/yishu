@@ -38,11 +38,10 @@ Product path in one line:
 
 ## Source and runtime ownership
 
-`apps/clicky` is the only formal Clicky source and installation surface. It owns
-shipping presence, voice, permissions, TTS, settings, bundle identity, and the
-user-visible shell. `apps/macos` is a development and integration harness only:
-it uses `com.yishu.yishu-lab`, must not become a second login item, and is not a
-second product.
+`apps/clicky` is the repository's only macOS App source and installation
+surface. It owns presence, voice, permissions, TTS, settings, bundle identity,
+and the user-visible shell. Shared Swift protocol code lives in the root package;
+tests and build configurations must not create a second App implementation.
 
 `packages/kernel` (`@yishu/kernel`) is the product action, trail, and evidence
 store layer. It does not replace Pi. Voice, UI, initiative, MCP, CLI, Pi, and
@@ -151,7 +150,7 @@ The presence of a restricted conversation profile does not remove tools from Yis
 
 ## Single-app rule
 
-`apps/clicky` carries the shipping interaction identity `com.yishu.yishu-buddy` and is the only formal source and install path for Clicky. The standalone `Yishu.app` in this repository remains a test harness with `com.yishu.yishu-lab`; it must not be installed as another login item or left listening beside the canonical app. The shipping Clicky build owns ContextFrame collection and starts the bundled Pi runtime behind its existing `CompanionManager`.
+`apps/clicky` carries the interaction identity `com.yishu.yishu-buddy` and is the only source, build, install, and visible acceptance path for the macOS App. The root Swift package exposes only the portable `YishuContext` contract and tests; it does not build another `.app`. Clicky owns ContextFrame collection and starts the bundled Pi runtime behind its existing `CompanionManager`.
 
 The current Grok selector and local 8317 route are preserved as model policy. Clicky sends only an allowlisted `{ provider, model }` preference; `PiRuntimeAdapter` maps it into a product-owned custom provider fixed to `http://127.0.0.1:8787/v1`. Neither arbitrary base URLs nor headers cross the runtime protocol. The old local `/chat` route remains a controlled continuity fallback while a physical push-to-talk turn is still a manual acceptance gate. It is a transitional bypass: ADR 0010 requires moving fallback behind Runtime so it uses the same Kernel ledger before the product expands further.
 

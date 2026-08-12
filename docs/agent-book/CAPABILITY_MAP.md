@@ -160,7 +160,7 @@ CLI 子命令（`cli.ts` + 根脚本）：
 状态：
 
 - **已有（agent-core）**：包内有源码与测试；主路径、CLI 或导出 API 可用。
-- **已有（产品）** / **已有（产品接线）**：Clicky / `packages/runtime` / 开发壳路径。
+- **已有（产品）** / **已有（产品接线）**：Clicky / `packages/runtime` / 根 Swift contract。
 - **未做**：磁盘上无对应实现。
 
 | 书中能力 | 状态 | 路径 | 怎么试 |
@@ -174,7 +174,7 @@ CLI 子命令（`cli.ts` + 根脚本）：
 | Ch2 上下文压缩 | 已有（agent-core） | `context/compress.ts` | `test/compress.test.ts` |
 | Ch2 Agent Skills | 已有（agent-core） | `context/skills.ts`；`skills/*/SKILL.md` | 任务含 coding/memory/research 关键词 |
 | Ch2 提示注入防护 | 已有（agent-core） | `security/injection-guard.ts` | `injection-guard.test.ts` |
-| Ch2 桌面证据上下文 | 已有（产品） | `apps/macos`；`packages/runtime` context 协议 | [v0-context-voice](../acceptance/v0-context-voice.md) |
+| Ch2 桌面证据上下文 | 已有（产品） | `apps/clicky`；`Sources/YishuContext`；`packages/runtime` context 协议 | [v0-context-voice](../acceptance/v0-context-voice.md) |
 | Ch3 用户记忆（分层） | 已有（agent-core，文件级） | `memory/store.ts`：layers `working` \| `session` \| `long_term` \| `profile`；`memory_write` / `memory_search` / `memory_promote` → `data/memory.json` | `run "记住：…"`；单测 `memory` store（layer 排序 / promote） |
 | Ch3 知识库 / 轻量 RAG | 已有（agent-core，文件级 token 检索） | `knowledge/store.ts`；`knowledge_search` / `knowledge_ingest`；`data/knowledge/index.json` | `run "关于 ReAct 模式"`；`eval` knowledge + knowledge-write |
 | Ch3 向量库 / embedding 索引 | 未做 | 当前无 embedding / ANN；是 token 重叠打分 | — |
@@ -209,7 +209,7 @@ CLI 子命令（`cli.ts` + 根脚本）：
 说明：
 
 - `@yishu/agent-core` 是可独立跑的书义 harness，**不是**产品 Runtime 模式或依赖。
-- 正式交互仍在二开 Clicky；`apps/macos` 只是开发壳。
+- 正式交互与可见验收都在 Clicky；共享 Swift package 只承载 ContextFrame 协议与测试。
 - 产品侧接入只允许经 `AgentRuntime`，禁止 Kairos 类旁路。
 - 知识库是 **文件 JSON + token 重叠打分**，不是向量 RAG。
 - MCP 是 **本地 JSON 描述 + 进程内 handler/stub**，不是连远端 MCP 服务器的完整 SDK 客户端。
@@ -233,7 +233,7 @@ CLI 子命令（`cli.ts` + 根脚本）：
   └── MockAgentRuntime（协议测试替身，mode=mock）
         │
         ▼
-  二开 Clicky / apps/macos 开发壳（语音、光标、ContextFrame、TTS）
+  Clicky（语音、光标、ContextFrame、TTS）+ 根 Swift contract tests
 ```
 
 ## 5. 验收与试用入口

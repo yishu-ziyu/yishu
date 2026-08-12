@@ -15,8 +15,9 @@ The work in this repository is not a replacement shell or a second Clicky source
 2. an evidence-bearing `ContextFrame` for shared attention;
 3. a versioned `AgentRuntime` implemented through the Pi SDK.
 
-`apps/macos` is only the development and integration shell in this repository.
-It is not a second product, login item, signing source, or installation path.
+The repository has no second development shell. Portable Swift protocol code
+lives in the root package, while all visible integration work and acceptance
+remain in `apps/clicky`.
 
 ## Target turn path
 
@@ -121,7 +122,8 @@ Local acceptance covers the signed installed app, live bundled sidecar, a real G
 9. **Next, Make It Usable:** restore and browse conversations from Kernel,
    remove the bounded Clicky history's remaining fallback role, and assemble
    reviewed scoped memory before new turns.
-10. **Later, Retire:** remove any dormant Kairos references from Yishu and the direct-model fallback only after audible parity and recovery checks; keep `apps/macos` as the development harness.
+10. **Done, One App:** retire the duplicate macOS development shell and keep shared `YishuContext` as a protocol-only root Swift package.
+11. **Later, Retire:** remove any dormant Kairos references from Yishu and the direct-model fallback only after audible parity and recovery checks.
 
 The current production deployment remains one Clicky instance managing one
 SQLite-backed sidecar. Multi-runtime exactly-once execution still needs a

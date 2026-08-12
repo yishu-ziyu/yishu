@@ -15,8 +15,8 @@ context capture, and the bundled Yishu runtime handoff.
   second brain, compatibility bridge, or parallel progress transport here.
 - API credentials stay in local provider configuration. Never commit or log
   `worker/.dev.vars`, raw tokens, screenshots, or private conversation data.
-- `apps/macos` remains a development harness; this directory is the formal
-  shipping shell.
+- This is the repository's only macOS App source. Keep shared protocol-only
+  Swift code in the root package; do not create a second App target or shell.
 
 ## Local workflow
 

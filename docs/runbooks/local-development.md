@@ -3,7 +3,7 @@
 Type: runbook
 Status: current
 Verified: 21629d6 2026-08-10
-Review: 环境要求、启动模式或 script/build_and_run.sh 变化时
+Review: 环境要求或 Clicky 本地构建/启动流程变化时
 
 ## 环境要求
 
@@ -20,11 +20,12 @@ pnpm install
 
 无 `.env`，无外部数据库。
 
-## 运行模式
+## 运行与测试
 
-- `YISHU_RUNTIME_MODE=mock`：默认值，无凭据即可运行。
-- `YISHU_RUNTIME_MODE=pi`：接 Pi harness；Pi 凭据留在 Pi 自己的凭据存储，不进入本仓库。
-- `YISHU_ENABLE_DEV_SHORTCUT=1`：仅用于独立调试开发壳（`apps/macos`），正式 Clicky 不需要。
+- `pnpm product:check`：无凭据的日常产品内环，包含共享 Swift contract tests。
+- `pnpm product:verify`：增加 Clicky Xcode tests 与构建脚本 self-test，不安装或启动第二个 App。
+- `pnpm product:build:clicky`：构建正式 Clicky，不安装、不启动。
+- `./apps/clicky/scripts/run-local.sh`：构建、安装并启动 `/Applications/Clicky.app`；Pi 凭据留在 Pi 自己的凭据存储，不进入本仓库。
 
 ## 常用验证
 
