@@ -16,7 +16,10 @@ import {
   AssistantOutputStreamProjector,
   isDirectComputerActionUtterance,
 } from "./assistant-output.js";
-import { createComputerControlTool } from "./computer-control-tool.js";
+import {
+  createComputerControlTool,
+  type ComputerControlToolAction,
+} from "./computer-control-tool.js";
 import {
   ComputerActionError,
   UnavailableComputerUsePort,
@@ -49,10 +52,28 @@ import {
 } from "./protocol.js";
 import type { AgentRuntime, RuntimeEventSink } from "./runtime-port.js";
 import { evaluateActionBoundary, taskExecutionContractFromCommand } from "./task-contract.js";
-import type { TaskExecutionContract } from "@yishu/kernel";
+import {
+  normalizeSessionScope,
+  sessionScopeKey,
+  type SessionScope,
+  type TaskExecutionContract,
+} from "@yishu/kernel";
 import { markTrustedExternalReceipt } from "./trusted-task-receipt.js";
 
 type RuntimeModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
+const SESSION_ABORT_TIMEOUT_MS = 2_000;
+
+async function abortSessionWithin(session: AgentSession): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, SESSION_ABORT_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([session.abort().catch(() => undefined), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 interface ActiveComputerTurn {
   requestId: string;
@@ -60,6 +81,12 @@ interface ActiveComputerTurn {
   intentId: string;
   basisFrameId: string;
   directComputerAction: boolean;
+  authorizedText?: string;
+  allowedActionSequence: Array<"set_text" | "left_click">;
+  frontmostTarget?: {
+    targetBundleId: string;
+    targetPid: number;
+  };
   contract?: TaskExecutionContract;
   emit: RuntimeEventSink;
   actionCount: number;
@@ -105,19 +132,85 @@ export function shouldRunCompatibilityComputerAction(
   return directComputerAction && actionCount === 0 && hasCompatibilityAction;
 }
 
+const deniedTextInputPattern = /^(?:(?:请|麻烦|帮我|请帮我)\s*)?(?:不要|别(?:再)?|无需|不(?:要|用|必)|禁止|别把|do\s+not|don't|dont|never)\s*(?:输入|填写|填入|键入|写入|type|fill|set)/iu;
+const textInputQuestionPattern = /(?:为什么|怎么|如何|是什么|什么意思|what\b|why\b|how\b|\?\s*$|？\s*$)/iu;
+const actionSequencePattern = /(?:然后|再|接着|之后|随后|and\s+then|then|after(?:wards)?)/iu;
+const clickOrPressPattern = /(?:点击|点(?:击)?|按下|按|click|press)/iu;
+const quotedTextPattern = /["“「『']([^"”」』']+)["”」』']/u;
+
+/**
+ * Extract the one exact string the user authorized. This deliberately accepts
+ * only imperative utterances; negation, questions, reported speech and an
+ * empty/ambiguous tail fail closed before Pi receives write authority.
+ */
+export function authorizedTextForUtterance(utterance: string): string | undefined {
+  const normalized = utterance.trim();
+  if (normalized.length === 0
+    || deniedTextInputPattern.test(normalized)) return undefined;
+
+  const chinese = normalized.match(
+    /^(?:(?:请|麻烦|帮我|请帮我)\s*)?(?:在(?:这里|当前(?:输入框|文本框|位置))\s*)?(?:输入|填写|填入|键入|写入)\s*[:：]?\s*(.+)$/u,
+  );
+  const english = normalized.match(
+    /^(?:please\s+)?(?:type(?:\s+in)?|fill(?:\s+in)?|set\s+(?:the\s+)?text)\s*[:：]?\s+(.+)$/iu,
+  );
+  const tail = (chinese?.[1] ?? english?.[1])?.trim();
+  if (!tail) return undefined;
+
+  const quotedMatch = tail.match(quotedTextPattern);
+  const quoted = quotedMatch?.[1]?.trim();
+  if (quoted && quotedMatch?.index !== undefined) {
+    const suffix = tail.slice(quotedMatch.index + quotedMatch[0].length).trim();
+    const authorizedFollowup = /^(?:，|,)?\s*(?:然后|再|接着|之后|随后|and\s+then|then|after(?:wards)?)\s*(?:(?:点击|点(?:击)?|按下|按)[\p{Script=Han}A-Za-z0-9]|(?:click|press)\b)/iu;
+    // A question or reported-speech suffix outside the quotes is not write
+    // authority. Only an empty suffix or one explicit follow-up click is
+    // accepted; punctuation inside the quoted text remains literal input.
+    if (suffix.length > 0
+      && (textInputQuestionPattern.test(suffix) || !authorizedFollowup.test(suffix))) return undefined;
+    return quoted.length <= 10_000 ? quoted : undefined;
+  }
+  if (textInputQuestionPattern.test(normalized)) return undefined;
+  const beforeNextAction = tail.split(
+    /(?:，|,)?\s*(?:然后|再|接着|之后|随后|and\s+then|then|after(?:wards)?)\s*(?=(?:点击|点(?:击)?|按下|按|click|press))/iu,
+    1,
+  )[0]?.trim();
+  const text = beforeNextAction;
+  if (!text || text.length > 10_000) return undefined;
+  return text.replace(/[。.]$/u, "").trim() || undefined;
+}
+
+/** set_text is admitted only when the utterance itself authorizes text input. */
+export function isExplicitTextInputUtterance(utterance: string): boolean {
+  return authorizedTextForUtterance(utterance) !== undefined;
+}
+
+/** Only the exact input, optionally followed by one click, is authorized. */
+export function computerActionLimitForUtterance(utterance: string): number {
+  const explicitInputSequence = isExplicitTextInputUtterance(utterance)
+    && actionSequencePattern.test(utterance)
+    && clickOrPressPattern.test(utterance);
+  return explicitInputSequence ? 2 : 1;
+}
+
 // This is deliberately not an API credential. The Clicky-owned loopback
 // gateway terminates auth and forwards the request to the existing proxy.
 // Supplying a stable non-secret value only satisfies pi-ai's OpenAI client
 // requirement that a client key be present; no environment key is read here.
-const LOCAL_PROXY_AUTH_SENTINEL = "yishu-local-proxy";
+const LOCAL_PROXY_AUTH_SENTINEL =
+  process.env.YISHU_VOICE_PROXY_TOKEN ?? "yishu-local-proxy-unavailable-sentinel";
+delete process.env.YISHU_VOICE_PROXY_TOKEN;
+if (process.env.YISHU_VOICE_PROXY_TOKEN !== undefined) {
+  throw new Error("Voice proxy capability must not remain in the Pi process environment.");
+}
 
 export function piSessionCacheKey(
   capabilityProfile: CapabilityProfile,
   preference: ModelPreference,
   generation: number,
   conversationId: string,
+  sessionScope: SessionScope = { kind: "personal" },
 ): string {
-  return `${capabilityProfile}:${preference.provider}:${generation}:${preference.model}:${conversationId}`;
+  return `${capabilityProfile}:${preference.provider}:${generation}:${preference.model}:${sessionScopeKey(sessionScope)}:${conversationId}`;
 }
 
 /**
@@ -154,6 +247,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
   readonly authService: YishuAuthService;
   private readonly sessions = new Map<string, AgentSession>();
   private readonly activeSessionByRequestId = new Map<string, AgentSession>();
+  private readonly sessionKeyByRequestId = new Map<string, string>();
   private readonly activeProviderTurns = new Map<string, ActiveProviderTurn>();
   private readonly pendingRequestIds = new Set<string>();
   private readonly cancelledRequestIds = new Set<string>();
@@ -209,14 +303,37 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.sessionToolPolicy = policy;
   }
 
-  /** Release only sessions whose cache key belongs to this conversation. */
+  /**
+   * Synchronously detach every cached/active session for one conversation.
+   * Used as the supersede fence before a replacement turn is admitted; the
+   * old operation may still finish cleanup, but can no longer be reused.
+   */
   releaseConversationSession(conversationId: string): void {
     const suffix = `:${conversationId}`;
     for (const [key, session] of this.sessions.entries()) {
       if (!key.endsWith(suffix)) continue;
-      session.dispose();
       this.sessions.delete(key);
+      for (const [requestId, activeSession] of this.activeSessionByRequestId.entries()) {
+        if (activeSession !== session) continue;
+        this.activeSessionByRequestId.delete(requestId);
+        this.sessionKeyByRequestId.delete(requestId);
+        this.cancelledRequestIds.add(requestId);
+        this.computerUsePort.cancelRequest(requestId, "turn_superseded");
+      }
+      // Detachment is synchronous, so a replacement cannot reuse this Pi
+      // session. Provider abort then gets the same bounded cleanup window as
+      // explicit cancellation; dispose alone is not assumed to unblock prompt.
+      void abortSessionWithin(session).finally(() => session.dispose());
     }
+  }
+
+  private evictSession(sessionKey: string, session: AgentSession): void {
+    // A supersede/cancel fence may already have detached this exact object and
+    // taken ownership of its bounded abort + dispose. The late runTurn finally
+    // must not dispose the same provider session a second time.
+    if (this.sessions.get(sessionKey) !== session) return;
+    this.sessions.delete(sessionKey);
+    session.dispose();
   }
 
   async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
@@ -251,6 +368,8 @@ export class PiRuntimeAdapter implements AgentRuntime {
     let preference!: ModelPreference;
     let model: RuntimeModel;
     let session: AgentSession;
+    let sessionKey = "";
+    let sessionCreated = false;
     let providerTurn: ActiveProviderTurn | undefined;
     let reloginProvider: AuthProviderId | undefined;
     try {
@@ -263,14 +382,20 @@ export class PiRuntimeAdapter implements AgentRuntime {
         if (providerTurn) this.settleProviderTurn(providerTurn);
         return;
       }
-      session = await this.sessionFor(
+      const acquiredSession = await this.sessionFor(
         command.payload.capabilityProfile,
         preference,
         model,
         command.payload.conversationId ?? command.requestId,
+        normalizeSessionScope(command.payload.sessionScope),
       );
+      session = acquiredSession.session;
+      sessionCreated = acquiredSession.created;
+      sessionKey = acquiredSession.key;
       if (this.isRequestCancelled(command.requestId)) {
-        await session.abort().catch(() => undefined);
+        if (this.sessions.get(sessionKey) === session) this.sessions.delete(sessionKey);
+        await abortSessionWithin(session);
+        session.dispose();
         if (providerTurn) this.settleProviderTurn(providerTurn);
         return;
       }
@@ -304,15 +429,20 @@ export class PiRuntimeAdapter implements AgentRuntime {
     }
 
     this.activeSessionByRequestId.set(command.requestId, session);
+    this.sessionKeyByRequestId.set(command.requestId, sessionKey);
     if (this.isRequestCancelled(command.requestId)) {
-      await session.abort().catch(() => undefined);
       this.activeSessionByRequestId.delete(command.requestId);
+      this.sessionKeyByRequestId.delete(command.requestId);
+      if (this.sessions.get(sessionKey) === session) this.sessions.delete(sessionKey);
+      await abortSessionWithin(session);
+      session.dispose();
       if (providerTurn) this.settleProviderTurn(providerTurn);
       return;
     }
 
     let streamedText = "";
     const directComputerAction = isDirectComputerActionUtterance(command.payload.utterance);
+    const observedFrontmost = command.payload.contextFrame.frontmostApplication?.value;
     const outputProjector = new AssistantOutputStreamProjector();
     const emitVisibleDelta = (text: string): void => {
       if (text.length === 0) return;
@@ -352,12 +482,28 @@ export class PiRuntimeAdapter implements AgentRuntime {
     }));
 
     const taskContract = taskExecutionContractFromCommand(command);
+    const authorizedText = authorizedTextForUtterance(command.payload.utterance);
+    const allowsFollowupClick = authorizedText !== undefined
+      && actionSequencePattern.test(command.payload.utterance)
+      && clickOrPressPattern.test(command.payload.utterance);
     const computerTurn: ActiveComputerTurn = {
       requestId: command.requestId,
       traceId: command.traceId,
       intentId: randomUUID(),
       basisFrameId: command.payload.contextFrame.frameId,
       directComputerAction,
+      ...(authorizedText !== undefined ? { authorizedText } : {}),
+      allowedActionSequence: authorizedText !== undefined
+        ? ["set_text", ...(allowsFollowupClick ? ["left_click" as const] : [])]
+        : directComputerAction ? ["left_click"] : [],
+      ...(observedFrontmost?.bundleIdentifier && observedFrontmost.processIdentifier > 0
+        ? {
+            frontmostTarget: {
+              targetBundleId: observedFrontmost.bundleIdentifier,
+              targetPid: observedFrontmost.processIdentifier,
+            },
+          }
+        : {}),
       ...(taskContract !== undefined
         ? { contract: taskContract }
         : {}),
@@ -366,9 +512,12 @@ export class PiRuntimeAdapter implements AgentRuntime {
       allActionsVerified: true,
     };
 
+    let completedSuccessfully = false;
     try {
       await this.activeComputerTurn.run(computerTurn, async () => {
-        await session.prompt(buildGroundedPrompt(command), {
+        await session.prompt(buildGroundedPrompt(command, {
+          includeConversationHistory: sessionCreated,
+        }), {
           images: command.payload.contextFrame.screenshots.map((screenshot) => ({
             type: "image" as const,
             data: screenshot.base64Data,
@@ -427,6 +576,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
         emit(computerTurn.actionCount > 0
           ? markTrustedExternalReceipt(completion, computerTurn.allActionsVerified)
           : completion);
+        completedSuccessfully = true;
       });
     } catch (error) {
       if (this.isRequestCancelled(command.requestId)) return;
@@ -438,6 +588,10 @@ export class PiRuntimeAdapter implements AgentRuntime {
     } finally {
       unsubscribe();
       this.activeSessionByRequestId.delete(command.requestId);
+      this.sessionKeyByRequestId.delete(command.requestId);
+      if (!completedSuccessfully || this.isRequestCancelled(command.requestId)) {
+        this.evictSession(sessionKey, session);
+      }
       if (providerTurn) this.settleProviderTurn(providerTurn);
     }
     if (reloginProvider) {
@@ -468,8 +622,20 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.computerUsePort.cancelRequest(command.requestId, command.payload.reason);
     const session = this.activeSessionByRequestId.get(command.requestId);
     if (session) {
-      await session.abort();
       this.activeSessionByRequestId.delete(command.requestId);
+      const sessionKey = this.sessionKeyByRequestId.get(command.requestId);
+      this.sessionKeyByRequestId.delete(command.requestId);
+      // Remove the poisoned/aborting session from the cache before awaiting
+      // provider cancellation. A superseding turn can then cold-start without
+      // ever sharing the old session while abort is still in flight.
+      if (sessionKey !== undefined && this.sessions.get(sessionKey) === session) {
+        this.sessions.delete(sessionKey);
+      }
+      try {
+        await abortSessionWithin(session);
+      } finally {
+        session.dispose();
+      }
     }
 
     emit(runtimeEvent("turn.cancelled", command.requestId, command.traceId, {
@@ -495,6 +661,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
     }
     this.sessions.clear();
     this.activeSessionByRequestId.clear();
+    this.sessionKeyByRequestId.clear();
     this.activeProviderTurns.clear();
     this.pendingRequestIds.clear();
     this.cancelledRequestIds.clear();
@@ -504,7 +671,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
   }
 
   private async performComputerAction(
-    action: ComputerAction,
+    action: ComputerControlToolAction,
     signal?: AbortSignal,
   ): Promise<ComputerActionResult> {
     const activeTurn = this.activeComputerTurn.getStore();
@@ -534,15 +701,20 @@ export class PiRuntimeAdapter implements AgentRuntime {
         }, refusal);
       }
     }
-    if (activeTurn.directComputerAction && activeTurn.actionCount >= 1) {
+    const allowedActionSequence = activeTurn.allowedActionSequence ?? [];
+    const expectedAction = allowedActionSequence[activeTurn.actionCount];
+    if (expectedAction === undefined) {
+      const directLimit = activeTurn.directComputerAction;
       const refusal: ComputerActionResult = {
         succeeded: false,
         verified: false,
         status: "blocked",
-        code: "direct_action_already_attempted",
+        code: directLimit ? "direct_action_already_attempted" : "action_limit_reached",
         method: "unknown",
         attemptId,
-        message: "This direct-click turn already attempted one computer action; a second dispatch was blocked.",
+        message: directLimit
+          ? "This direct-click turn already attempted one computer action; a second dispatch was blocked."
+          : "This turn reached its authorized desktop action limit; another dispatch was blocked.",
       };
       throw new ComputerActionError(refusal.message, {
         status: refusal.status!,
@@ -552,12 +724,71 @@ export class PiRuntimeAdapter implements AgentRuntime {
       }, refusal);
     }
 
+    if (action.action !== expectedAction) {
+      const refusal: ComputerActionResult = {
+        succeeded: false,
+        verified: false,
+        status: "blocked",
+        code: "runtime_error",
+        method: "unknown",
+        attemptId,
+        message: `Desktop action was blocked: expected ${expectedAction}.`,
+      };
+      throw new ComputerActionError(refusal.message, {
+        status: refusal.status!,
+        code: refusal.code!,
+        method: refusal.method!,
+        attemptId,
+      }, refusal);
+    }
+
+    let dispatchedAction: ComputerAction;
+    if (action.action === "set_text") {
+      if (activeTurn.authorizedText === undefined || action.text !== activeTurn.authorizedText) {
+        const refusal: ComputerActionResult = {
+          succeeded: false,
+          verified: false,
+          status: "blocked",
+          code: "runtime_error",
+          method: "unknown",
+          attemptId,
+          message: "Text input was blocked because it did not exactly match the user's authorized text.",
+        };
+        throw new ComputerActionError(refusal.message, {
+          status: refusal.status!,
+          code: refusal.code!,
+          method: refusal.method!,
+          attemptId,
+        }, refusal);
+      }
+      if (!activeTurn.frontmostTarget) {
+        const refusal: ComputerActionResult = {
+          succeeded: false,
+          verified: false,
+          status: "stale",
+          code: "frontmost_mismatch",
+          method: "unknown",
+          attemptId,
+          message: "The Context Frame has no frontmost app identity for safe text input.",
+        };
+        throw new ComputerActionError(refusal.message, {
+          status: refusal.status!,
+          code: refusal.code!,
+          method: refusal.method!,
+          attemptId,
+        }, refusal);
+      }
+      dispatchedAction = { ...action, ...activeTurn.frontmostTarget };
+    } else {
+      dispatchedAction = action;
+    }
+
     // Count only dispatched actions. A blocked second call must not emit a
     // computer.action.requested event, while the original attempt still keeps
     // the compatibility POINT fallback behind actionCount === 0.
     activeTurn.actionCount += 1;
     try {
-      const result = await this.computerUsePort.perform(action, {
+      const result = await this.computerUsePort.perform(dispatchedAction, {
         requestId: activeTurn.requestId,
         traceId: activeTurn.traceId,
         intentId: activeTurn.intentId,
@@ -619,7 +850,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
         baseUrl: LOCAL_GROK_BASE_URL,
         api: "openai-completions",
         apiKey: LOCAL_PROXY_AUTH_SENTINEL,
-        authHeader: false,
+        authHeader: true,
         models,
       });
     }
@@ -640,23 +871,25 @@ export class PiRuntimeAdapter implements AgentRuntime {
     preference: ModelPreference,
     model: RuntimeModel,
     conversationId: string,
-  ): Promise<AgentSession> {
+    sessionScope: SessionScope,
+  ): Promise<{ session: AgentSession; created: boolean; key: string }> {
     this.ensureProviderAvailable(preference.provider);
     const generation = preference.provider === LOCAL_GROK_PROVIDER
       ? 0
       : (this.providerAuthGenerations.get(preference.provider) ?? 0);
-    // Conversation identity is part of the harness cache key. Project/private
-    // isolation would otherwise be defeated by Pi reusing a model session that
-    // still contains another conversation's prompt history.
+    // Exact scope and conversation identity are part of the harness cache key.
+    // Otherwise Pi could reuse a session that still contains another scope's
+    // prompt history (especially when a private turn reuses a client id).
     const sessionKey = piSessionCacheKey(
       capabilityProfile,
       preference,
       generation,
       conversationId,
+      sessionScope,
     );
     const existingSession = this.sessions.get(sessionKey);
     if (existingSession) {
-      return existingSession;
+      return { session: existingSession, created: false, key: sessionKey };
     }
 
     const modelRuntime = await this.modelRuntimePromise;
@@ -695,7 +928,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
 
     this.ensureProviderAvailable(preference.provider);
     this.sessions.set(sessionKey, session);
-    return session;
+    return { session, created: true, key: sessionKey };
   }
 
   private ensureProviderAvailable(provider: string): void {

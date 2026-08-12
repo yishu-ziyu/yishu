@@ -1,4 +1,5 @@
 import type { ZodType } from "zod";
+import type { SessionScope } from "../session-scope.js";
 
 /** Who initiated the action invocation. */
 export type CallerKind =
@@ -172,6 +173,8 @@ export interface ActionRunContext<TInput> {
   input: TInput;
   caller: CallerKind;
   contextFrame?: unknown;
+  /** Exact product scope for context-bearing actions. */
+  sessionScope?: SessionScope;
   trail?: unknown;
   deps?: ActionInvokeDeps;
   /** Cooperative cancellation signal for long-running action work. */
@@ -187,6 +190,8 @@ export interface ActionVerifyContext<TInput, TOutput> {
   output: TOutput;
   caller: CallerKind;
   contextFrame?: unknown;
+  /** Exact product scope for context-bearing actions. */
+  sessionScope?: SessionScope;
   trail?: unknown;
   deps?: ActionInvokeDeps;
   /** Cooperative cancellation signal for post-run verification. */
@@ -230,6 +235,8 @@ export interface InvokeOptions {
   caller: CallerKind;
   input: unknown;
   contextFrame?: unknown;
+  /** Exact product scope for context-bearing actions. */
+  sessionScope?: SessionScope;
   trail?: unknown;
   /** Optional cooperative cancellation signal for this invocation. */
   signal?: AbortSignal;

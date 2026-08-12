@@ -10,12 +10,30 @@ The app keeps the existing Clicky interaction contract:
 - menu-bar companion and cursor-following overlay;
 - Control + Option push-to-talk with StepFun transcription;
 - one evidence-bearing context frame per turn;
+- five-second, metadata-only recent context sampling with exact personal/project scope and a pre-capture private-mode gate;
 - bundled Pi/Yishu runtime with the explicit model allowlist;
 - MiniMax speech output and verified cursor pointing/clicking;
+- verified Finder history-back and focused writable-field text entry;
 - a typed delegated-task snapshot restored when Pi becomes ready, with
   acknowledged cancellation and event-backed `SystemSequence` steps;
+- one quiet-window return of a terminal background result beside the cursor,
+  without creating a fake turn or consuming its follow-up context;
+- one durable application-return reminder that waits for a post-creation
+  departure, arms, and returns exactly once when the user comes back;
+- sentence-level serial TTS for pure conversation, with desktop-effect turns
+  held final-only and PTT interruption restarted from fresh context;
 - stable `com.yishu.yishu-buddy` signing/TCC identity and
   `/Applications/Clicky.app` install path.
+
+Cold Runtime sessions rehydrate a bounded visible window from Kernel's exact
+conversation/scope, while hot Pi sessions keep their own transient context.
+Runtime failure gets a bounded restart and then an honest failure message; the
+shipping conversation never forks into Clicky's onboarding `/chat` helper.
+
+The loopback voice service requires a per-App-process bearer capability, rejects
+browser origins, bounds bodies/upstream responses/concurrency, and receives a
+minimal child environment. Clicky and its Runtime run as one process-owned App
+instance; credentials and input text are not placed in action receipts.
 
 If the Pi sidecar stops, Clicky keeps the task card and says truthfully:
 `任务已中断。可以从头重试，或开始一个新方向。` It does not claim that

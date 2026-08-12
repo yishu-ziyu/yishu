@@ -59,6 +59,8 @@ export function makeTurnStartCommand(): TurnStartCommand {
           base64Data: "c2NyZWVu",
           displayWidthPoints: 1440,
           displayHeightPoints: 900,
+          displayOriginXPoints: 0,
+          displayOriginYPoints: 0,
           screenshotWidthPixels: 1280,
           screenshotHeightPixels: 800,
         }],
@@ -67,4 +69,3 @@ export function makeTurnStartCommand(): TurnStartCommand {
     },
   };
 }
-

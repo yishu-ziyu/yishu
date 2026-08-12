@@ -44,8 +44,9 @@ reject_source_pattern 'executableTarget|com\.yishu\.yishu-lab' Package.swift app
 
 # The canonical Clicky source always starts Pi behind the Product Kernel.
 require_literal "apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift" 'environment["YISHU_RUNTIME_MODE"] = "pi"'
-require_literal "apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift" 'environment["YISHU_PRODUCT_KERNEL"] = environment["YISHU_PRODUCT_KERNEL"] ?? "1"'
+require_literal "apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift" 'environment["YISHU_PRODUCT_KERNEL"] = "1"'
 require_literal "apps/clicky/scripts/run-local.sh" 'rm -rf -- "$bundle_root"'
+require_literal "apps/clicky/scripts/run-local.sh" 'ENABLE_DEBUG_DYLIB=NO'
 
 # Shipping Swift must not import the laboratory executor or resurrect Kairos.
 reject_source_pattern '@yishu/agent-core|AgentCoreRuntime' apps/clicky/leanring-buddy

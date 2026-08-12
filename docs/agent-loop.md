@@ -50,9 +50,11 @@ flowchart LR
 - 任务中断后不保存可续跑 checkpoint；Clicky 只能由真人发起新 request 从头重试，或开始新方向。
 - 分布式 / 多进程 exactly-once 仍未实现；Desktop lease 只保护当前 Runtime 进程。
 - 阶段 9 已有记忆 list/forget、bounded recall、Learning/Skill 数据结构和实验室 evolution gate；
-  记忆编辑/总开关、“最近学会了什么”、能力禁用/撤销和自动候选采用流水线尚未完成。
-- Pi 的 session persistence 是可用 SDK 能力，但正式产品当前故意使用 in-memory Pi session；
-  durable conversation/task truth 与 Result Inbox 只在 Kernel，子 session 终态后立即释放，不能把 Pi JSONL 当恢复真相。
+  明确 Learning 已能在同 scope 的后续普通 turn 中被使用；记忆编辑/总开关、“最近学会了什么”、能力禁用/撤销和自动候选采用流水线尚未完成。
+- Pi 的 session persistence 是可用 SDK 能力，但正式产品仍故意使用 in-memory Pi session；Kernel 是唯一恢复真相。
+  冷启动时 Runtime 会从同 scope / conversation 的 durable completed turns 有界回填可见对话，热 session 不重复注入；子 session 终态后仍立即释放，不把 Pi JSONL 当产品状态。
+- 后台委派已能在用户空闲时主动回访并保留后续指代。明确说“我下次切回这个应用时，提醒我…”也已形成持久的一次性 initiative：离开后 armed、返回后原子完成并主动播报一次；它仍不是通用时间/外部状态 scheduler。
+- 普通纯对话已按安全句界串行 TTS，首个完整句可在模型终态前开口，终态只补未播尾句；桌面动作意图仍 final-only。二次 PTT 会立即停播并 cancel，以新 ContextFrame 从新 turn 开始；同 turn 的 generation-aware 全双工 barge-in/steer 尚未实现。
 
 ## AgentCore 处置
 

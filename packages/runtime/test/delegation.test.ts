@@ -26,6 +26,7 @@ import {
   LOCAL_GROK_DEFAULT_MODEL,
   LOCAL_GROK_PROVIDER,
   type RuntimeEvent,
+  type TurnCancelCommand,
   type TurnStartCommand,
 } from "../src/protocol.js";
 import type { RuntimeEventSink } from "../src/runtime-port.js";
@@ -74,10 +75,30 @@ async function waitFor(
   }
 }
 
+async function resolvesWithin<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timeout waiting for: ${label}`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** Deterministic child executor: records commands, runs a per-call handler. */
 class FakeChildHarness {
   readonly calls: TurnStartCommand[] = [];
+  readonly cancelCalls: TurnCancelCommand[] = [];
   handlers: Array<(emit: RuntimeEventSink, command: TurnStartCommand) => Promise<void>> = [];
+  cancelHandler?: (emit: RuntimeEventSink, command: TurnCancelCommand) => Promise<void>;
 
   executeTurn = async (command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> => {
     this.calls.push(command);
@@ -92,7 +113,10 @@ class FakeChildHarness {
     }));
   };
 
-  cancelTurn = async (): Promise<void> => {};
+  cancelTurn = async (command: TurnCancelCommand, emit: RuntimeEventSink): Promise<void> => {
+    this.cancelCalls.push(command);
+    await this.cancelHandler?.(emit, command);
+  };
 }
 
 function makeCoordinator(
@@ -281,6 +305,7 @@ test("task.cancel stops only the matching running child and projects cancelled T
       verified: true,
     }));
   });
+  harness.cancelHandler = async () => await new Promise<void>(() => undefined);
   const { coordinator, kernel } = makeCoordinator(harness);
   const presence: DelegatedTaskPresenceUpdate[] = [];
   coordinator.setPresenceSink((update) => presence.push(update));
@@ -309,19 +334,24 @@ test("task.cancel stops only the matching running child and projects cancelled T
   });
   assert.equal(wrongConversationAccepted, false);
 
-  const cancelAccepted = await coordinator.cancelDelegatedTask({
-    schemaVersion: 1,
-    type: "task.cancel",
-    requestId: randomUUID(),
-    traceId: randomUUID(),
-    sentAt: new Date().toISOString(),
-    payload: {
-      taskId: accepted.details.taskId,
-      mainConversationId,
-      reason: "user_cancelled",
-    },
-  });
+  const cancelAccepted = await resolvesWithin(
+    coordinator.cancelDelegatedTask({
+      schemaVersion: 1,
+      type: "task.cancel",
+      requestId: randomUUID(),
+      traceId: randomUUID(),
+      sentAt: new Date().toISOString(),
+      payload: {
+        taskId: accepted.details.taskId,
+        mainConversationId,
+        reason: "user_cancelled",
+      },
+    }),
+    3_000,
+    "hung delegated cancellation",
+  );
   assert.equal(cancelAccepted, true);
+  assert.equal(harness.cancelCalls.length, 1);
 
   await kernel.taskTruth.flush(accepted.details.taskId);
   const task = (await kernel.store.listTasks()).find(
@@ -356,7 +386,7 @@ test("the Main frame and recent trail reach the child as capsule markers; screen
     elementUnderCursor: null,
     warnings: [],
   };
-  kernel.trail.append(trailFrame);
+  kernel.trail.append(trailFrame, { kind: "personal" });
 
   const mainTurn = makeMainTurn();
   mainTurn.contextFrame.frontmostApplication!.value.name = "MainMarkerApp";
@@ -629,6 +659,7 @@ test("dispose while a child is mid-flight settles it as cancelled, deterministic
     await gate.promise;
     // No terminal event: the harness dies quietly, as on shutdown.
   });
+  harness.cancelHandler = async () => await new Promise<void>(() => undefined);
   const { coordinator, kernel } = makeCoordinator(harness);
   t.after(async () => {
     gate.resolve();
@@ -640,15 +671,15 @@ test("dispose while a child is mid-flight settles it as cancelled, deterministic
   const result = await tool.execute("tool-call-7", { task: "被关停的任务" });
   await waitFor(() => harness.calls.length === 1, "child started");
 
-  const disposePromise = coordinator.dispose();
-  gate.resolve();
-  await disposePromise;
+  await resolvesWithin(coordinator.dispose(), 3_000, "hung delegated child disposal");
+  assert.equal(harness.cancelCalls.length, 1);
 
   await kernel.taskTruth.flush(result.details.taskId);
   const task = (await kernel.store.listTasks()).find((t2) => t2.id === result.details.taskId);
   assert.equal(task?.status, "cancelled", "a dispose-killed child must reach a terminal state");
   const entry = (await coordinator.claimForTurn("conv-main", randomUUID()))[0];
   assert.equal(entry?.resultKind, "cancelled");
+  gate.resolve();
 });
 
 // --- Result re-entry into the Main turn prompt ----------------------------

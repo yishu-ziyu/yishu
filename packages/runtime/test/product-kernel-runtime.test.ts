@@ -18,6 +18,7 @@ import {
 } from "../src/protocol.js";
 import type { AgentRuntime, RuntimeEventSink } from "../src/runtime-port.js";
 import { buildGroundedPrompt } from "../src/context-prompt.js";
+import { contextFrameToTrailSource } from "../src/trail-source.js";
 import { makeTurnStartCommand } from "./fixtures.js";
 
 function makeCommand(utterance: string, overrides?: Partial<TurnStartCommand["payload"]["contextFrame"]>): TurnStartCommand {
@@ -61,6 +62,24 @@ function waitForGateOrAbort(gate: Promise<void>, signal: AbortSignal | undefined
     signal?.addEventListener("abort", onAbort, { once: true });
     void gate.then(finish, fail);
   });
+}
+
+async function resolvesWithin<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timeout waiting for: ${label}`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 test("product kernel short-circuits remember on voice utterance", async () => {
@@ -137,7 +156,7 @@ test("ordinary utterances still reach the inner mock runtime", async () => {
   assert.ok(!events.some((e) => e.type === "product.action.completed"));
   assert.ok(events.some((e) => e.type === "response.completed"));
   // Trail still received the frame.
-  assert.ok(kernel.trail.size() >= 1);
+  assert.ok(kernel.trail.size({ kind: "personal" }) >= 1);
   assert.deepEqual(await kernel.store.listTasks(), []);
 });
 
@@ -200,7 +219,7 @@ test("Finder Back uses one typed port request, preserves the trail, and never st
   assert.ok(context.intentId);
   assert.ok(context.attemptId);
   assert.equal(context.effectClass, "navigation");
-  assert.ok(kernel.trail.size() >= 1);
+  assert.ok(kernel.trail.size({ kind: "personal" }) >= 1);
   assert.ok(events.some((event) => event.type === "product.action.completed"));
   assert.equal(events.find((event) => event.type === "response.completed")?.payload.verified, true);
   assert.match(String(events.find((event) => event.type === "response.completed")?.payload.text), /回到/);
@@ -314,7 +333,7 @@ test("private turns execute live but leave no ledger, task, trail, or memory", a
   assert.deepEqual(kernel.store.getSnapshot().events, []);
   assert.deepEqual(await kernel.store.listTasks(), []);
   assert.deepEqual(await kernel.store.listSuggestions(), []);
-  assert.equal(kernel.trail.size(), 0);
+  assert.equal(kernel.trail.size({ kind: "private" }), 0);
 
   const privateRemember = makeCommand("记住：这条私密信息不能留下");
   privateRemember.payload.conversationId = randomUUID();
@@ -502,6 +521,108 @@ test("cancelled TaskTruth is not overwritten by a late runtime failure", async (
   assert.equal((await kernel.store.listTasks())[0]?.status, "cancelled");
 });
 
+class HungCancelRuntime implements AgentRuntime {
+  private releaseStart!: () => void;
+  private markExecutionStarted!: () => void;
+  readonly executionStarted = new Promise<void>((resolve) => {
+    this.markExecutionStarted = resolve;
+  });
+  private readonly releaseGate = new Promise<void>((resolve) => {
+    this.releaseStart = resolve;
+  });
+  lateCancelEmit: RuntimeEventSink | undefined;
+
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
+      toolName: "hung_cancel_test",
+    }));
+    this.markExecutionStarted();
+    await this.releaseGate;
+    emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+      text: "late completion after cancellation",
+      verified: true,
+    }));
+  }
+
+  async cancelTurn(_command: TurnCancelCommand, emit: RuntimeEventSink): Promise<void> {
+    this.lateCancelEmit = emit;
+    await new Promise<void>(() => undefined);
+  }
+
+  release(): void {
+    this.releaseStart();
+  }
+
+  async steerTurn(_command: TurnSteerCommand, _emit: RuntimeEventSink): Promise<void> {}
+  async dispose(): Promise<void> {
+    this.releaseStart();
+  }
+}
+
+test("cancel persists and emits before a hung inner cancel times out; late events stay ignored", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new HungCancelRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("停止这个卡住的操作");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  let markCancelledVisible!: () => void;
+  const cancelledVisible = new Promise<void>((resolve) => {
+    markCancelledVisible = resolve;
+  });
+  const start = runtime.startTurn(command, (event) => {
+    visible.push(event);
+    if (event.type === "turn.cancelled") markCancelledVisible();
+  });
+  await inner.executionStarted;
+
+  const cancel = runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined);
+
+  await resolvesWithin(cancelledVisible, 1_000, "durable visible cancellation");
+  assert.equal((await kernel.store.getConversationTurn(command.requestId))?.status, "cancelled");
+  assert.equal(
+    (await kernel.store.listTasks()).find((task) => task.id === command.requestId)?.status,
+    "cancelled",
+  );
+  await resolvesWithin(cancel, 3_000, "hung inner cancellation");
+
+  inner.lateCancelEmit?.(runtimeEvent(
+    "response.completed",
+    command.requestId,
+    command.traceId,
+    { text: "late cancel callback", verified: true },
+  ));
+  inner.release();
+  await start;
+  assert.equal(visible.filter((event) => event.type === "turn.cancelled").length, 1);
+  assert.equal(visible.some((event) => event.type === "response.completed"), false);
+});
+
+test("unknown turn cancellation is also bounded when the inner runtime hangs", async () => {
+  const inner = new HungCancelRuntime();
+  const runtime = new ProductKernelRuntime(
+    inner,
+    createYishuKernel({ storeBackend: "memory" }),
+  );
+  const command = makeCommand("取消未知 turn");
+
+  await resolvesWithin(runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined), 3_000, "unknown hung inner cancellation");
+});
+
 class DelayedExecutionAfterCancelRuntime implements AgentRuntime {
   private releaseStart!: () => void;
   private readonly release = new Promise<void>((resolve) => {
@@ -559,11 +680,16 @@ class DisposeSettledRuntime implements AgentRuntime {
   private readonly release = new Promise<void>((resolve) => {
     this.releaseStart = resolve;
   });
+  private markStarted!: () => void;
+  readonly executionStarted = new Promise<void>((resolve) => {
+    this.markStarted = resolve;
+  });
 
   async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
     emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
       toolName: "dispose_test",
     }));
+    this.markStarted();
     await this.release;
     emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
       text: "settled before dispose returns",
@@ -578,26 +704,30 @@ class DisposeSettledRuntime implements AgentRuntime {
   }
 }
 
-test("dispose waits for active event producers before the final TaskTruth flush", async () => {
+test("dispose durably cancels active producers and ignores their late completion", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
-  const runtime = new ProductKernelRuntime(new DisposeSettledRuntime(), kernel);
+  const inner = new DisposeSettledRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
   const command = makeCommand("完成后再关闭 runtime");
-  const start = runtime.startTurn(command, () => undefined);
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
 
+  await inner.executionStarted;
   await runtime.dispose();
   await start;
 
-  assert.equal((await kernel.store.listTasks())[0]?.status, "blocked");
-  assert.equal((await kernel.store.listConversationTurns(command.requestId))[0]?.status, "completed");
+  assert.equal((await kernel.store.listTasks())[0]?.status, "cancelled");
+  assert.equal((await kernel.store.listConversationTurns(command.requestId))[0]?.status, "cancelled");
+  assert.equal(visible.some((event) => event.type === "response.completed"), false);
 });
 
-test("trail.observe appends without a full turn", () => {
+test("trail.observe appends without a full turn", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
   const frame = makeTurnStartCommand().payload.contextFrame;
   const events: RuntimeEvent[] = [];
 
-  runtime.observeTrail(
+  await runtime.observeTrail(
     {
       schemaVersion: PROTOCOL_VERSION,
       type: "trail.observe",
@@ -609,8 +739,191 @@ test("trail.observe appends without a full turn", () => {
     (e) => events.push(e),
   );
 
-  assert.equal(kernel.trail.size(), 1);
+  assert.equal(kernel.trail.size({ kind: "personal" }), 1);
   assert.equal(events[0]?.type, "trail.appended");
+});
+
+function contextObservation(
+  bundleIdentifier: string,
+  sessionScope: TurnStartCommand["payload"]["sessionScope"] = { kind: "personal" },
+) {
+  const command = makeCommand("observation");
+  command.payload.contextFrame.frontmostApplication = {
+    value: {
+      name: bundleIdentifier,
+      bundleIdentifier,
+      processIdentifier: 42,
+    },
+    source: "test",
+    capturedAt: command.payload.contextFrame.capturedAt,
+    confidence: 1,
+  };
+  return {
+    schemaVersion: PROTOCOL_VERSION,
+    type: "trail.observe" as const,
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      contextFrame: { ...command.payload.contextFrame, screenshots: [] },
+      sessionScope,
+    },
+  };
+}
+
+test("context reminder arms on departure, fires exactly once on return, and lists after restart", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "yishu-context-watch-runtime-"));
+  const sqlitePath = path.join(root, "watch.sqlite");
+  const conversationId = randomUUID();
+  let innerStarts = 0;
+  const inner: AgentRuntime = {
+    async startTurn() { innerStarts += 1; },
+    async steerTurn() {},
+    async cancelTurn() {},
+    async dispose() {},
+  };
+
+  try {
+    const kernel1 = createYishuKernel({ storeBackend: "sqlite", sqlitePath });
+    const runtime1 = new ProductKernelRuntime(inner, kernel1);
+    const presence: Array<Record<string, unknown>> = [];
+    runtime1.setTaskPresenceSink((update) => presence.push(update));
+    const create = makeCommand("我下次切回这个应用时，提醒我提交报销。");
+    create.payload.conversationId = conversationId;
+    create.payload.contextFrame.frontmostApplication = {
+      value: { name: "Mail", bundleIdentifier: "com.apple.mail", processIdentifier: 42 },
+      source: "test",
+      capturedAt: create.payload.contextFrame.capturedAt,
+      confidence: 1,
+    };
+    await runtime1.startTurn(create, () => undefined);
+    assert.equal(innerStarts, 0, "the explicit reminder is a product action, not a Pi turn");
+    assert.equal(presence[0]?.status, "running");
+    assert.equal(presence[0]?.watchState, "waiting_for_departure");
+
+    await runtime1.observeTrail(contextObservation("com.apple.mail"), () => undefined);
+    assert.equal(presence.length, 1, "continuous target samples do not arm or fire");
+    await runtime1.observeTrail(contextObservation("com.apple.finder"), () => undefined);
+    assert.equal((await kernel1.store.listActiveContextWatches({ kind: "personal" }))[0]?.state, "armed");
+    assert.equal(presence.at(-1)?.watchState, "armed");
+    await runtime1.dispose();
+    (kernel1.store as { close?: () => void }).close?.();
+
+    const kernel2 = createYishuKernel({ storeBackend: "sqlite", sqlitePath });
+    const runtime2 = new ProductKernelRuntime(new MockAgentRuntime(), kernel2);
+    const recoveredPresence: Array<Record<string, unknown>> = [];
+    runtime2.setTaskPresenceSink((update) => recoveredPresence.push(update));
+    // Submit adjacent return samples without awaiting the first. Serialized
+    // evaluation plus store CAS must still announce the recovered watch once.
+    const firstReturn = runtime2.observeTrail(contextObservation("com.apple.mail"), () => undefined);
+    const duplicateReturn = runtime2.observeTrail(contextObservation("com.apple.mail"), () => undefined);
+    await Promise.all([firstReturn, duplicateReturn]);
+    assert.equal(recoveredPresence.filter((event) => event.status === "done").length, 1);
+    assert.equal(recoveredPresence[0]?.summary, "提醒：提交报销");
+    assert.equal(recoveredPresence[0]?.watchState, "fired");
+    const restored = await runtime2.listTasks(conversationId);
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0]?.taskKind, "context_reminder");
+    assert.equal(restored[0]?.watchState, "fired");
+    assert.equal(restored[0]?.status, "done");
+    assert.equal(restored[0]?.summary, "提醒：提交报销");
+    await runtime2.dispose();
+    (kernel2.store as { close?: () => void }).close?.();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("context reminder cancel is durable and private or cross-scope observations cannot trigger it", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const conversationId = randomUUID();
+  const project = { kind: "project" as const, projectId: randomUUID(), projectLabel: "A" };
+  const create = makeCommand("我下次切回这个应用时，提醒我提交报销。");
+  create.payload.conversationId = conversationId;
+  create.payload.sessionScope = project;
+  create.payload.contextFrame.frontmostApplication = {
+    value: { name: "Mail", bundleIdentifier: "com.apple.mail", processIdentifier: 42 },
+    source: "test",
+    capturedAt: create.payload.contextFrame.capturedAt,
+    confidence: 1,
+  };
+  await runtime.startTurn(create, () => undefined);
+  const task = (await runtime.listTasks(conversationId))[0]!;
+
+  await runtime.observeTrail(contextObservation("com.apple.finder", { kind: "personal" }), () => undefined);
+  await runtime.observeTrail(contextObservation("com.apple.mail", { kind: "private" }), () => undefined);
+  assert.equal((await kernel.store.listTasks({ sessionScope: project }))[0]?.status, "running");
+
+  const accepted = await runtime.cancelTask({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "task.cancel",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { taskId: task.taskId, mainConversationId: conversationId },
+  });
+  assert.equal(accepted, true);
+  await runtime.observeTrail(contextObservation("com.apple.finder", project), () => undefined);
+  await runtime.observeTrail(contextObservation("com.apple.mail", project), () => undefined);
+  assert.equal((await runtime.listTasks(conversationId))[0]?.status, "cancelled");
+  assert.equal((await runtime.listTasks(conversationId))[0]?.watchState, "cancelled");
+  await runtime.dispose();
+});
+
+test("a replacement turn evicts and cancels the prior conversation before starting inner", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const conversationId = randomUUID();
+  let releaseFirst!: () => void;
+  let markFirstStarted!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+  const order: string[] = [];
+  let starts = 0;
+  const inner: AgentRuntime & { releaseConversationSession(id: string): void } = {
+    async startTurn(command, emit) {
+      starts += 1;
+      order.push(`start:${starts}`);
+      emit(runtimeEvent("turn.started", command.requestId, command.traceId, {}));
+      if (starts === 1) {
+        markFirstStarted();
+        await firstGate;
+        return;
+      }
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "replacement complete",
+      }));
+    },
+    async steerTurn() {},
+    async cancelTurn() {
+      order.push("cancel:1");
+      releaseFirst();
+    },
+    releaseConversationSession(id) {
+      assert.equal(id, conversationId);
+      order.push("release:1");
+    },
+    async dispose() { releaseFirst(); },
+  };
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const first = makeCommand("第一个长回合");
+  first.payload.conversationId = conversationId;
+  const second = makeCommand("取代上一个回合");
+  second.payload.conversationId = conversationId;
+  const firstEvents: RuntimeEvent[] = [];
+  const secondEvents: RuntimeEvent[] = [];
+
+  const firstOperation = runtime.startTurn(first, (event) => firstEvents.push(event));
+  await firstStarted;
+  const secondOperation = runtime.startTurn(second, (event) => secondEvents.push(event));
+  await Promise.all([firstOperation, secondOperation]);
+
+  assert.deepEqual(order, ["start:1", "release:1", "cancel:1", "start:2"]);
+  assert.equal(firstEvents.at(-1)?.type, "turn.cancelled");
+  assert.equal(secondEvents.at(-1)?.type, "response.completed");
+  assert.equal((await kernel.store.getConversationTurn(first.requestId))?.status, "cancelled");
+  assert.equal((await kernel.store.getConversationTurn(second.requestId))?.status, "completed");
+  await runtime.dispose();
 });
 
 test("remember_how promotes multi-app trail after replay verify", async () => {
@@ -1858,6 +2171,135 @@ test("remember speech only after durable verify success", async () => {
 type MindAttachedCommand = TurnStartCommand & {
   payload: { __yishuRecalledMindLessons?: string[] };
 };
+
+type ContinuityAttachedCommand = TurnStartCommand & {
+  payload: {
+    __yishuConversationHistory?: Array<{
+      id: string;
+      userInput?: string;
+      assistantOutput?: string;
+    }>;
+    __yishuRecentContextTrail?: Array<{
+      frameId: string;
+      appName: string | null;
+      windowTitle: string | null;
+    }>;
+    __yishuRecalledBehaviorRules?: Array<{
+      id: string;
+      rule: string;
+      scope: string;
+    }>;
+  };
+};
+
+test("ordinary turn attaches only same-scope completed history, recent prior trail, and Learning rules", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const conversationId = randomUUID();
+  const otherConversationId = randomUUID();
+  const personal = { kind: "personal" } as const;
+  await kernel.store.upsertConversation({ id: conversationId, sessionScope: personal });
+  await kernel.store.upsertConversationTurn({
+    id: randomUUID(),
+    conversationId,
+    status: "completed",
+    userInput: "之前可见的问题",
+    assistantOutput: "之前可见的回答",
+    sessionScope: personal,
+  });
+  await kernel.store.upsertConversationTurn({
+    id: randomUUID(),
+    conversationId,
+    status: "failed",
+    userInput: "失败轮不应恢复",
+    assistantOutput: "失败输出不应恢复",
+    sessionScope: personal,
+  });
+  await kernel.store.upsertConversation({ id: otherConversationId, sessionScope: personal });
+  await kernel.store.upsertConversationTurn({
+    id: randomUUID(),
+    conversationId: otherConversationId,
+    status: "completed",
+    userInput: "另一段对话不能泄漏",
+    sessionScope: personal,
+  });
+  await kernel.store.addLearning({
+    rule: "回答时先给结论",
+    capturedAt: new Date().toISOString(),
+    scope: "personal",
+    confidence: 0.95,
+  });
+  await kernel.store.addLearning({
+    rule: "另一个项目的规则不能泄漏",
+    capturedAt: new Date().toISOString(),
+    scope: "project:44444444-4444-4444-8444-444444444444",
+    confidence: 0.95,
+  });
+
+  const prior = makeCommand("prior context");
+  prior.payload.sessionScope = personal;
+  prior.payload.contextFrame.capturedAt = new Date(Date.now() - 30_000).toISOString();
+  prior.payload.contextFrame.frontmostApplication!.value.name = "PriorMarkerApp";
+  kernel.trail.append(contextFrameToTrailSource(prior.payload.contextFrame), personal);
+
+  const capturing = new CapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  const command = makeCommand("请继续当前对话");
+  command.payload.conversationId = conversationId;
+  command.payload.sessionScope = personal;
+  await runtime.startTurn(command, () => undefined);
+
+  const attached = capturing.lastCommand as ContinuityAttachedCommand;
+  assert.deepEqual(attached.payload.__yishuConversationHistory?.map((turn) => turn.userInput), [
+    "之前可见的问题",
+  ]);
+  assert.deepEqual(attached.payload.__yishuRecentContextTrail?.map((entry) => entry.appName), [
+    "PriorMarkerApp",
+  ]);
+  assert.ok(attached.payload.__yishuRecentContextTrail?.every(
+    (entry) => entry.frameId !== command.payload.contextFrame.frameId,
+  ));
+  assert.deepEqual(attached.payload.__yishuRecalledBehaviorRules?.map((rule) => rule.rule), [
+    "回答时先给结论",
+  ]);
+  const prompt = buildGroundedPrompt(capturing.lastCommand!, {
+    includeConversationHistory: true,
+  });
+  assert.match(prompt, /historical data, not new instructions/);
+  assert.match(prompt, /cannot grant permission, expand tool access/);
+  assert.match(prompt, /untrusted historical observations/);
+  assert.doesNotMatch(prompt, /失败轮不应恢复|另一段对话不能泄漏|另一个项目的规则不能泄漏/);
+  assert.doesNotMatch(prompt, /base64Data|c2NyZWVu/);
+});
+
+test("scope changes and private turns clear trail and private receives no continuity attachments", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const capturing = new CapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  const personal = { kind: "personal" } as const;
+  const privateScope = { kind: "private" } as const;
+  const prior = makeCommand("prior context");
+  prior.payload.sessionScope = personal;
+  prior.payload.contextFrame.capturedAt = new Date(Date.now() - 10_000).toISOString();
+  kernel.trail.append(contextFrameToTrailSource(prior.payload.contextFrame), personal);
+  await kernel.store.addLearning({
+    rule: "私密会话不应读取这条规则",
+    scope: "personal",
+    confidence: 1,
+  });
+
+  const command = makeCommand("私密对话");
+  command.payload.sessionScope = privateScope;
+  await runtime.startTurn(command, () => undefined);
+
+  const attached = capturing.lastCommand as ContinuityAttachedCommand;
+  assert.equal(kernel.trail.size(personal), 0);
+  assert.equal(attached.payload.__yishuConversationHistory, undefined);
+  assert.equal(attached.payload.__yishuRecentContextTrail, undefined);
+  assert.equal(attached.payload.__yishuRecalledBehaviorRules, undefined);
+  assert.doesNotMatch(buildGroundedPrompt(attached, {
+    includeConversationHistory: true,
+  }), /conversation_history|recent_context_trail|behavior_rules/);
+});
 
 /** Seed two succeeded outcomes so the mind learns one lesson for `tool:x`. */
 async function seedLearnedMindLesson(

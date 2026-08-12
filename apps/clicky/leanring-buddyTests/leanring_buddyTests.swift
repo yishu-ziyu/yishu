@@ -286,20 +286,11 @@ struct leanring_buddyTests {
         #expect(YishuComputerUseActuator.chromeNavigationKind(forTargetPhrase: "后退") == .back)
         #expect(YishuComputerUseActuator.chromeNavigationKind(forTargetPhrase: "上一级") == .up)
         #expect(YishuComputerUseActuator.chromeNavigationKind(forTargetPhrase: "上层文件夹") == .up)
-        let chromeLabels = CompanionManager.accessibilityChromeNavigationLabels(
-            for: "点击左上角的返回按钮"
-        )
-        #expect(chromeLabels?.contains("返回") == true)
-        #expect(chromeLabels?.contains("上层文件夹") != true)
-        #expect(chromeLabels?.contains("上一级") != true)
-        let upLabels = CompanionManager.accessibilityChromeNavigationLabels(
-            for: "点击上层文件夹"
-        )
-        // "点击上层文件夹" may not parse as direct-click chrome; check pure API.
+        // The typed Finder action keeps Back and Up semantics separate. There
+        // is deliberately no CompanionManager OCR-miss AX execution bypass.
         let upFromTarget = YishuComputerUseActuator.chromeNavigationLabels(forTargetPhrase: "上一级")
         #expect(upFromTarget?.contains("上层文件夹") == true)
         #expect(upFromTarget?.contains("返回") != true)
-        _ = upLabels
         // Path-specific verified basis: only ancestor path counts as parent.
         #expect(
             YishuComputerUseActuator.isFilesystemPath(
@@ -593,32 +584,7 @@ struct leanring_buddyTests {
         #expect(CompanionManager.runtimeFailureRecoveryRoute(
             actionResult: nil,
             runtimeIsRunning: true
-        ) == .legacyProxy)
-
-        let initialCapture = Self.makeCapture(label: "initial", width: 111)
-        let retryCapture = Self.makeCapture(label: "retry", width: 222)
-        #expect(CompanionManager.continuityProxyScreenCaptures(
-            initial: [initialCapture],
-            retry: [retryCapture]
-        ).map(\.label) == ["retry"])
-        #expect(CompanionManager.continuityProxyScreenCaptures(
-            initial: [initialCapture],
-            retry: []
-        ).isEmpty)
-    }
-
-    private static func makeCapture(label: String, width: Int) -> CompanionScreenCapture {
-        CompanionScreenCapture(
-            imageData: Data(label.utf8),
-            label: label,
-            isCursorScreen: true,
-            displayWidthInPoints: width,
-            displayHeightInPoints: 100,
-            displayFrame: CGRect(x: 0, y: 0, width: width, height: 100),
-            globalTopLeftDisplayFrame: CGRect(x: 0, y: 0, width: width, height: 100),
-            screenshotWidthInPixels: width,
-            screenshotHeightInPixels: 100
-        )
+        ) == .surfaceFailure)
     }
 
     @Test func runtimeIngressUUIDHelperRejectsMalformedOptionalIDs() async throws {
@@ -637,6 +603,127 @@ struct leanring_buddyTests {
         #expect(!YishuAgentRuntimeClient.isValidScreenPayloadValue(NSNumber(value: 1.5)))
         #expect(!YishuAgentRuntimeClient.isValidScreenPayloadValue(NSNumber(value: true)))
         #expect(!YishuAgentRuntimeClient.isValidScreenPayloadValue("2"))
+    }
+
+    @Test func runtimeIngressStrictlyDecodesFinderAndRuntimeTargetedTextActions() throws {
+        let requestId = UUID()
+        let traceId = UUID()
+        let basisFrameId = UUID()
+        let finderActionId = UUID()
+        let finder = try #require(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: [
+                "actionId": finderActionId.uuidString,
+                "action": "finder_history_back",
+                "targetBundleId": "com.apple.finder",
+                "targetPid": NSNumber(value: 321),
+                "basisFrameId": basisFrameId.uuidString,
+            ],
+            requestId: requestId,
+            traceId: traceId,
+            schemaVersion: NSNumber(value: 1)
+        ))
+        #expect(finder.actionId == finderActionId)
+        #expect(finder.action == "finder_history_back")
+        #expect(finder.targetBundleId == "com.apple.finder")
+        #expect(finder.targetPid == pid_t(321))
+        #expect(finder.basisFrameId == basisFrameId.uuidString)
+
+        let textActionId = UUID()
+        let setText = try #require(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: [
+                "actionId": textActionId.uuidString,
+                "action": "set_text",
+                "text": "hello",
+                "targetBundleId": "com.apple.TextEdit",
+                "targetPid": NSNumber(value: 654),
+                "basisFrameId": basisFrameId.uuidString,
+            ],
+            requestId: requestId,
+            traceId: traceId,
+            schemaVersion: NSNumber(value: 1)
+        ))
+        #expect(setText.actionId == textActionId)
+        #expect(setText.action == "set_text")
+        #expect(setText.text == "hello")
+        #expect(setText.targetBundleId == "com.apple.TextEdit")
+        #expect(setText.targetPid == pid_t(654))
+
+        #expect(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: [
+                "actionId": UUID().uuidString,
+                "action": "finder_history_back",
+                "targetBundleId": "com.apple.TextEdit",
+                "targetPid": NSNumber(value: 654),
+                "basisFrameId": basisFrameId.uuidString,
+            ],
+            requestId: requestId,
+            traceId: traceId,
+            schemaVersion: NSNumber(value: 1)
+        ) == nil)
+        #expect(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: [
+                "actionId": UUID().uuidString,
+                "action": "set_text",
+                "text": "hello",
+                "targetBundleId": "com.apple.TextEdit",
+                "targetPid": NSNumber(value: true),
+                "basisFrameId": basisFrameId.uuidString,
+            ],
+            requestId: requestId,
+            traceId: traceId,
+            schemaVersion: NSNumber(value: 1)
+        ) == nil)
+    }
+
+    @Test func desktopTargetAndTextPoliciesFailClosed() {
+        #expect(YishuComputerUseActuator.isMatchingFrontmostTarget(
+            expectedPid: pid_t(42),
+            expectedBundleId: "com.apple.finder",
+            livePid: pid_t(42),
+            liveBundleId: "com.apple.finder"
+        ))
+        #expect(!YishuComputerUseActuator.isMatchingFrontmostTarget(
+            expectedPid: pid_t(42),
+            expectedBundleId: "com.apple.finder",
+            livePid: pid_t(42),
+            liveBundleId: "com.apple.TextEdit"
+        ))
+        #expect(!YishuComputerUseActuator.isMatchingFrontmostTarget(
+            expectedPid: pid_t(42),
+            expectedBundleId: "com.apple.finder",
+            livePid: pid_t(99),
+            liveBundleId: "com.apple.finder"
+        ))
+
+        #expect(YishuComputerUseActuator.isWritableTextTarget(
+            role: "AXTextField",
+            subrole: nil,
+            valueSettable: true
+        ))
+        #expect(!YishuComputerUseActuator.isWritableTextTarget(
+            role: "AXTextField",
+            subrole: "AXSecureTextField",
+            valueSettable: true
+        ))
+        #expect(!YishuComputerUseActuator.isWritableTextTarget(
+            role: "AXButton",
+            subrole: nil,
+            valueSettable: true
+        ))
+        #expect(!YishuComputerUseActuator.isWritableTextTarget(
+            role: "AXTextArea",
+            subrole: nil,
+            valueSettable: false
+        ))
+    }
+
+    @Test func textReceiptSummaryNeverContainsTheOriginalText() {
+        let original = "private-phrase"
+        let summary = YishuComputerUseActuator.textReadbackSummary(original, role: "AXTextField")
+        #expect(!summary.contains(original))
+        #expect(summary.contains("length=14"))
+        #expect(summary.contains("role=AXTextField"))
+        #expect(!summary.localizedCaseInsensitiveContains("sha"))
     }
 
     @Test @MainActor func delegatedTaskPresenceStrictlyDecodesAndProjectsRuntimeTruth() {
@@ -867,6 +954,11 @@ struct leanring_buddyTests {
                 == "任务已中断。可以从头重试，或开始一个新方向。"
         )
         #expect(viewModel.tasks.first?.sequence.isEmpty == true)
+
+        // Runtime recovery rehydrates the same durable updatedAt. Local-only
+        // interruption must yield even when the timestamps are equal.
+        viewModel.mergeSnapshot(snapshot ?? [])
+        #expect(viewModel.tasks.first?.status == .running)
     }
 
     @Test @MainActor func taskCancelAcceptanceRequiresExactRequestTraceTaskAndConversation() {

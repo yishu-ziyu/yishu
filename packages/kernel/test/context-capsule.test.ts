@@ -17,6 +17,7 @@ import { ContextTrail } from "../src/context/trail.js";
 import type { TrailSourceFrame } from "../src/context/sanitize.js";
 
 const NOW = new Date("2026-08-11T12:00:00.000Z");
+const PERSONAL = { kind: "personal" } as const;
 
 function observed<T>(value: T) {
   return { value, source: "test", capturedAt: NOW.toISOString(), confidence: 1 };
@@ -53,11 +54,12 @@ function makeFrame(minutesAgo: number, appName: string): TrailSourceFrame {
 function buildCapsule() {
   const trail = new ContextTrail({ retentionMs: 24 * 60 * 60_000 });
   for (const minutesAgo of [60, 30, 4, 1]) {
-    trail.append(makeFrame(minutesAgo, `App-${minutesAgo}`), NOW);
+    trail.append(makeFrame(minutesAgo, `App-${minutesAgo}`), PERSONAL, NOW);
   }
   const capsule = buildContextCapsule({
     frame: makeFrame(0, "App-0"),
     trail,
+    sessionScope: PERSONAL,
     userIntent: "Summarize why the Export button is disabled",
     projectHint: "yishu",
     recentMinutes: 5,
@@ -122,7 +124,7 @@ describe("ContextCapsule", () => {
     assert.equal(capsule.userIntent, "Summarize why the Export button is disabled");
     assert.equal(capsule.recentTrail.length, 2);
     assert.deepEqual(
-      trail.recentMinutes(5, NOW).map((entry) => entry.appName),
+      trail.recentMinutes(5, PERSONAL, NOW).map((entry) => entry.appName),
       ["App-4", "App-1"],
     );
   });

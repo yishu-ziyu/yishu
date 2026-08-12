@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   ContextTrail,
   buildContextCapsule,
+  cursorRegionFromFrame,
   parseContextCapsule,
   serializeContextCapsule,
   toTrailEntry,
@@ -10,10 +11,75 @@ import {
 import { SENSITIVE_CONTENT_REJECTED } from "../src/store/index.js";
 import { makeFrame } from "./fixtures.js";
 
+const PERSONAL = { kind: "personal" } as const;
+const PROJECT_A = {
+  kind: "project",
+  projectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  projectLabel: "A",
+} as const;
+const PROJECT_B = {
+  kind: "project",
+  projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  projectLabel: "B",
+} as const;
+
 describe("ContextTrail + ContextCapsule", () => {
+  it("maps AppKit cursors against the containing display across multi-display origins", () => {
+    const displays = {
+      main: { x: 0, y: 0, width: 1_200, height: 900 },
+      right: { x: 1_200, y: 0, width: 900, height: 900 },
+      left: { x: -1_000, y: 0, width: 1_000, height: 900 },
+      above: { x: 0, y: 900, width: 1_200, height: 600 },
+      below: { x: 0, y: -700, width: 1_200, height: 700 },
+    } as const;
+
+    const cases = [
+      { name: "main", point: [100, 800], screens: [displays.main, displays.right], expected: "left-top" },
+      { name: "right", point: [1_950, 450], screens: [displays.main, displays.right], expected: "right-middle" },
+      { name: "left-negative-origin", point: [-500, 100], screens: [displays.left, displays.main], expected: "center-bottom" },
+      { name: "above", point: [1_000, 1_400], screens: [displays.main, displays.above], expected: "right-top" },
+      { name: "below", point: [600, -600], screens: [displays.below, displays.main], expected: "center-bottom" },
+      { name: "outside-all-displays", point: [5_000, 5_000], screens: [displays.main, displays.right], expected: "unknown" },
+    ] as const;
+
+    for (const entry of cases) {
+      const frame = makeFrame({ x: entry.point[0], y: entry.point[1] });
+      if (!frame.cursor) throw new Error("fixture cursor missing");
+      frame.cursor.value.coordinateSpace = "appkit-bottom-left";
+      frame.screenshots = entry.screens.map((screen) => ({
+        label: screen === displays.main ? "main" : entry.name,
+        base64Data: "QUJDREVGR0g=",
+        mediaType: "image/jpeg",
+        displayOriginXPoints: screen.x,
+        displayOriginYPoints: screen.y,
+        displayWidthPoints: screen.width,
+        displayHeightPoints: screen.height,
+      }));
+      assert.equal(cursorRegionFromFrame(frame), entry.expected, entry.name);
+    }
+  });
+
+  it("supports only unambiguous originless single-screen frames", () => {
+    const single = makeFrame({ x: 100, y: 100, withScreenshot: true });
+    assert.equal(cursorRegionFromFrame(single), "left-top");
+
+    const ambiguous = makeFrame({ x: 100, y: 100, withScreenshot: true });
+    ambiguous.screenshots?.push({
+      label: "unknown secondary",
+      base64Data: "QUJDREVGR0g=",
+      mediaType: "image/jpeg",
+      displayWidthPoints: 1_024,
+      displayHeightPoints: 768,
+    });
+    assert.equal(cursorRegionFromFrame(ambiguous), "unknown");
+
+    const noScreens = makeFrame({ x: 100, y: 100 });
+    assert.equal(cursorRegionFromFrame(noScreens), "unknown");
+  });
+
   it("strips screenshot bytes from trail entries", () => {
     const frame = makeFrame({ withScreenshot: true });
-    const entry = toTrailEntry(frame);
+    const entry = toTrailEntry(frame, { sessionScope: PERSONAL });
     assert.equal(entry.hasScreenshot, true);
     assert.ok(entry.screenshotExpiresAt);
     const serialized = JSON.stringify(entry);
@@ -29,7 +95,7 @@ describe("ContextTrail + ContextCapsule", () => {
       "system_prompt: PRIVATE_HIDDEN_INSTRUCTION",
       "政策：不要保存 screenshot 或 system prompt",
     ];
-    const entry = toTrailEntry(frame);
+    const entry = toTrailEntry(frame, { sessionScope: PERSONAL });
     const serialized = JSON.stringify(entry);
     assert.equal(serialized.includes("SECRET_SCREEN_BYTES_12345"), false);
     assert.equal(serialized.includes("SECRET_DATA_URI_12345"), false);
@@ -46,6 +112,7 @@ describe("ContextTrail + ContextCapsule", () => {
         appName: "Chrome",
         windowTitle: "github.com/yishu",
       }),
+      PERSONAL,
       new Date(t0),
     );
     trail.append(
@@ -54,6 +121,7 @@ describe("ContextTrail + ContextCapsule", () => {
         appName: "Codex",
         windowTitle: "runtime-port.ts",
       }),
+      PERSONAL,
       new Date(t0 + 60_000),
     );
     trail.append(
@@ -62,18 +130,19 @@ describe("ContextTrail + ContextCapsule", () => {
         appName: "Chrome",
         windowTitle: "agent-native docs",
       }),
+      PERSONAL,
       new Date(t0 + 120_000),
     );
 
     const now = new Date(t0 + 130_000);
-    const recent = trail.recentMinutes(3, now);
+    const recent = trail.recentMinutes(3, PERSONAL, now);
     assert.equal(recent.length, 3);
 
-    const codex = trail.query({ query: "codex", sinceMs: 10 * 60_000 }, now);
+    const codex = trail.query({ sessionScope: PERSONAL, query: "codex", sinceMs: 10 * 60_000 }, now);
     assert.equal(codex.length, 1);
     assert.equal(codex[0]?.appName, "Codex");
 
-    const summary = trail.summarize(3, now);
+    const summary = trail.summarize(3, PERSONAL, now);
     assert.match(summary, /Chrome/);
     assert.match(summary, /Codex/);
   });
@@ -86,13 +155,14 @@ describe("ContextTrail + ContextCapsule", () => {
         capturedAt: new Date(t0).toISOString(),
         withScreenshot: true,
       }),
+      PERSONAL,
       new Date(t0),
     );
 
-    const stillHot = trail.query({}, new Date(t0 + 200));
+    const stillHot = trail.query({ sessionScope: PERSONAL }, new Date(t0 + 200));
     assert.equal(stillHot[0]?.hasScreenshot, true);
 
-    const cold = trail.query({}, new Date(t0 + 5_000));
+    const cold = trail.query({ sessionScope: PERSONAL }, new Date(t0 + 5_000));
     assert.equal(cold[0]?.hasScreenshot, false);
     assert.equal(cold.length, 1);
   });
@@ -106,11 +176,12 @@ describe("ContextTrail + ContextCapsule", () => {
       windowTitle: "yishu PR",
       withScreenshot: true,
     });
-    trail.append(frame, now);
+    trail.append(frame, PERSONAL, now);
 
     const capsule = buildContextCapsule({
       frame,
       trail,
+      sessionScope: PERSONAL,
       userIntent: "hand this to Codex",
       projectHint: "project:yishu",
       recentMinutes: 5,
@@ -141,11 +212,12 @@ describe("ContextTrail + ContextCapsule", () => {
       axValue: "password=AX_SECRET_12345",
     });
     frame.warnings = ["screenshot base64Data: SCREEN_SECRET_12345"];
-    trail.append(frame, now);
+    trail.append(frame, PERSONAL, now);
 
     const capsule = buildContextCapsule({
       frame,
       trail,
+      sessionScope: PERSONAL,
       userIntent: "交给 Codex password=INTENT_SECRET_12345",
       projectHint: "打开 Secret Manager；政策是禁止保存 screenshot",
       now,
@@ -170,8 +242,8 @@ describe("ContextTrail + ContextCapsule", () => {
     const trail = new ContextTrail();
     const now = new Date("2026-08-07T12:10:00.000Z");
     const frame = makeFrame({ capturedAt: now.toISOString() });
-    trail.append(frame, now);
-    const capsule = buildContextCapsule({ trail, now });
+    trail.append(frame, PERSONAL, now);
+    const capsule = buildContextCapsule({ trail, sessionScope: PERSONAL, now });
     const raw = JSON.parse(serializeContextCapsule(capsule)) as Record<string, unknown>;
     raw.userIntent = "password=DO_NOT_FORWARD_12345";
     assert.throws(
@@ -192,6 +264,7 @@ describe("ContextTrail + ContextCapsule", () => {
 
     const withFrame = buildContextCapsule({
       trail,
+      sessionScope: PERSONAL,
       frame,
       now,
     });
@@ -202,6 +275,23 @@ describe("ContextTrail + ContextCapsule", () => {
       () => parseContextCapsule(JSON.stringify(unsafeWindow)),
       (error: unknown) =>
         error instanceof Error && error.message === SENSITIVE_CONTENT_REJECTED,
+    );
+  });
+
+  it("isolates personal and project trails exactly and rejects private append", () => {
+    const trail = new ContextTrail();
+    const now = new Date("2026-08-07T12:10:00.000Z");
+    trail.append(makeFrame({ capturedAt: now.toISOString(), appName: "PersonalApp" }), PERSONAL, now);
+    trail.append(makeFrame({ capturedAt: now.toISOString(), appName: "ProjectAApp" }), PROJECT_A, now);
+    trail.append(makeFrame({ capturedAt: now.toISOString(), appName: "ProjectBApp" }), PROJECT_B, now);
+
+    assert.deepEqual(trail.recentMinutes(5, PERSONAL, now).map((entry) => entry.appName), ["PersonalApp"]);
+    assert.deepEqual(trail.recentMinutes(5, PROJECT_A, now).map((entry) => entry.appName), ["ProjectAApp"]);
+    assert.deepEqual(trail.recentMinutes(5, PROJECT_B, now).map((entry) => entry.appName), ["ProjectBApp"]);
+    assert.deepEqual(trail.recentMinutes(5, { kind: "private" }, now), []);
+    assert.throws(
+      () => trail.append(makeFrame({ capturedAt: now.toISOString() }), { kind: "private" }, now),
+      /private_session_not_trailable/,
     );
   });
 });

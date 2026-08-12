@@ -341,18 +341,28 @@ enum YishuComputerUseActuator {
 
     /// Resolve enabled Finder Back only (toolbar desc=返回 or Go→Back).
     /// Does not press 上层文件夹 / Enclosing Folder.
-    private static func resolveFinderBackControl(labels: [String]) -> LabeledControlHit? {
+    private static func resolveFinderBackControl(
+        labels: [String],
+        processIdentifier: pid_t? = nil,
+        window: AXUIElement? = nil,
+        allowMenuFallback: Bool = true
+    ) -> LabeledControlHit? {
         guard chromeNavigationKind(forLabels: labels) == .back else { return nil }
         guard let finder = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == "com.apple.finder"
+                && (processIdentifier == nil || $0.processIdentifier == processIdentifier)
         }) else {
             return nil
         }
         let backLabels = backOnlyLabels(from: labels)
-        // Prefer live toolbar/window control with enabled 返回.
-        if let element = findLabeledControl(inProcess: finder.processIdentifier, labels: backLabels) {
+        // Finder navigation must stay on the focused/main window. Never scan
+        // background Finder windows for a matching toolbar button.
+        let targetWindow = window ?? finderFocusedOrMainWindow(for: finder.processIdentifier)
+        if let targetWindow,
+           let element = findLabeledControl(inRoot: targetWindow, labels: backLabels) {
             return LabeledControlHit(processIdentifier: finder.processIdentifier, element: element)
         }
+        guard allowMenuFallback else { return nil }
         // Menu bar Go → Back / 返回 (not Enclosing Folder).
         return resolveFinderGoMenuItem(
             processIdentifier: finder.processIdentifier,
@@ -430,28 +440,23 @@ enum YishuComputerUseActuator {
     }
 
     /// Observable Finder front-window path (AXDocument / AXURL / path-like title).
-    private static func finderFrontWindowPath() -> String? {
+    private static func finderFrontWindowPath(for processIdentifier: pid_t? = nil) -> String? {
         guard let finder = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == "com.apple.finder"
+                && (processIdentifier == nil || $0.processIdentifier == processIdentifier)
         }) else {
             return nil
         }
-        let app = AXUIElementCreateApplication(finder.processIdentifier)
-        let windows = axElementArray(kAXWindowsAttribute as String, from: app)
-            ?? axElementArray(kAXChildrenAttribute as String, from: app)
-            ?? []
-        for window in windows {
-            if let path = filesystemPath(fromAXWindow: window) {
-                return path
-            }
+        guard let window = finderFocusedOrMainWindow(for: finder.processIdentifier) else {
+            return nil
         }
-        // Focused window attribute as last resort.
-        if let focused = axSingleElement(kAXFocusedWindowAttribute as String, from: app)
-            ?? axSingleElement(kAXMainWindowAttribute as String, from: app),
-           let path = filesystemPath(fromAXWindow: focused) {
-            return path
-        }
-        return nil
+        return filesystemPath(fromAXWindow: window)
+    }
+
+    private static func finderFocusedOrMainWindow(for processIdentifier: pid_t) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(processIdentifier)
+        return axSingleElement(kAXFocusedWindowAttribute as String, from: app)
+            ?? axSingleElement(kAXMainWindowAttribute as String, from: app)
     }
 
     private static func filesystemPath(fromAXWindow window: AXUIElement) -> String? {
@@ -601,6 +606,38 @@ enum YishuComputerUseActuator {
         return nil
     }
 
+    /// Search exactly one AX subtree. Used for window-bound Finder actions so
+    /// an identically labelled control in another window cannot become target.
+    private static func findLabeledControl(
+        inRoot root: AXUIElement,
+        labels: [String]
+    ) -> AXUIElement? {
+        let normalizedLabels = labels
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        guard !normalizedLabels.isEmpty else { return nil }
+
+        for buttonsOnly in [true, false] {
+            var stack = [root]
+            var visited = 0
+            while let current = stack.popLast(), visited < 1_200 {
+                visited += 1
+                if let match = labeledPressableMatch(
+                    current,
+                    normalizedLabels: normalizedLabels,
+                    preferExactDescription: true,
+                    buttonsOnly: buttonsOnly
+                ) {
+                    return match
+                }
+                if let children = axElementArray(kAXChildrenAttribute as String, from: current) {
+                    stack.append(contentsOf: children.reversed())
+                }
+            }
+        }
+        return nil
+    }
+
     private static func labeledPressableMatch(
         _ current: AXUIElement,
         normalizedLabels: [String],
@@ -694,6 +731,20 @@ enum YishuComputerUseActuator {
     ) async -> YishuComputerActionResult {
         let receiptId = UUID().uuidString
         let attemptId = request.attemptId ?? UUID().uuidString
+        if request.action == "finder_history_back" {
+            return await performFinderHistoryBack(
+                request,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        if request.action == "set_text" {
+            return await performSetText(
+                request,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
         guard request.action == "left_click" else {
             return failed(
                 "Unsupported computer action.",
@@ -834,6 +885,358 @@ enum YishuComputerUseActuator {
             receiptId: receiptId,
             attemptId: attemptId
         )
+    }
+
+    private static func performFinderHistoryBack(
+        _ request: YishuComputerActionRequest,
+        receiptId: String,
+        attemptId: String
+    ) async -> YishuComputerActionResult {
+        guard AXIsProcessTrusted() else {
+            return failed(
+                "Accessibility permission is required for Finder navigation.",
+                code: .accessibilityPermissionDenied,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard request.basisFrameId.flatMap(UUID.init(uuidString:)) != nil,
+              request.targetBundleId == "com.apple.finder",
+              let targetPid = request.targetPid else {
+            return failed(
+                "The Finder navigation basis is invalid.",
+                code: .targetStale,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              isMatchingFrontmostTarget(
+                expectedPid: targetPid,
+                expectedBundleId: "com.apple.finder",
+                livePid: frontmost.processIdentifier,
+                liveBundleId: frontmost.bundleIdentifier
+              ) else {
+            return failed(
+                "Finder is no longer the observed frontmost application.",
+                code: .frontmostChanged,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard let targetWindow = finderFocusedOrMainWindow(for: targetPid),
+              let pathBefore = filesystemPath(fromAXWindow: targetWindow),
+              let resolved = resolveFinderBackControl(
+                labels: ["返回", "back"],
+                processIdentifier: targetPid,
+                window: targetWindow,
+                allowMenuFallback: false
+              ) else {
+            return failed(
+                "Finder back is unavailable or its current path cannot be observed.",
+                code: .axElementUnavailable,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+
+        // Fresh revalidation immediately before the one permitted AXPress.
+        guard let liveFrontmost = NSWorkspace.shared.frontmostApplication,
+              isMatchingFrontmostTarget(
+                expectedPid: targetPid,
+                expectedBundleId: "com.apple.finder",
+                livePid: liveFrontmost.processIdentifier,
+                liveBundleId: liveFrontmost.bundleIdentifier
+              ),
+              let liveWindow = finderFocusedOrMainWindow(for: targetPid),
+              sameElement(targetWindow, liveWindow),
+              filesystemPath(fromAXWindow: liveWindow) == pathBefore,
+              let live = resolveFinderBackControl(
+                labels: ["返回", "back"],
+                processIdentifier: targetPid,
+                window: liveWindow,
+                allowMenuFallback: false
+              ),
+              live.processIdentifier == resolved.processIdentifier,
+              sameElement(resolved.element, live.element) else {
+            return failed(
+                "The Finder target changed before execution.",
+                code: .targetStale,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        switch performPress(live.element) {
+        case .unsupported:
+            return failed(
+                "Finder back does not support AXPress.",
+                code: .axPressUnsupported,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case let .attempted(result):
+            guard result == .success else {
+                return YishuComputerActionResult(
+                    succeeded: true,
+                    verified: false,
+                    message: "Finder back delivery is uncertain; it was not repeated.",
+                    evidence: "method=ax_press;code=ax_press_failed;delivery=unknown;axError=\(result.rawValue)",
+                    status: .unverified,
+                    method: .axPress,
+                    code: .axPressUnknown,
+                    receiptId: receiptId,
+                    attemptId: attemptId
+                )
+            }
+        }
+
+        try? await Task.sleep(nanoseconds: 320_000_000)
+        guard let frontmostAfter = NSWorkspace.shared.frontmostApplication,
+              isMatchingFrontmostTarget(
+                expectedPid: targetPid,
+                expectedBundleId: "com.apple.finder",
+                livePid: frontmostAfter.processIdentifier,
+                liveBundleId: frontmostAfter.bundleIdentifier
+              ) else {
+            return YishuComputerActionResult(
+                succeeded: true,
+                verified: false,
+                message: "Finder back was delivered, but Finder was no longer frontmost for read-back.",
+                evidence: "method=ax_press;code=frontmost_mismatch;readback=unavailable",
+                status: .unverified,
+                method: .axPress,
+                code: .frontmostMismatch,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard let readBackWindow = finderFocusedOrMainWindow(for: targetPid),
+              sameElement(targetWindow, readBackWindow) else {
+            return YishuComputerActionResult(
+                succeeded: true,
+                verified: false,
+                message: "Finder back was delivered, but the focused window changed before read-back.",
+                evidence: "method=ax_press;code=target_stale;readback=window_changed",
+                status: .unverified,
+                method: .axPress,
+                code: .targetStale,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        let pathAfter = filesystemPath(fromAXWindow: readBackWindow)
+        if let pathAfter, pathAfter != pathBefore {
+            return YishuComputerActionResult(
+                succeeded: true,
+                verified: true,
+                message: "Finder navigation changed as requested.",
+                evidence: "method=finder_path;code=verified_accessibility;before=\(sanitizedPathEvidence(pathBefore));after=\(sanitizedPathEvidence(pathAfter))",
+                status: .verified,
+                method: .axPress,
+                code: .verifiedAccessibility,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        return YishuComputerActionResult(
+            succeeded: true,
+            verified: false,
+            message: "Finder back was delivered, but its path change was not confirmed.",
+            evidence: "method=finder_path;code=ax_press_unverified;path=unchanged_or_unavailable",
+            status: .delivered,
+            method: .axPress,
+            code: .axPressUnverified,
+            receiptId: receiptId,
+            attemptId: attemptId
+        )
+    }
+
+    private static func performSetText(
+        _ request: YishuComputerActionRequest,
+        receiptId: String,
+        attemptId: String
+    ) async -> YishuComputerActionResult {
+        guard AXIsProcessTrusted() else {
+            return failed(
+                "Accessibility permission is required for text input.",
+                code: .accessibilityPermissionDenied,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard request.basisFrameId.flatMap(UUID.init(uuidString:)) != nil,
+              let text = request.text,
+              !text.isEmpty,
+              let targetBundleId = request.targetBundleId,
+              let targetPid = request.targetPid else {
+            return failed(
+                "The text-input request is incomplete.",
+                code: .targetStale,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              isMatchingFrontmostTarget(
+                expectedPid: targetPid,
+                expectedBundleId: targetBundleId,
+                livePid: frontmost.processIdentifier,
+                liveBundleId: frontmost.bundleIdentifier
+              ) else {
+            return failed(
+                "The observed app is no longer frontmost.",
+                code: .frontmostChanged,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+
+        let system = AXUIElementCreateSystemWide()
+        guard let focused = elementAttribute(kAXFocusedUIElementAttribute as String, from: system),
+              processIdentifier(of: focused) == targetPid else {
+            return failed(
+                "No freshly focused text element belongs to the frontmost app.",
+                code: .focusedElementUnavailable,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        let role = stringAttribute(kAXRoleAttribute as String, from: focused) ?? "unknown"
+        let subrole = stringAttribute(kAXSubroleAttribute as String, from: focused)
+        guard !isSecureTextTarget(role: role, subrole: subrole) else {
+            return failed(
+                "Secure text fields cannot be filled by desktop automation.",
+                code: .secureTextBlocked,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard isWritableTextTarget(
+            role: role,
+            subrole: subrole,
+            valueSettable: isAttributeSettable(kAXValueAttribute as String, on: focused)
+        ) else {
+            return failed(
+                "The focused element is not a writable text field.",
+                code: .axSetValueUnsupported,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+
+        // Revalidate app, focus identity, ownership, role, security, and writability
+        // immediately before the one AXValue write. No clipboard/key fallback.
+        guard let liveFrontmost = NSWorkspace.shared.frontmostApplication,
+              isMatchingFrontmostTarget(
+                expectedPid: targetPid,
+                expectedBundleId: targetBundleId,
+                livePid: liveFrontmost.processIdentifier,
+                liveBundleId: liveFrontmost.bundleIdentifier
+              ),
+              let liveFocused = elementAttribute(kAXFocusedUIElementAttribute as String, from: system),
+              sameElement(focused, liveFocused),
+              processIdentifier(of: liveFocused) == targetPid,
+              isWritableTextTarget(
+                role: stringAttribute(kAXRoleAttribute as String, from: liveFocused) ?? "",
+                subrole: stringAttribute(kAXSubroleAttribute as String, from: liveFocused),
+                valueSettable: isAttributeSettable(kAXValueAttribute as String, on: liveFocused)
+              ) else {
+            return failed(
+                "The focused text target changed before execution.",
+                code: .targetStale,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+
+        let setResult = AXUIElementSetAttributeValue(
+            liveFocused,
+            kAXValueAttribute as CFString,
+            text as CFTypeRef
+        )
+        guard setResult == .success else {
+            return failed(
+                "macOS rejected the AX text update.",
+                code: .axSetValueFailed,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        let safeSummary = textReadbackSummary(text, role: role)
+        guard let frontmostAfter = NSWorkspace.shared.frontmostApplication,
+              isMatchingFrontmostTarget(
+                expectedPid: targetPid,
+                expectedBundleId: targetBundleId,
+                livePid: frontmostAfter.processIdentifier,
+                liveBundleId: frontmostAfter.bundleIdentifier
+              ),
+              let focusedAfter = elementAttribute(kAXFocusedUIElementAttribute as String, from: system),
+              sameElement(liveFocused, focusedAfter),
+              processIdentifier(of: focusedAfter) == targetPid,
+              stringAttribute(kAXValueAttribute as String, from: focusedAfter) == text else {
+            return YishuComputerActionResult(
+                succeeded: true,
+                verified: false,
+                message: "Text was set, but exact AX read-back was not confirmed.",
+                evidence: "method=ax_set_value;code=ax_set_value_unverified;same=false;\(safeSummary)",
+                status: .delivered,
+                method: .axSetValue,
+                code: .axSetValueUnverified,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        return YishuComputerActionResult(
+            succeeded: true,
+            verified: true,
+            message: "Focused text input was verified by AX read-back.",
+            evidence: "method=ax_set_value;code=verified_accessibility;same=true;\(safeSummary)",
+            status: .verified,
+            method: .axSetValue,
+            code: .verifiedAccessibility,
+            receiptId: receiptId,
+            attemptId: attemptId
+        )
+    }
+
+    static func isMatchingFrontmostTarget(
+        expectedPid: pid_t,
+        expectedBundleId: String,
+        livePid: pid_t,
+        liveBundleId: String?
+    ) -> Bool {
+        expectedPid == livePid && expectedBundleId == liveBundleId
+    }
+
+    static func isSecureTextTarget(role: String, subrole: String?) -> Bool {
+        role.localizedCaseInsensitiveContains("secure")
+            || subrole?.localizedCaseInsensitiveContains("secure") == true
+    }
+
+    static func isWritableTextTarget(
+        role: String,
+        subrole: String?,
+        valueSettable: Bool
+    ) -> Bool {
+        guard valueSettable, !isSecureTextTarget(role: role, subrole: subrole) else { return false }
+        return role == (kAXTextFieldRole as String)
+            || role == (kAXTextAreaRole as String)
+            || role == "AXComboBox"
+    }
+
+    private static func isAttributeSettable(_ attribute: String, on element: AXUIElement) -> Bool {
+        var settable = DarwinBoolean(false)
+        return AXUIElementIsAttributeSettable(element, attribute as CFString, &settable) == .success
+            && settable.boolValue
+    }
+
+    private static func processIdentifier(of element: AXUIElement) -> pid_t? {
+        var processIdentifier = pid_t()
+        return AXUIElementGetPid(element, &processIdentifier) == .success ? processIdentifier : nil
+    }
+
+    static func textReadbackSummary(_ text: String, role: String) -> String {
+        "length=\(text.count);role=\(role)"
     }
 
     /// Some apps expose an entire self-drawn sidebar as AXGroup/AXScrollArea

@@ -318,4 +318,22 @@ struct YishuVoiceProxySupervisorTests {
         // XCTest always sets configuration path; policy must keep unit tests off 8787.
         #expect(YishuVoiceProxySupervisor.shouldSkipRealProxyLifecycle)
     }
+
+    @Test func childEnvironmentDropsAmbientSecretsAndSockets() {
+        let result = YishuVoiceProxySupervisor.minimumChildEnvironment(from: [
+            "HOME": "/tmp/home",
+            "PATH": "/usr/bin",
+            "LANG": "zh_CN.UTF-8",
+            "SYNTHETIC_SECRET_TOKEN": "must-not-cross",
+            "UNRELATED_API_KEY": "must-not-cross",
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+            "NODE_PATH": "/tmp/untrusted-modules",
+        ])
+
+        #expect(result == [
+            "HOME": "/tmp/home",
+            "PATH": "/usr/bin",
+            "LANG": "zh_CN.UTF-8",
+        ])
+    }
 }

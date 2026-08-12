@@ -2,12 +2,13 @@
 //  AgentPresence.swift
 //  leanring-buddy
 //
-//  A visible projection of delegated TaskTruth. Runtime events own every
+//  A visible projection of background TaskTruth. Runtime events own every
 //  status; this file only owns presentation lifecycle such as open/seen.
 //
 
 import AppKit
 import Combine
+import Foundation
 import SwiftUI
 
 enum YishuDelegatedTaskStatus: String, Equatable {
@@ -27,6 +28,20 @@ enum YishuDelegatedResultKind: String, Equatable {
     case completed
     case unverified
     case failed
+    case cancelled
+}
+
+/// Additive task discriminator from the runtime. Missing values are treated as
+/// delegated work so Clicky remains compatible with older sidecars.
+enum YishuBackgroundTaskKind: String, Equatable {
+    case delegated
+    case contextReminder = "context_reminder"
+}
+
+enum YishuContextReminderWatchState: String, Equatable {
+    case waitingForDeparture = "waiting_for_departure"
+    case armed
+    case fired
     case cancelled
 }
 
@@ -112,6 +127,8 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
     let summary: String?
     let sourceEventId: UUID
     let sequence: [YishuSystemSequenceStep]
+    let taskKind: YishuBackgroundTaskKind
+    let watchState: YishuContextReminderWatchState?
 
     init(
         id: UUID,
@@ -126,7 +143,9 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
         resultKind: YishuDelegatedResultKind?,
         summary: String?,
         sourceEventId: UUID,
-        sequence: [YishuSystemSequenceStep] = []
+        sequence: [YishuSystemSequenceStep] = [],
+        taskKind: YishuBackgroundTaskKind = .delegated,
+        watchState: YishuContextReminderWatchState? = nil
     ) {
         self.id = id
         self.parentId = parentId
@@ -141,13 +160,32 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
         self.summary = summary
         self.sourceEventId = sourceEventId
         self.sequence = sequence
+        self.taskKind = taskKind
+        self.watchState = watchState
     }
 
     var workerLabel: String {
-        "后台任务"
+        switch taskKind {
+        case .delegated: return "后台任务"
+        case .contextReminder: return "应用返回提醒"
+        }
     }
 
     var statusLabel: String {
+        if taskKind == .contextReminder {
+            switch status {
+            case .pending: return "提醒已创建"
+            case .running:
+                return watchState == .armed
+                    ? "等待你回到当前应用"
+                    : "等待你离开当前应用"
+            case .blocked: return "提醒需要确认"
+            case .done: return "提醒已送达"
+            case .failed: return "提醒未送达"
+            case .cancelled: return "提醒已取消"
+            case .interrupted: return "恢复后继续等待"
+            }
+        }
         switch status {
         case .pending: return "等待开始"
         case .running: return "正在研究"
@@ -158,6 +196,18 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
     }
 
     var interruptionMessage: String? {
+        if taskKind == .contextReminder {
+            switch status {
+            case .failed:
+                return "这个提醒未能送达。"
+            case .cancelled:
+                return "这个提醒已取消，不会再触发。"
+            case .interrupted:
+                return "提醒仍已保存；奕枢恢复后会继续等待。"
+            case .pending, .running, .blocked, .done:
+                return nil
+            }
+        }
         switch status {
         case .failed, .cancelled, .interrupted:
             return "任务已中断。可以从头重试，或开始一个新方向。"
@@ -237,6 +287,38 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
         let resultKind = (payload["resultKind"] as? String)
             .flatMap(YishuDelegatedResultKind.init(rawValue:))
         let summary = boundedOptionalString(payload["summary"], maximum: 500)
+        let taskKind: YishuBackgroundTaskKind
+        if let rawTaskKind = payload["taskKind"] {
+            guard let wireTaskKind = rawTaskKind as? String,
+                  let decodedTaskKind = YishuBackgroundTaskKind(rawValue: wireTaskKind) else {
+                return nil
+            }
+            taskKind = decodedTaskKind
+        } else {
+            // The one compatibility fallback: V1 producers omitted taskKind
+            // and only produced delegated work.
+            taskKind = .delegated
+        }
+        let watchState: YishuContextReminderWatchState?
+        if taskKind == .contextReminder {
+            if let rawWatchState = payload["watchState"] {
+                guard let wireWatchState = rawWatchState as? String,
+                      let decodedWatchState = YishuContextReminderWatchState(
+                        rawValue: wireWatchState
+                      ),
+                      contextReminderStateMatchesStatus(decodedWatchState, status: status) else {
+                    return nil
+                }
+                watchState = decodedWatchState
+            } else {
+                // Compatibility with the first context-reminder producer,
+                // which emitted taskKind but no explicit watch state.
+                watchState = .waitingForDeparture
+            }
+        } else {
+            guard payload["watchState"] == nil else { return nil }
+            watchState = nil
+        }
         let isActive = status == .pending || status == .running
         let hasCompleteResult = resultKind != nil && summary != nil
         guard (provider == nil) == (model == nil),
@@ -277,7 +359,9 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
             resultKind: resultKind,
             summary: summary,
             sourceEventId: sourceEventId,
-            sequence: sequence
+            sequence: sequence,
+            taskKind: taskKind,
+            watchState: watchState
         )
     }
 
@@ -327,8 +411,201 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
             resultKind: nil,
             summary: nil,
             sourceEventId: sourceEventId,
-            sequence: sequence
+            sequence: sequence,
+            taskKind: taskKind,
+            watchState: watchState
         )
+    }
+
+    /// A terminal result can return to the user, but it never becomes a new
+    /// conversation turn. Interrupted is local presentation state and is kept
+    /// in ResultInbox without creating a proactive announcement.
+    var returnAnnouncementText: String? {
+        if taskKind == .contextReminder {
+            switch status {
+            case .done:
+                let reminder = summary.flatMap(Self.reminderExcerpt(from:))
+                    ?? Self.reminderExcerpt(from: title)
+                    ?? "你刚才设下的事"
+                return "提醒你：\(reminder)。"
+            case .blocked:
+                return "这个提醒还没送达，需要你确认。"
+            case .failed:
+                return "这个提醒未能送达。"
+            case .cancelled:
+                return "提醒已取消。"
+            case .pending, .running, .interrupted:
+                return nil
+            }
+        }
+        let safeTitle = Self.returnExcerpt(from: title, maximum: 48) ?? "后台任务"
+        let subject = "「\(safeTitle)」"
+        let result = summary.flatMap { Self.returnExcerpt(from: $0, maximum: 140) }
+        let conclusion = result.map { "结论：\($0)。" } ?? "详情保留在后台任务里。"
+        switch resultKind {
+        case .succeeded:
+            return "\(subject)已确认完成。\(conclusion)"
+        case .completed:
+            return "\(subject)整理完成，未独立核验。\(conclusion)"
+        case .unverified:
+            return "\(subject)执行结束，结果未独立核验。\(conclusion)"
+        case .failed:
+            return "\(subject)执行失败，没有完成。\(result.map { "原因：\($0)。" } ?? "错误详情保留在后台任务里。")"
+        case .cancelled:
+            return "\(subject)已经取消，没有继续执行。已有内容仍保留在后台任务里。"
+        case nil:
+            switch status {
+            case .done:
+                return "\(subject)整理完成，未独立核验。\(conclusion)"
+            case .blocked:
+                return "\(subject)遇到了阻塞，目前没有完成。\(result.map { "原因：\($0)。" } ?? "详情保留在后台任务里。")"
+            case .failed:
+                return "\(subject)执行失败，没有完成。\(result.map { "原因：\($0)。" } ?? "错误详情保留在后台任务里。")"
+            case .cancelled:
+                return "\(subject)已经取消，没有继续执行。已有内容仍保留在后台任务里。"
+            case .pending, .running, .interrupted:
+                return nil
+            }
+        }
+    }
+
+    private static func reminderExcerpt(from rawText: String) -> String? {
+        guard var reminder = returnExcerpt(from: rawText, maximum: 140) else { return nil }
+        for prefix in ["提醒：", "提醒:"] where reminder.hasPrefix(prefix) {
+            reminder.removeFirst(prefix.count)
+            break
+        }
+        reminder = reminder.trimmingCharacters(in: .whitespacesAndNewlines)
+        return reminder.isEmpty ? nil : reminder
+    }
+
+    private static func contextReminderStateMatchesStatus(
+        _ watchState: YishuContextReminderWatchState,
+        status: YishuDelegatedTaskStatus
+    ) -> Bool {
+        switch watchState {
+        case .waitingForDeparture:
+            return status == .pending || status == .running
+        case .armed:
+            return status == .running
+        case .fired:
+            return status == .done
+        case .cancelled:
+            return status == .cancelled
+        }
+    }
+
+    /// ResultInbox keeps the full runtime summary. Proactive speech uses one
+    /// bounded plain-text sentence so URLs and formatting are never read out.
+    private static func returnExcerpt(from rawText: String, maximum: Int) -> String? {
+        let lowercase = rawText.lowercased()
+        guard !lowercase.contains("[result summary omitted"),
+              !lowercase.contains("[delegated result unavailable") else { return nil }
+        var text = rawText.replacingOccurrences(
+            of: #"\[([^\]\n]+)\]\(\s*(?:https?://|www\.)[^)\n]+\)"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: #"(?i)(?:https?://|www\.)[^\s<>()（）\[\]{}，。！？；、“”‘’]+"#,
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: #"[`*_>#~]+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        text = text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        text = text.replacingOccurrences(
+            of: #"[。！？!?；;]+"#,
+            with: "，",
+            options: .regularExpression
+        )
+        text = text.trimmingCharacters(in: CharacterSet(charactersIn: " ，、:："))
+        guard !text.isEmpty else { return nil }
+        if text.count > maximum {
+            text = String(text.prefix(maximum)).trimmingCharacters(in: .whitespacesAndNewlines)
+            text += "…"
+        }
+        return text
+    }
+}
+
+/// Persists only the two facts needed to prevent restart floods. A task first
+/// seen as terminal in a snapshot is recorded as baseline; a task previously
+/// seen running may return when a later snapshot supplies its terminal state.
+struct YishuDelegatedTaskReturnState {
+    private static let knownTaskIDsKey = "yishu.delegated-return.known-task-ids.v1"
+    private static let announcedTaskIDsKey = "yishu.delegated-return.announced-task-ids.v1"
+
+    private let userDefaults: UserDefaults
+    private(set) var knownTaskIDs: Set<UUID>
+    private(set) var announcedTaskIDs: Set<UUID>
+
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        knownTaskIDs = Self.loadIDs(forKey: Self.knownTaskIDsKey, from: userDefaults)
+        announcedTaskIDs = Self.loadIDs(forKey: Self.announcedTaskIDsKey, from: userDefaults)
+    }
+
+    mutating func shouldEnqueueLive(_ task: YishuDelegatedTaskPresenceEvent) -> Bool {
+        if task.status == .pending || task.status == .running {
+            recordKnown(task.id)
+            return false
+        }
+        guard task.returnAnnouncementText != nil else { return false }
+        recordKnown(task.id)
+        return !announcedTaskIDs.contains(task.id)
+    }
+
+    mutating func shouldEnqueueSnapshot(_ task: YishuDelegatedTaskPresenceEvent) -> Bool {
+        if task.status == .pending || task.status == .running {
+            recordKnown(task.id)
+            return false
+        }
+        guard task.returnAnnouncementText != nil else { return false }
+        guard knownTaskIDs.contains(task.id) else {
+            // Existing terminal rows are history, not new interruptions.
+            recordKnown(task.id)
+            recordAnnounced(task.id)
+            return false
+        }
+        return !announcedTaskIDs.contains(task.id)
+    }
+
+    mutating func markAnnounced(_ taskID: UUID) {
+        recordKnown(taskID)
+        recordAnnounced(taskID)
+    }
+
+    static func canPresent(
+        foregroundBusy: Bool,
+        secondsSinceLastUserInput: TimeInterval,
+        quietInterval: TimeInterval = 3
+    ) -> Bool {
+        !foregroundBusy && secondsSinceLastUserInput >= quietInterval
+    }
+
+    private mutating func recordKnown(_ taskID: UUID) {
+        guard knownTaskIDs.insert(taskID).inserted else { return }
+        persist(knownTaskIDs, forKey: Self.knownTaskIDsKey)
+    }
+
+    private mutating func recordAnnounced(_ taskID: UUID) {
+        guard announcedTaskIDs.insert(taskID).inserted else { return }
+        persist(announcedTaskIDs, forKey: Self.announcedTaskIDsKey)
+    }
+
+    private static func loadIDs(forKey key: String, from userDefaults: UserDefaults) -> Set<UUID> {
+        Set((userDefaults.stringArray(forKey: key) ?? []).compactMap(UUID.init(uuidString:)))
+    }
+
+    private func persist(_ ids: Set<UUID>, forKey key: String) {
+        userDefaults.set(ids.map(\.uuidString).sorted(), forKey: key)
     }
 }
 
@@ -368,7 +645,9 @@ final class AgentPresenceViewModel: ObservableObject {
     func mergeSnapshot(_ snapshot: [YishuDelegatedTaskPresenceEvent]) {
         var merged = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
         for task in snapshot {
-            if let current = merged[task.id], current.updatedAt >= task.updatedAt {
+            if let current = merged[task.id],
+               current.status != .interrupted,
+               current.updatedAt >= task.updatedAt {
                 continue
             }
             merged[task.id] = task
@@ -823,8 +1102,8 @@ private struct AgentPresenceAnchorButton: View {
         .onHover { hovered = $0 }
         .scaleEffect(hovered ? 1.06 : 1)
         .animation(.easeOut(duration: 0.16), value: hovered)
-        .help("管理后台任务")
-        .accessibilityLabel("管理后台任务，\(taskCount) 项")
+        .help("管理任务与提醒")
+        .accessibilityLabel("管理任务与提醒，\(taskCount) 项")
     }
 }
 
@@ -905,7 +1184,7 @@ private struct AgentPresencePocketView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("后台任务")
+                Text("任务与提醒")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                 Text("\(viewModel.tasks.count)")
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -1017,7 +1296,7 @@ struct TaskStatusCard: View {
                     .disabled(cancelState == .requesting || cancelState == .accepted)
                 } else if task.status == .done || task.status == .blocked {
                     Button(action: { onResult(task) }) {
-                        Text("查看结果")
+                        Text(task.taskKind == .contextReminder ? "查看提醒" : "查看结果")
                             .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                             .padding(.horizontal, 9)
                             .padding(.vertical, 5)
@@ -1048,12 +1327,14 @@ struct TaskStatusCard: View {
                     .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.72))
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack(spacing: 8) {
-                    actionButton("从头重试", tint: DS.Colors.overlayCursorBlue) {
-                        onRetryFromBeginning(task)
-                    }
-                    actionButton("开始新方向", tint: DS.Colors.overlaySpectralViolet) {
-                        onStartNewDirection(task)
+                if task.taskKind == .delegated {
+                    HStack(spacing: 8) {
+                        actionButton("从头重试", tint: DS.Colors.overlayCursorBlue) {
+                            onRetryFromBeginning(task)
+                        }
+                        actionButton("开始新方向", tint: DS.Colors.overlaySpectralViolet) {
+                            onStartNewDirection(task)
+                        }
                     }
                 }
             }
@@ -1071,6 +1352,13 @@ struct TaskStatusCard: View {
     }
 
     private var cancelActionLabel: String {
+        if task.taskKind == .contextReminder {
+            switch cancelState {
+            case .requesting: return "正在取消"
+            case .accepted: return "已请求取消"
+            case .idle, .failed: return "取消提醒"
+            }
+        }
         switch cancelState {
         case .requesting: return "正在停止"
         case .accepted: return "已请求停止"
@@ -1079,6 +1367,14 @@ struct TaskStatusCard: View {
     }
 
     private var cancelRequestMessage: String? {
+        if task.taskKind == .contextReminder {
+            switch cancelState {
+            case .idle: return nil
+            case .requesting: return "正在等待运行时确认取消提醒…"
+            case .accepted: return "运行时已接收取消提醒请求。"
+            case .failed(let message): return "取消提醒失败：\(message)"
+            }
+        }
         switch cancelState {
         case .idle: return nil
         case .requesting: return "正在等待运行时确认停止请求…"

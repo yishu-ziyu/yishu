@@ -10,6 +10,11 @@ export type {
   ConversationTurn,
   ConversationTurnInput,
   ConversationTurnStatus,
+  ContextWatch,
+  ContextWatchCreateInput,
+  ContextWatchCreateResult,
+  ContextWatchState,
+  ContextWatchTransitionInput,
   DelegatedResultInput,
   DelegatedResultKind,
   DelegatedResultListOptions,
@@ -84,6 +89,12 @@ export type { StoreMutationOptions } from "./types.js"
 export type { YishuStorePort } from "./yishu-store.js"
 
 export { SqliteYishuStore } from "./sqlite-store.js"
+
+export {
+  CONTEXT_WATCH_FIRE_ACTION,
+  cloneContextWatch,
+  isActiveContextWatch,
+} from "./context-watch.js"
 
 export {
   extractProcedureFromTrail,

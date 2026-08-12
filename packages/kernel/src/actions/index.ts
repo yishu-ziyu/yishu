@@ -20,3 +20,8 @@ export { createLearnMindFromPatternAction } from "./learn-mind.js";
 export type { LearnMindInput } from "./learn-mind.js";
 export { createDelegateAction } from "./delegate.js";
 export type { DelegateInput, DelegateResult } from "./delegate.js";
+export { createWatchAppReturnAction } from "./watch-app-return.js";
+export type {
+  WatchAppReturnInput,
+  WatchAppReturnResult,
+} from "./watch-app-return.js";

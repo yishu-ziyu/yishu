@@ -78,6 +78,13 @@ export function createRunSkillAction(deps: {
     risk: "low",
     context: "trail",
     run: async (ctx): Promise<RunSkillResult> => {
+      if (ctx.sessionScope === undefined) {
+        throw new Error("run_skill requires an exact session scope");
+      }
+      const sessionScope = ctx.sessionScope;
+      if (sessionScope.kind === "private") {
+        throw new Error("Private sessions cannot read ContextTrail.");
+      }
       const skills = await store.listVerifiedSkills();
       let matched: VerifiedSkill | null = null;
 
@@ -97,7 +104,7 @@ export function createRunSkillAction(deps: {
         ctx.contextFrame !== undefined
           ? (ctx.contextFrame as TrailSourceFrame)
           : undefined;
-      const recent = trail.recentMinutes(ctx.input.recentMinutes, ctx.now);
+      const recent = trail.recentMinutes(ctx.input.recentMinutes, sessionScope, ctx.now);
 
       if (matched) {
         const report = verifyProcedureAgainstTrail(matched, recent, {
@@ -115,6 +122,7 @@ export function createRunSkillAction(deps: {
         if (wantsCapsule) {
           const buildInput: Parameters<typeof buildContextCapsule>[0] = {
             trail,
+            sessionScope,
             recentMinutes: ctx.input.recentMinutes,
             now: ctx.now,
             userIntent:
@@ -152,6 +160,7 @@ export function createRunSkillAction(deps: {
 
       const buildInput: Parameters<typeof buildContextCapsule>[0] = {
         trail,
+        sessionScope,
         recentMinutes: ctx.input.recentMinutes,
         now: ctx.now,
       };

@@ -1,0 +1,247 @@
+import Foundation
+
+/// Turns presentation-safe Runtime deltas into one strictly serial stream of
+/// spoken sentences. It never interprets model/tool syntax; callers must feed
+/// it only the already-projected `response.delta` text.
+@MainActor
+final class YishuSentenceSpeechPipeline {
+    typealias Speaker = @MainActor (String) async throws -> Void
+    typealias StopPlayback = @MainActor () -> Void
+
+    private let speaker: Speaker
+    private let stopPlayback: StopPlayback
+    private var buffer = ""
+    private var committedSourceText = ""
+    private var queue: [String] = []
+    private var pumpTask: Task<Void, Never>?
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isFinished = false
+    private var isCancelled = false
+    private(set) var didEnqueueSpeech = false
+    private(set) var didCompleteSpeech = false
+
+    init(
+        speaker: @escaping Speaker,
+        stopPlayback: @escaping StopPlayback
+    ) {
+        self.speaker = speaker
+        self.stopPlayback = stopPlayback
+    }
+
+    /// Returns the number of newly queued sentences. A positive result means
+    /// the first complete sentence can begin before the authoritative final.
+    @discardableResult
+    func consume(_ presentationDelta: String) -> Int {
+        guard !isFinished, !isCancelled, !presentationDelta.isEmpty else { return 0 }
+        buffer += presentationDelta
+        return extractCompleteSentences(isFinal: false)
+    }
+
+    /// Reconciles against the authoritative visible text and speaks only the
+    /// uncommitted suffix. Previously queued/spoken sentences are never replayed.
+    @discardableResult
+    func finish(authoritativeText: String) async -> Bool {
+        guard !isFinished, !isCancelled else { return false }
+        isFinished = true
+
+        guard authoritativeText.hasPrefix(committedSourceText) else {
+            // The Runtime contract says deltas are monotonic and concatenate to
+            // this text. If that invariant breaks, stop stale audio and hand the
+            // authoritative final back to the ordinary final-only presenter.
+            queue.removeAll()
+            buffer = ""
+            pumpTask?.cancel()
+            stopPlayback()
+            await waitUntilDrained()
+            return false
+        }
+
+        buffer = String(authoritativeText.dropFirst(committedSourceText.count))
+        _ = extractCompleteSentences(isFinal: true)
+        if !buffer.isEmpty {
+            let tail = buffer
+            buffer = ""
+            committedSourceText += tail
+            enqueue(tail)
+        }
+        await waitUntilDrained()
+        return didCompleteSpeech && !isCancelled
+    }
+
+    /// PTT and turn cancellation are hard boundaries: stop the current audio,
+    /// discard every queued sentence, and wake any waiter immediately.
+    func cancel() {
+        guard !isCancelled else { return }
+        isCancelled = true
+        queue.removeAll()
+        buffer = ""
+        pumpTask?.cancel()
+        stopPlayback()
+        resumeDrainWaiters()
+    }
+
+    private func extractCompleteSentences(isFinal: Bool) -> Int {
+        var count = 0
+        while let boundary = firstSentenceBoundary(isFinal: isFinal) {
+            let source = String(buffer[..<boundary])
+            buffer.removeSubrange(..<boundary)
+            committedSourceText += source
+            if enqueue(source) {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    private func firstSentenceBoundary(isFinal: Bool) -> String.Index? {
+        let safeEnd = isFinal ? buffer.endIndex : safeStreamingEnd(in: buffer)
+        var index = buffer.startIndex
+        while index < safeEnd {
+            let character = buffer[index]
+            let next = buffer.index(after: index)
+            switch character {
+            case "。", "！", "？", "；", "!", "?", "\n":
+                return next
+            case ".":
+                if isConservativePeriodBoundary(at: index, safeEnd: safeEnd, isFinal: isFinal) {
+                    return next
+                }
+            default:
+                break
+            }
+            index = next
+        }
+        return nil
+    }
+
+    /// Hold ambiguous markup tails until more bytes arrive. Runtime projection
+    /// is the primary trust boundary; this is a second fail-closed guard before
+    /// irreversible audio leaves the process.
+    private func safeStreamingEnd(in text: String) -> String.Index {
+        var candidates: [String.Index] = []
+        if let opening = text.lastIndex(of: "["),
+           text.lastIndex(of: "]").map({ opening > $0 }) ?? true {
+            candidates.append(opening)
+        }
+        if let opening = text.lastIndex(of: "<"),
+           text.lastIndex(of: ">").map({ opening > $0 }) ?? true {
+            candidates.append(opening)
+        }
+
+        let backticks = text.indices.filter { text[$0] == "`" }
+        if backticks.count % 2 == 1, let opening = backticks.last {
+            candidates.append(opening)
+        }
+        if let runStart = trailingBacktickRunStart(in: text) {
+            candidates.append(runStart)
+        }
+        return candidates.min() ?? text.endIndex
+    }
+
+    private func trailingBacktickRunStart(in text: String) -> String.Index? {
+        guard !text.isEmpty else { return nil }
+        var cursor = text.endIndex
+        var count = 0
+        while cursor > text.startIndex {
+            let previous = text.index(before: cursor)
+            guard text[previous] == "`" else { break }
+            count += 1
+            cursor = previous
+        }
+        return count > 0 ? cursor : nil
+    }
+
+    private func isConservativePeriodBoundary(
+        at index: String.Index,
+        safeEnd: String.Index,
+        isFinal: Bool
+    ) -> Bool {
+        let previous = index > buffer.startIndex ? buffer[buffer.index(before: index)] : nil
+        let afterPeriod = buffer.index(after: index)
+        let next = afterPeriod < safeEnd ? buffer[afterPeriod] : nil
+
+        if previous?.isNumber == true, next?.isNumber == true {
+            return false
+        }
+
+        let tokenStart = buffer[..<index].lastIndex(where: { $0.isWhitespace })
+            .map { buffer.index(after: $0) } ?? buffer.startIndex
+        let token = buffer[tokenStart...index].lowercased()
+        if token.contains("://") || token.hasPrefix("www.") || token.contains("@") {
+            return false
+        }
+
+        if let next {
+            return next.isWhitespace
+        }
+        return isFinal
+    }
+
+    @discardableResult
+    private func enqueue(_ source: String) -> Bool {
+        let sentence = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sentence.isEmpty, !isCancelled else { return false }
+        queue.append(sentence)
+        didEnqueueSpeech = true
+        startPumpIfNeeded()
+        return true
+    }
+
+    private func startPumpIfNeeded() {
+        guard pumpTask == nil, !queue.isEmpty, !isCancelled else { return }
+        pumpTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, !self.isCancelled, !self.queue.isEmpty {
+                let sentence = self.queue.removeFirst()
+                do {
+                    try await self.speaker(sentence)
+                    self.didCompleteSpeech = true
+                } catch is CancellationError {
+                    if Task.isCancelled || self.isCancelled { break }
+                } catch {
+                    // One provider/playback failure must not create overlap or
+                    // make the final response disappear. Continue serially.
+                }
+            }
+            self.pumpTask = nil
+            if !self.queue.isEmpty, !self.isCancelled {
+                self.startPumpIfNeeded()
+            } else {
+                self.resumeDrainWaiters()
+            }
+        }
+    }
+
+    private func waitUntilDrained() async {
+        guard pumpTask != nil || !queue.isEmpty else { return }
+        await withCheckedContinuation { continuation in
+            drainWaiters.append(continuation)
+        }
+    }
+
+    private func resumeDrainWaiters() {
+        let waiters = drainWaiters
+        drainWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+}
+
+enum YishuSentenceSpeechPolicy {
+    static func allowsStreaming(for utterance: String) -> Bool {
+        let text = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !YishuDirectClickResolver.isDirectClickIntent(text) else {
+            return false
+        }
+
+        // Speech is irreversible. Classify broadly and fail closed whenever an
+        // utterance mentions a plausible desktop effect; the typed Runtime
+        // event remains the final guard if a novel action verb slips through.
+        let desktopEffect = #"(?:点击|点开|点选|点一下|按下|输入|填写|填入|键入|写入|打开|关闭|滚动|拖动|删除|移除|发送|提交|保存|选择|选中|切换|返回|后退|\b(?:click|press|tap|type|fill|open|close|scroll|drag|delete|remove|send|submit|save|select|switch|go\s+back)\b)"#
+        return text.range(
+            of: desktopEffect,
+            options: [.regularExpression, .caseInsensitive]
+        ) == nil
+    }
+}

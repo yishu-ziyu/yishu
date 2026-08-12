@@ -597,20 +597,37 @@ final class YishuAgentRuntimeClient {
         runtimeProcess.executableURL = configuration.nodeExecutable
         runtimeProcess.arguments = [configuration.runtimeEntry.path]
         runtimeProcess.currentDirectoryURL = configuration.workingDirectory
-        var environment = ProcessInfo.processInfo.environment
+        let parentEnvironment = ProcessInfo.processInfo.environment
+        var environment = YishuVoiceProxySupervisor.minimumChildEnvironment(
+            from: parentEnvironment
+        )
         environment["YISHU_RUNTIME_MODE"] = "pi"
-        environment["YISHU_PRODUCT_KERNEL"] = environment["YISHU_PRODUCT_KERNEL"] ?? "1"
-        environment["YISHU_STORE_BACKEND"] = environment["YISHU_STORE_BACKEND"] ?? "sqlite"
-        if environment["YISHU_STORE_DIR"] == nil || environment["YISHU_STORE_DIR"]?.isEmpty == true {
-            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            if let support {
-                let storeDir = support
-                    .appendingPathComponent("Yishu", isDirectory: true)
-                    .appendingPathComponent("Store", isDirectory: true)
-                try? FileManager.default.createDirectory(at: storeDir, withIntermediateDirectories: true)
-                environment["YISHU_STORE_DIR"] = storeDir.path
+        environment["YISHU_PRODUCT_KERNEL"] = "1"
+        environment["YISHU_STORE_BACKEND"] = "sqlite"
+        if let support = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first {
+            let storeDir = support
+                .appendingPathComponent("Yishu", isDirectory: true)
+                .appendingPathComponent("Store", isDirectory: true)
+            try? FileManager.default.createDirectory(
+                at: storeDir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: storeDir.path
+            )
+            environment["YISHU_STORE_DIR"] = storeDir.path
+        }
+        for key in ["YISHU_USER_NAME", "YISHU_AUTH_WATCHDOG_MS"] {
+            if let value = parentEnvironment[key], !value.isEmpty {
+                environment[key] = value
             }
         }
+        YishuVoiceProxySupervisor.authorizeChildEnvironment(&environment)
         environment["NO_COLOR"] = "1"
         runtimeProcess.environment = environment
         runtimeProcess.standardInput = inputPipe
@@ -1029,6 +1046,21 @@ final class YishuAgentRuntimeClient {
         }
     }
 
+    /// Recovery-only termination keeps `stopping` false so the unexpected
+    /// stopped lifecycle event drives CompanionManager's bounded restart.
+    func terminateForRecovery() {
+        stopping = false
+        endAllPendingRuntimeRequests(
+            throwing: YishuAgentRuntimeClientError.runtimeNotRunning
+        )
+        guard let process, process.isRunning else {
+            resetProcessReferences()
+            onLifecycleEvent?(.stopped(exitCode: -1))
+            return
+        }
+        process.terminate()
+    }
+
     /// Ends every in-flight turn / auth / history wait when the sidecar is gone.
     /// Used by `stop()` and by unexpected process termination.
     func endAllPendingRuntimeRequests(throwing error: Error) {
@@ -1417,41 +1449,17 @@ final class YishuAgentRuntimeClient {
                 isError: payload["isError"] as? Bool ?? false
             ))
         case "computer.action.requested":
-            let screen = (payload["screen"] as? NSNumber)?.intValue
             guard let traceId,
-                  Self.isValidSchemaVersionValue(raw["schemaVersion"]),
-                  let actionId = (payload["actionId"] as? String).flatMap(UUID.init(uuidString:)),
-                  let action = payload["action"] as? String,
-                  action == "left_click",
-                  let x = Self.doubleValue(payload["x"]),
-                  let y = Self.doubleValue(payload["y"]),
-                  x.isFinite,
-                  y.isFinite,
-                  x >= 0,
-                  y >= 0,
-                  Self.isValidScreenPayloadValue(payload["screen"]),
-                  Self.isValidOptionalLabelPayloadValue(payload["label"]),
-                  Self.isValidOptionalEffectClassPayloadValue(payload["effectClass"]),
-                  Self.isValidOptionalUUIDPayloadValue(payload["intentId"]),
-                  Self.isValidOptionalUUIDPayloadValue(payload["attemptId"]),
-                  Self.isValidOptionalUUIDPayloadValue(payload["basisFrameId"]) else {
+                  let request = Self.decodeComputerActionRequest(
+                    payload: payload,
+                    requestId: requestId,
+                    traceId: traceId,
+                    schemaVersion: raw["schemaVersion"]
+                  ) else {
                 finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnFailed)
                 return
             }
-            continuation.yield(.computerActionRequested(YishuComputerActionRequest(
-                requestId: requestId,
-                traceId: traceId,
-                actionId: actionId,
-                action: action,
-                x: x,
-                y: y,
-                screen: screen,
-                label: payload["label"] as? String,
-                intentId: payload["intentId"] as? String,
-                attemptId: payload["attemptId"] as? String,
-                basisFrameId: payload["basisFrameId"] as? String,
-                effectClass: payload["effectClass"] as? String
-            )))
+            continuation.yield(.computerActionRequested(request))
         case "memory.used":
             let items = Self.parseMemoryUsedItems(payload)
             if !items.isEmpty {
@@ -1870,6 +1878,106 @@ final class YishuAgentRuntimeClient {
         return nil
     }
 
+    static func decodeComputerActionRequest(
+        payload: [String: Any],
+        requestId: UUID,
+        traceId: UUID,
+        schemaVersion: Any?
+    ) -> YishuComputerActionRequest? {
+        guard isValidSchemaVersionValue(schemaVersion),
+              let actionId = (payload["actionId"] as? String).flatMap(UUID.init(uuidString:)),
+              let action = payload["action"] as? String,
+              isValidOptionalEffectClassPayloadValue(payload["effectClass"]),
+              isValidOptionalUUIDPayloadValue(payload["intentId"]),
+              isValidOptionalUUIDPayloadValue(payload["attemptId"]),
+              isValidOptionalUUIDPayloadValue(payload["basisFrameId"]) else {
+            return nil
+        }
+
+        let common = (
+            intentId: payload["intentId"] as? String,
+            attemptId: payload["attemptId"] as? String,
+            basisFrameId: payload["basisFrameId"] as? String,
+            effectClass: payload["effectClass"] as? String
+        )
+        switch action {
+        case "left_click":
+            guard let x = doubleValue(payload["x"]),
+                  let y = doubleValue(payload["y"]),
+                  x.isFinite,
+                  y.isFinite,
+                  x >= 0,
+                  y >= 0,
+                  isValidScreenPayloadValue(payload["screen"]),
+                  isValidOptionalLabelPayloadValue(payload["label"]) else {
+                return nil
+            }
+            return YishuComputerActionRequest(
+                requestId: requestId,
+                traceId: traceId,
+                actionId: actionId,
+                action: action,
+                x: x,
+                y: y,
+                screen: (payload["screen"] as? NSNumber)?.intValue,
+                label: payload["label"] as? String,
+                intentId: common.intentId,
+                attemptId: common.attemptId,
+                basisFrameId: common.basisFrameId,
+                effectClass: common.effectClass
+            )
+        case "finder_history_back":
+            guard payload["targetBundleId"] as? String == "com.apple.finder",
+                  let targetPid = positiveProcessIdentifier(payload["targetPid"]),
+                  let basisFrameId = common.basisFrameId,
+                  UUID(uuidString: basisFrameId) != nil else {
+                return nil
+            }
+            return YishuComputerActionRequest(
+                requestId: requestId,
+                traceId: traceId,
+                actionId: actionId,
+                action: action,
+                x: 0,
+                y: 0,
+                targetBundleId: "com.apple.finder",
+                targetPid: targetPid,
+                intentId: common.intentId,
+                attemptId: common.attemptId,
+                basisFrameId: basisFrameId,
+                effectClass: common.effectClass
+            )
+        case "set_text":
+            guard let text = payload["text"] as? String,
+                  (1...10_000).contains(text.count),
+                  let targetBundleId = payload["targetBundleId"] as? String,
+                  targetBundleId == targetBundleId.trimmingCharacters(in: .whitespacesAndNewlines),
+                  (1...255).contains(targetBundleId.count),
+                  let targetPid = positiveProcessIdentifier(payload["targetPid"]),
+                  let basisFrameId = common.basisFrameId,
+                  UUID(uuidString: basisFrameId) != nil else {
+                return nil
+            }
+            return YishuComputerActionRequest(
+                requestId: requestId,
+                traceId: traceId,
+                actionId: actionId,
+                action: action,
+                x: 0,
+                y: 0,
+                text: text,
+                targetBundleId: targetBundleId,
+                targetPid: targetPid,
+                intentId: common.intentId,
+                attemptId: common.attemptId,
+                basisFrameId: basisFrameId,
+                effectClass: common.effectClass
+            )
+        default:
+            return nil
+        }
+    }
+
     static func isValidSchemaVersionValue(_ value: Any?) -> Bool {
         guard let number = nonBooleanNumber(value) else { return false }
         let doubleValue = number.doubleValue
@@ -1912,6 +2020,17 @@ final class YishuAgentRuntimeClient {
             return nil
         }
         return number
+    }
+
+    private static func positiveProcessIdentifier(_ value: Any?) -> pid_t? {
+        guard let number = nonBooleanNumber(value),
+              number.doubleValue.isFinite,
+              number.doubleValue.rounded() == number.doubleValue,
+              let processIdentifier = pid_t(exactly: number.int64Value),
+              processIdentifier > 0 else {
+            return nil
+        }
+        return processIdentifier
     }
 
     private static func isValidOptionalUUIDPayloadValue(_ value: Any?) -> Bool {

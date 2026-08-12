@@ -81,12 +81,13 @@ scope are treated as personal. Private conversations are live-only: they do not
 read or write memory and do not create durable conversation, turn, trail, or
 TaskTruth rows; private is never restored after an app restart.
 
-Pi sessions and Clicky's short fallback history may cache data for latency or
-continuity, but neither is authoritative. Reusing a completed turn replays the
-Kernel record instead of executing tools again; an interrupted open turn fails
-closed for recovery. Task execution state remains a separate `TaskTruth`
-projection linked by the same turn ID, so a conversation is not mistaken for a
-task.
+Pi sessions remain an in-memory latency cache, not product truth. When that
+cache is cold, ProductKernelRuntime injects only the bounded visible turns from
+the exact durable conversation and scope; a hot session does not receive the
+history twice. Reusing a completed turn replays the Kernel record instead of
+executing tools again; an interrupted open turn fails closed for recovery.
+Task execution state remains a separate `TaskTruth` projection linked by the
+same turn ID, so a conversation is not mistaken for a task.
 
 The shipping concurrency boundary is one Clicky-managed sidecar using SQLite.
 Desktop actions share one process-local token/epoch lease and fail busy without
@@ -107,6 +108,28 @@ Delegated result delivery is durable in the SQLite and JSON stores: one Main
 turn claims pending results, acknowledges them only after its terminal turn is
 durable, and releases the claim on failure or cancellation.
 
+Clicky also projects a terminal delegated result back beside the cursor after
+the foreground is idle and the user has been quiet for three seconds. That
+overlay/TTS announcement is conversation-scoped and persistently de-duplicated,
+but it does not create a fake turn, acknowledge the task, or consume Result
+Inbox. The next ordinary utterance can therefore refer to the same result (for
+example, “第二条为什么？”) through the canonical Main-turn delivery path.
+
+The first durable initiative slice is one explicit application-return reminder.
+Kernel atomically creates its standing mandate, TaskTruth, and ContextWatch;
+only post-creation observations can move it from waiting to armed, and the
+first later return atomically fires its result once. Clicky projects the typed
+waiting/armed/fired state and reuses the same quiet-window return surface. This
+does not claim a general scheduler or checkpoint resume.
+
+Recent context is a scoped, in-memory evidence trail. Clicky samples metadata
+about every five seconds; every append/query carries an exact SessionScope,
+and private mode is rejected before Swift collection as well as in Kernel.
+Ordinary turns can receive only a bounded two-minute slice from their own
+scope, labelled as untrusted historical observation. Durable conversation
+history and explicit Learning rules are attached separately; screenshots never
+enter any of these continuity blocks.
+
 Agent Native is a design-methodology source only, not a Swift or Node
 dependency. We borrow the shape of one typed Action, a fresh
 target/observation reference, execution-time revalidation, a structured receipt,
@@ -122,6 +145,18 @@ dependency, fallback, or runtime path in Yishu.
 The canonical Clicky app and runtime communicate through versioned newline-delimited JSON during the first integration slice. Every command and event has a request ID, trace ID, schema version, and timestamp.
 
 Computer actions use the same boundary: Pi emits a typed `computer.action.requested`; the macOS shell executes it through Accessibility and answers with `computer.action.result`. Provider tool syntax is never a presentation format. Direct-action turns are buffered until that result arrives, and completion is verified from Accessibility state, frontmost-window state, or changed screen content. The receipt carries the action identity, execution method/attempt, success state, verification state, message, and bounded evidence so a tool return is never mistaken for visible completion.
+
+Pure conversation deltas may enter a fail-closed, sentence-level serial TTS
+pipeline before model completion. Tool markup, ambiguous partial syntax, and
+all desktop-effect utterances remain final-only. PTT stops audio immediately
+and cancels the turn; generation-aware same-turn steer is not yet a shipping
+claim.
+
+The shipping action set includes verified `left_click`, a Finder-only typed
+`finder_history_back`, and `set_text` on the currently focused writable AX
+element. Finder and text actions re-read the live frontmost PID/bundle before
+execution; secure or non-writable fields fail closed. Text receipts contain
+only bounded length/role/match evidence, never the entered text.
 
 An explicit click on a visually named control first goes through a deterministic local action router. It limits OCR to the requested screen region, resolves the visible label, and uses the same verified actuator contract without paying for a model turn. The actuator prefers `AXPress`; when a self-drawn app exposes only inert accessibility groups, it confirms that the captured frontmost app still owns the point, hides the cursor, posts one Quartz click, and immediately restores the cursor before verifying screen change. If local evidence cannot resolve the target, the request falls through to the normal ContextFrame and Pi path. Legacy `[POINT]` output is presentation-only unless the original user turn is itself a direct click request; in that case Clicky upgrades it to the same verified action path and never speaks tool syntax or asks the user to finish the click.
 
@@ -165,7 +200,7 @@ The presence of a restricted conversation profile does not remove tools from Yis
 
 `apps/clicky` carries the interaction identity `com.yishu.yishu-buddy` and is the only source, build, install, and visible acceptance path for the macOS App. The root Swift package exposes only the portable `YishuContext` contract and tests; it does not build another `.app`. Clicky owns ContextFrame collection and starts the bundled Pi runtime behind its existing `CompanionManager`.
 
-The current Grok selector and local 8317 route are preserved as model policy. Clicky sends only an allowlisted `{ provider, model }` preference; `PiRuntimeAdapter` maps it into a product-owned custom provider fixed to `http://127.0.0.1:8787/v1`. Neither arbitrary base URLs nor headers cross the runtime protocol. The old local `/chat` route remains a controlled continuity fallback while a physical push-to-talk turn is still a manual acceptance gate. It is a transitional bypass: ADR 0010 requires moving fallback behind Runtime so it uses the same Kernel ledger before the product expands further.
+The current Grok selector and local 8317 route are preserved as model policy. Clicky sends only an allowlisted `{ provider, model }` preference; `PiRuntimeAdapter` maps it into a product-owned custom provider fixed to `http://127.0.0.1:8787/v1`. Neither arbitrary base URLs nor headers cross the runtime protocol. Conversation failure no longer falls through Clicky's local `/chat` path or a Swift-owned history cache: Clicky performs a bounded Runtime restart and then reports failure honestly. `/chat` remains only for the non-conversational onboarding pointing demo.
 
 ## Unified product spine
 
@@ -175,8 +210,7 @@ ADR 0010 makes the intended development shape explicit:
 
 Current exceptions are tracked as migration work rather than alternate architecture:
 
-- Clicky's direct `/chat` fallback and short `conversationHistory` cache;
-- Swift-owned named-click decision/execution before Kernel routing;
+- Swift-owned named-click latency path before Kernel routing (execution still uses the typed verified actuator);
 - Runtime calls into Kernel's raw store instead of a product service facade;
 - project UI, conflict/expiry review, and export;
 - durable skill replay, initiative adoption, and distributed execution control.

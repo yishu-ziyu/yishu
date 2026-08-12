@@ -163,6 +163,9 @@ export class YishuActionRegistry {
       ...(options.contextFrame !== undefined
         ? { contextFrame: options.contextFrame }
         : {}),
+      ...(options.sessionScope !== undefined
+        ? { sessionScope: options.sessionScope }
+        : {}),
       ...(options.trail !== undefined ? { trail: options.trail } : {}),
       ...(deps !== undefined ? { deps } : {}),
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
@@ -255,6 +258,9 @@ export class YishuActionRegistry {
         now,
         ...(options.contextFrame !== undefined
           ? { contextFrame: options.contextFrame }
+          : {}),
+        ...(options.sessionScope !== undefined
+          ? { sessionScope: options.sessionScope }
           : {}),
         ...(options.trail !== undefined ? { trail: options.trail } : {}),
         ...(deps !== undefined ? { deps } : {}),

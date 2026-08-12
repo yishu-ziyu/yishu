@@ -94,7 +94,36 @@ export interface TaskTruth {
   contract?: TaskExecutionContract
 }
 
-/** Delivery metadata for one delegated child result; never a task status. */
+/** One durable, one-shot reminder bound to returning to an exact application. */
+export type ContextWatchState =
+  | "waiting_for_departure"
+  | "armed"
+  | "fired"
+  | "cancelled"
+
+export interface ContextWatch {
+  id: string
+  taskId: string
+  mandateId: string
+  mainConversationId: string
+  /** Immutable exact scope; private sessions are never persistable. */
+  sessionScope: SessionScope
+  /** Exact foreground application bundle captured from a fresh source frame. */
+  targetBundleId: string
+  reminder: string
+  state: ContextWatchState
+  createdAt: string
+  armedAt?: string
+  firedAt?: string
+  /** Frame that grounded the user's original "this application" reference. */
+  sourceFrameId: string
+}
+
+/**
+ * Delivery metadata for an asynchronous task result; never a task status.
+ * The legacy Delegated* name remains on the v1 wire. It also carries one-shot
+ * initiative results so all background completions share claim/ack delivery.
+ */
 export type DelegatedResultKind =
   | "succeeded"
   | "completed"
@@ -243,6 +272,7 @@ export interface YishuStoreSnapshot {
   verifiedSkills: VerifiedSkill[]
   mandates: Mandate[]
   tasks: TaskTruth[]
+  contextWatches: ContextWatch[]
   delegatedResults: DelegatedResultRecord[]
   conversations: Conversation[]
   turns: ConversationTurn[]
@@ -267,6 +297,37 @@ export type TaskInput = Omit<TaskTruth, "createdAt" | "updatedAt" | "sessionScop
   createdAt?: string
   updatedAt?: string
   sessionScope?: SessionScope
+}
+
+/** Atomic input for the Mandate + TaskTruth + ContextWatch creation boundary. */
+export interface ContextWatchCreateInput {
+  mainConversationId: string
+  sessionScope: SessionScope
+  targetBundleId: string
+  reminder: string
+  sourceFrameId: string
+  createdAt?: string
+  /** Optional stable ids support callers that need idempotent retry. */
+  id?: string
+  taskId?: string
+  mandateId?: string
+}
+
+export interface ContextWatchCreateResult {
+  watch: ContextWatch
+  task: TaskTruth
+  mandate: Mandate
+}
+
+export interface ContextWatchTransitionInput {
+  id: string
+  /** Required exact scope prevents observations crossing personal/projects. */
+  sessionScope: SessionScope
+  expectedState: "waiting_for_departure" | "armed"
+  nextState: "armed" | "fired"
+  occurredAt?: string
+  /** Fresh observation that justified this transition; retained as task evidence. */
+  observationFrameId: string
 }
 
 /** Optional cancellation contract for durable memory mutations. */

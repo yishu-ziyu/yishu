@@ -37,6 +37,13 @@ export function createShareContextAction(trail: ContextTrail) {
     risk: "low",
     context: "capsule",
     run: async (ctx): Promise<ShareContextResult> => {
+      if (ctx.sessionScope === undefined) {
+        throw new Error("share_context requires an exact session scope");
+      }
+      const sessionScope = ctx.sessionScope;
+      if (sessionScope.kind === "private") {
+        throw new Error("Private sessions cannot share ContextTrail.");
+      }
       const frame =
         ctx.contextFrame !== undefined
           ? (ctx.contextFrame as TrailSourceFrame)
@@ -44,6 +51,7 @@ export function createShareContextAction(trail: ContextTrail) {
 
       const buildInput: Parameters<typeof buildContextCapsule>[0] = {
         trail,
+        sessionScope,
         recentMinutes: ctx.input.recentMinutes,
         ttlMs: ctx.input.ttlSeconds * 1000,
         now: ctx.now,

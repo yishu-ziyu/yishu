@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 const worker = await import("../src/index.ts");
@@ -136,22 +139,31 @@ test("local-server entrypoint forwards the same request shape", async () => {
     PORT: process.env.PORT,
     STEPFUN_API_KEY: process.env.STEPFUN_API_KEY,
     YISHU_WORKER_ENV_FILE: process.env.YISHU_WORKER_ENV_FILE,
+    YISHU_VOICE_PROXY_TOKEN: process.env.YISHU_VOICE_PROXY_TOKEN,
   };
+  const token = "synthetic-loopback-capability-1234567890";
+  const fixtureDirectory = mkdtempSync(join(tmpdir(), "yishu-proxy-test-"));
+  const fixtureEnvironment = join(fixtureDirectory, ".dev.vars");
+  writeFileSync(fixtureEnvironment, "STEPFUN_API_KEY=synthetic-test-key\n", {
+    mode: 0o600,
+  });
   let forwardedBody;
   globalThis.fetch = async (_input, init) => {
     forwardedBody = JSON.parse(init.body);
-    return {
-      ok: true,
+    return new Response(
+      'data: {"type":"transcript.text.done","text":"ok"}\n\n',
+      {
       status: 200,
-      text: async () =>
-        'data: {"type":"transcript.text.done","text":"ok"}\n\n',
-    };
+        headers: { "content-type": "text/event-stream" },
+      }
+    );
   };
 
   process.env.HOST = "127.0.0.1";
   process.env.PORT = "0";
-  process.env.STEPFUN_API_KEY = "synthetic-test-key";
-  process.env.YISHU_WORKER_ENV_FILE = "/tmp/yishu-worker-hotwords-test-no-file";
+  process.env.STEPFUN_API_KEY = "ambient-key-must-not-be-used";
+  process.env.YISHU_WORKER_ENV_FILE = fixtureEnvironment;
+  process.env.YISHU_VOICE_PROXY_TOKEN = token;
 
   let server;
   try {
@@ -160,11 +172,47 @@ test("local-server entrypoint forwards the same request shape", async () => {
 
     const address = server.address();
     assert.equal(typeof address, "object");
-    const response = await originalFetch(
+    const unauthenticated = await originalFetch(
       `http://127.0.0.1:${address.port}/transcribe`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
+        body: JSON.stringify({ audio_base64: "cpcm" }),
+      }
+    );
+    assert.equal(unauthenticated.status, 401);
+
+    const browserOrigin = await originalFetch(
+      `http://127.0.0.1:${address.port}/transcribe`,
+      {
+        method: "OPTIONS",
+        headers: { origin: "https://example.invalid" },
+      }
+    );
+    assert.equal(browserOrigin.status, 403);
+    assert.equal(browserOrigin.headers.has("access-control-allow-origin"), false);
+
+    const oversized = await originalFetch(
+      `http://127.0.0.1:${address.port}/tts`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ text: "x".repeat(70 * 1024) }),
+      }
+    );
+    assert.equal(oversized.status, 413);
+
+    const response = await originalFetch(
+      `http://127.0.0.1:${address.port}/transcribe`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({
           audio_base64: "cpcm",
           hotwords: [" Yishu ", "yishu", "奕枢"],
@@ -182,6 +230,7 @@ test("local-server entrypoint forwards the same request shape", async () => {
     if (server?.listening) {
       await new Promise((resolve) => server.close(resolve));
     }
+    rmSync(fixtureDirectory, { recursive: true, force: true });
     globalThis.fetch = originalFetch;
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) delete process.env[key];

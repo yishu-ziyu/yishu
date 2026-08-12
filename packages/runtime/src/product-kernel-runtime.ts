@@ -4,6 +4,7 @@ import {
   formatProductActionSpeech,
   memoryScopeForSession,
   normalizeSessionScope,
+  sessionScopeKey,
   sessionScopesEqual,
   routeProductUtterance,
   recallRelevantMemories,
@@ -43,12 +44,22 @@ import { attachTaskExecutionContract } from "./task-contract.js";
 import { trustedExternalReceiptFor } from "./trusted-task-receipt.js";
 import { RuntimeSuggestionTracker } from "./suggestion-loop.js";
 import {
+  attachBehaviorRules,
+  attachConversationHistory,
   attachDelegatedResults,
+  attachRecentTrail,
   attachRecalledMemories,
   attachRecalledMind,
+  type PromptBehaviorRule,
+  type PromptConversationTurn,
   type PromptMemorySnippet,
+  type PromptTrailObservation,
 } from "./context-prompt.js";
-import { DelegationCoordinator, type DelegatedResult } from "./delegation.js";
+import {
+  DelegationCoordinator,
+  type DelegatedResult,
+  type DelegatedTaskPresenceUpdate,
+} from "./delegation.js";
 import { contextFrameToTrailSource } from "./trail-source.js";
 
 type TerminalKind = "completed" | "cancelled" | "failed";
@@ -60,6 +71,34 @@ function terminalKindForStatus(status: ConversationTurn["status"]): TerminalKind
 }
 
 const COMPUTER_EFFECT_INTENT = /(?:\b(?:click|press|open|close|type|enter|select|drag|scroll|send|delete|move|rename|create|save|execute)\b|点击|打开|关闭|输入|选择|拖动|滚动|发送|删除|移动|重命名|创建|保存|执行)/iu;
+const CONVERSATION_HISTORY_MAX_TURNS = 10;
+const CONVERSATION_HISTORY_TEXT_BYTES = 5_000;
+const RECENT_TRAIL_WINDOW_MS = 2 * 60_000;
+const RECENT_TRAIL_MAX_ENTRIES = 8;
+const BEHAVIOR_RULE_MAX_ITEMS = 3;
+const BEHAVIOR_RULE_MAX_CHARS = 1_200;
+const RUNTIME_SHUTDOWN_TIMEOUT_MS = 2_000;
+const CONTEXT_WATCH_OBSERVATION_MAX_AGE_MS = 30_000;
+const CONTEXT_WATCH_CLOCK_SKEW_MS = 5_000;
+const CONVERSATION_SUPERSEDE_TIMEOUT_MS = 2_000;
+
+async function settlesWithin(
+  operation: Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      operation.then(() => true),
+      timedOut,
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 function contractForOrdinaryTurn(command: TurnStartCommand): TaskExecutionContract {
   const objective = sanitizeVisibleText(command.payload.utterance, "task objective")
@@ -94,6 +133,7 @@ interface TurnLedgerState {
   readonly durable: boolean;
   productActionAbortController?: AbortController | undefined;
   productActionCancelRequested: boolean;
+  supersedeRequested: boolean;
   preparePromise?: Promise<unknown>;
   innerStarted: boolean;
   terminalKind?: TerminalKind;
@@ -122,12 +162,17 @@ export class ProductKernelRuntime implements AgentRuntime {
   private readonly taskTrackers = new Map<string, RuntimeTaskProgressTracker>();
   private readonly suggestionTrackers = new Map<string, RuntimeSuggestionTracker>();
   private readonly activeRequestIds = new Set<string>();
+  private readonly pendingStartRequestIds = new Set<string>();
   private readonly activeTurns = new Map<string, TurnLedgerState>();
   private readonly activeTurnOperations = new Set<Promise<void>>();
+  private readonly conversationAdmissionTails = new Map<string, Promise<void>>();
+  private trailObservationTail: Promise<void> = Promise.resolve();
   /** Runtime side of delegated execution; public like `kernel` for tests/UI seams. */
   readonly delegation: DelegationCoordinator;
   private ledgerTail: Promise<void> = Promise.resolve();
   private readonly recoveryReady: Promise<void>;
+  private activeTrailScopeKey: string | undefined;
+  private taskPresenceSink: ((update: DelegatedTaskPresenceUpdate) => void) | undefined;
   private disposed = false;
 
   /** Forward the optional auth capability without making the kernel own OAuth. */
@@ -173,8 +218,32 @@ export class ProductKernelRuntime implements AgentRuntime {
     ).setSessionToolPolicy?.((conversationId) => this.delegation.sessionToolPolicyFor(conversationId));
   }
 
-  observeTrail(command: TrailObserveCommand, emit: RuntimeEventSink): void {
+  /** Wait for the constructor-started durable recovery without changing it. */
+  async initialize(): Promise<void> {
+    await this.recoveryReady;
+  }
+
+  /** One projection sink shared by delegated work and product-owned reminders. */
+  setTaskPresenceSink(
+    sink?: (update: DelegatedTaskPresenceUpdate) => void,
+  ): void {
+    this.taskPresenceSink = sink;
+    this.delegation.setPresenceSink(sink);
+  }
+
+  async observeTrail(command: TrailObserveCommand, emit: RuntimeEventSink): Promise<void> {
+    const operation = this.trailObservationTail.then(() =>
+      this.observeTrailSerial(command, emit));
+    this.trailObservationTail = operation.catch(() => undefined);
+    return operation;
+  }
+
+  private async observeTrailSerial(
+    command: TrailObserveCommand,
+    emit: RuntimeEventSink,
+  ): Promise<void> {
     const sessionScope = normalizeSessionScope(command.payload.sessionScope);
+    this.activateTrailScope(sessionScope);
     if (sessionScope.kind === "private") {
       emit(runtimeEvent("trail.skipped", command.requestId, command.traceId, {
         reason: "private_session",
@@ -183,15 +252,82 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
     const entry = this.kernel.trail.append(
       contextFrameToTrailSource(command.payload.contextFrame),
+      sessionScope,
     );
     emit(
       runtimeEvent("trail.appended", command.requestId, command.traceId, {
         frameId: entry.frameId,
-        trailSize: this.kernel.trail.size(),
+        trailSize: this.kernel.trail.size(sessionScope),
         appName: entry.appName,
         windowTitle: entry.windowTitle,
       }),
     );
+
+    // The trail remains an in-memory observation surface. Initiative evaluation
+    // additionally requires a fresh foreground identity so stale/null samples
+    // can never arm or fire a durable watch.
+    const observedBundleId = freshObservedBundleId(command.payload.contextFrame);
+    if (observedBundleId === null) return;
+
+    await this.recoveryReady;
+    const watches = await this.kernel.store.listActiveContextWatches(sessionScope);
+    for (const watch of watches) {
+      if (watch.state === "waiting_for_departure") {
+        if (observedBundleId === watch.targetBundleId) continue;
+        const armed = await this.kernel.store.transitionContextWatch({
+          id: watch.id,
+          sessionScope,
+          expectedState: "waiting_for_departure",
+          nextState: "armed",
+          occurredAt: command.payload.contextFrame.capturedAt,
+          observationFrameId: command.payload.contextFrame.frameId,
+        });
+        if (armed !== null) {
+          const task = (await this.kernel.store.listTasks({ sessionScope }))
+            .find((candidate) => candidate.id === armed.taskId);
+          this.emitTaskPresence({
+            taskId: armed.taskId,
+            parentId: armed.mandateId,
+            mainConversationId: armed.mainConversationId,
+            taskKind: "context_reminder",
+            watchState: "armed",
+            title: task?.title ?? `提醒：${armed.reminder}`,
+            status: "running",
+            createdAt: armed.createdAt,
+            updatedAt: armed.armedAt ?? command.payload.contextFrame.capturedAt,
+          });
+        }
+        continue;
+      }
+      if (observedBundleId !== watch.targetBundleId) continue;
+      const fired = await this.kernel.store.transitionContextWatch({
+        id: watch.id,
+        sessionScope,
+        expectedState: "armed",
+        nextState: "fired",
+        occurredAt: command.payload.contextFrame.capturedAt,
+        observationFrameId: command.payload.contextFrame.frameId,
+      });
+      if (fired === null) continue;
+
+      // The store CAS has already committed watch + TaskTruth + ResultInbox.
+      // Presence is intentionally emitted only afterwards and only by the CAS
+      // winner, so repeated/concurrent samples cannot announce twice.
+      this.emitTaskPresence({
+        taskId: fired.taskId,
+        parentId: fired.mandateId,
+        mainConversationId: fired.mainConversationId,
+        taskKind: "context_reminder",
+        watchState: "fired",
+        title: `提醒：${fired.reminder}`,
+        status: "done",
+        createdAt: fired.createdAt,
+        updatedAt: fired.firedAt ?? command.payload.contextFrame.capturedAt,
+        resultKind: "completed",
+        summary: `提醒：${fired.reminder}`,
+        sequence: [],
+      });
+    }
   }
 
   /**
@@ -528,39 +664,75 @@ export class ProductKernelRuntime implements AgentRuntime {
   }
 
   async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
-    if (this.disposed) {
-      emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
-        code: "runtime_disposed",
-        message: "ProductKernelRuntime has been disposed.",
-      }, command.payload.conversationId ?? command.requestId));
-      return;
+    const conversationId = command.payload.conversationId ?? command.requestId;
+    this.pendingStartRequestIds.add(command.requestId);
+    let releaseAdmission: (() => void) | undefined;
+    let state: TurnLedgerState | undefined;
+    let operation: Promise<void> | undefined;
+    try {
+      releaseAdmission = await this.acquireConversationAdmission(conversationId);
+      if (this.disposed) {
+        emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
+          code: "runtime_disposed",
+          message: "ProductKernelRuntime has been disposed.",
+        }, conversationId));
+        return;
+      }
+      if (this.activeRequestIds.has(command.requestId)) {
+        const existing = this.activeTurns.get(command.requestId);
+        emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
+          code: "duplicate_request",
+          message: "A turn with this request id is already active.",
+        }, existing?.conversationId ?? conversationId));
+        return;
+      }
+
+      const sessionScope = normalizeSessionScope(command.payload.sessionScope);
+      const previous = [...this.activeTurns.values()].find((candidate) =>
+        candidate.conversationId.toLowerCase() === conversationId.toLowerCase()
+        && !candidate.terminalKind
+        && sessionScopesEqual(candidate.sessionScope, sessionScope));
+      if (previous !== undefined) {
+        // Last explicit turn wins inside one Main conversation. Latch a gate on
+        // the old producer first, evict its cached Pi conversation immediately,
+        // then grant bounded cleanup time before the replacement is admitted.
+        previous.supersedeRequested = true;
+        this.releaseInnerConversationSession(previous.conversationId);
+        await settlesWithin(this.cancelTurn({
+          schemaVersion: command.schemaVersion,
+          type: "turn.cancel",
+          requestId: previous.command.requestId,
+          traceId: previous.traceId,
+          sentAt: new Date().toISOString(),
+          payload: { reason: "turn_superseded" },
+        }, () => undefined), CONVERSATION_SUPERSEDE_TIMEOUT_MS);
+      }
+
+      this.activateTrailScope(sessionScope);
+      state = {
+        command,
+        conversationId,
+        traceId: command.traceId,
+        emit,
+        seenEventIds: new Set<string>(),
+        sessionScope,
+        durable: sessionScope.kind !== "private",
+        productActionCancelRequested: false,
+        supersedeRequested: false,
+        innerStarted: false,
+        terminalDelivered: false,
+        contract: contractForOrdinaryTurn(command),
+      };
+      this.activeRequestIds.add(command.requestId);
+      this.activeTurns.set(command.requestId, state);
+      operation = this.runTurn(state);
+      this.activeTurnOperations.add(operation);
+    } finally {
+      this.pendingStartRequestIds.delete(command.requestId);
+      releaseAdmission?.();
     }
-    if (this.activeRequestIds.has(command.requestId)) {
-      const existing = this.activeTurns.get(command.requestId);
-      emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
-        code: "duplicate_request",
-        message: "A turn with this request id is already active.",
-      }, existing?.conversationId ?? command.payload.conversationId ?? command.requestId));
-      return;
-    }
-    const sessionScope = normalizeSessionScope(command.payload.sessionScope);
-    const state: TurnLedgerState = {
-      command,
-      conversationId: command.payload.conversationId ?? command.requestId,
-      traceId: command.traceId,
-      emit,
-      seenEventIds: new Set<string>(),
-      sessionScope,
-      durable: sessionScope.kind !== "private",
-      productActionCancelRequested: false,
-      innerStarted: false,
-      terminalDelivered: false,
-      contract: contractForOrdinaryTurn(command),
-    };
-    this.activeRequestIds.add(command.requestId);
-    this.activeTurns.set(command.requestId, state);
-    const operation = this.runTurn(state);
-    this.activeTurnOperations.add(operation);
+
+    if (state === undefined || operation === undefined) return;
     try {
       await operation;
     } finally {
@@ -596,10 +768,23 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
 
     if (state.terminalKind) return;
+    if (state.supersedeRequested) {
+      this.acceptRuntimeEvent(
+        state,
+        runtimeEvent("turn.cancelled", command.requestId, state.traceId, {
+          reason: "turn_superseded",
+        }),
+      );
+      await this.settleState(state);
+      return;
+    }
 
     // Live frame enters the product trail once the durable turn gate is open.
     if (state.sessionScope.kind !== "private") {
-      this.kernel.trail.append(contextFrameToTrailSource(command.payload.contextFrame));
+      this.kernel.trail.append(
+        contextFrameToTrailSource(command.payload.contextFrame),
+        state.sessionScope,
+      );
     }
 
     const route = routeProductUtterance(
@@ -617,14 +802,15 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
 
     const memoryScope = memoryScopeForSession(state.sessionScope);
-    const scopedRoute = memoryScope === null
-      ? route
-      : {
-          ...route,
-          input: route.action === "remember" || route.action === "record_learning"
-            ? { ...route.input, scope: memoryScope }
-            : route.input,
-        };
+    const scopedRoute = {
+      ...route,
+      input: route.action === "watch_app_return"
+        ? { ...route.input, mainConversationId: state.conversationId }
+        : memoryScope !== null
+          && (route.action === "remember" || route.action === "record_learning")
+          ? { ...route.input, scope: memoryScope }
+          : route.input,
+    };
     await this.runProductAction(state, scopedRoute);
   }
 
@@ -767,19 +953,31 @@ export class ProductKernelRuntime implements AgentRuntime {
         await this.settleState(state);
         return;
       }
+      const conversationHistory = await this.conversationHistoryForOrdinaryTurn(state);
+      if (state.terminalKind) {
+        await this.settleState(state);
+        return;
+      }
+      const behaviorRules = await this.behaviorRulesForOrdinaryTurn(state);
+      if (state.terminalKind) {
+        await this.settleState(state);
+        return;
+      }
+      const recentTrail = this.recentTrailForOrdinaryTurn(state);
       // Delegated child results re-enter the Main conversation here: one-shot,
       // payload-only, and never into private sessions.
       const delegatedResults = await this.delegatedResultsForOrdinaryTurn(state);
-      const commandForInner = attachTaskExecutionContract(attachDelegatedResults(
-        attachRecalledMind(
-          attachRecalledMemories(
-            state.command,
-            recalled.map(toPromptMemorySnippet),
-          ),
-          mindLessons,
-        ),
-        delegatedResults,
-      ), state.contract!);
+      let commandForInner: TurnStartCommand = state.command;
+      commandForInner = attachConversationHistory(commandForInner, conversationHistory);
+      commandForInner = attachRecalledMemories(
+        commandForInner,
+        recalled.map(toPromptMemorySnippet),
+      );
+      commandForInner = attachBehaviorRules(commandForInner, behaviorRules);
+      commandForInner = attachRecalledMind(commandForInner, mindLessons);
+      commandForInner = attachDelegatedResults(commandForInner, delegatedResults);
+      commandForInner = attachRecentTrail(commandForInner, recentTrail);
+      commandForInner = attachTaskExecutionContract(commandForInner, state.contract!);
       // Mark started before the last terminal check so a concurrent cancelTurn
       // will invoke inner.cancelTurn and unblock a gated startTurn.
       state.innerStarted = true;
@@ -930,6 +1128,7 @@ export class ProductKernelRuntime implements AgentRuntime {
         caller: "voice",
         input: actionRoute.input,
         contextFrame: command.payload.contextFrame,
+        sessionScope: state.sessionScope,
         signal: productActionAbortController.signal,
       }, actionDeps);
     } catch {
@@ -1021,6 +1220,13 @@ export class ProductKernelRuntime implements AgentRuntime {
       if (state.terminalKind) {
         await this.settleState(state);
         return;
+      }
+
+      if (
+        actionRoute.action === "watch_app_return"
+        && (receipt.status === "ok" || receipt.status === "verified")
+      ) {
+        this.emitCreatedContextWatchPresence(receipt.output);
       }
 
       const speech = formatProductActionSpeech(
@@ -1187,12 +1393,42 @@ export class ProductKernelRuntime implements AgentRuntime {
   }
 
   async cancelTurn(command: TurnCancelCommand, emit: RuntimeEventSink): Promise<void> {
-    const state = this.activeTurns.get(command.requestId);
+    const cancelInnerAtMost = async (sink: RuntimeEventSink): Promise<void> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 2_000);
+      });
+      try {
+        await Promise.race([
+          Promise.resolve()
+            .then(() => this.inner.cancelTurn(command, sink))
+            .then(() => undefined, () => undefined),
+          timeout,
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    };
+
+    let state = this.activeTurns.get(command.requestId);
     if (!state) {
-      await this.inner.cancelTurn(command, (event) => {
+      // startTurn admission is intentionally asynchronous. Give a same-tick
+      // cancel one microtask to observe the registered product gate before
+      // falling back to an unscoped inner cancellation.
+      for (let attempt = 0; attempt < 8 && this.pendingStartRequestIds.has(command.requestId); attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        state = this.activeTurns.get(command.requestId);
+        if (state) break;
+      }
+    }
+    if (!state) {
+      let acceptingEvents = true;
+      await cancelInnerAtMost((event) => {
+        if (!acceptingEvents) return;
         const safeEvent = sanitizeClientEvent(enrichFreeEvent(event, command.requestId));
         if (safeEvent) emit(safeEvent);
       });
+      acceptingEvents = false;
       return;
     }
     await state.preparePromise?.catch(() => undefined);
@@ -1218,18 +1454,6 @@ export class ProductKernelRuntime implements AgentRuntime {
     this.taskTrackers.get(command.requestId)?.observe(cancelledEvent);
     this.suggestionTrackers.get(command.requestId)?.observe(cancelledEvent);
     this.acceptRuntimeEvent(state, cancelledEvent);
-    if (state.innerStarted) {
-      try {
-        await this.inner.cancelTurn(command, (event) => {
-          this.taskTrackers.get(command.requestId)?.observe(event);
-          this.suggestionTrackers.get(command.requestId)?.observe(event);
-          this.acceptRuntimeEvent(state, event);
-        });
-      } catch {
-        // The durable cancelled state is already authoritative.  Do not
-        // expose an inner error containing provider/tool details.
-      }
-    }
     try {
       await this.taskTrackers.get(command.requestId)?.flush();
     } catch {
@@ -1238,61 +1462,158 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
     await this.suggestionTrackers.get(command.requestId)?.flush();
     await this.settleState(state);
+    if (state.innerStarted) {
+      // The product cancellation is already durable and visible. The inner
+      // harness gets a bounded cleanup window; its late events cannot reopen
+      // tracker, ledger, or UI state.
+      await cancelInnerAtMost(() => undefined);
+    }
   }
 
+  async cancelTask(command: DelegatedTaskCancelCommand): Promise<boolean> {
+    if (await this.delegation.cancelDelegatedTask(command)) return true;
+
+    const task = (await this.kernel.store.listTasks()).find((candidate) =>
+      candidate.id === command.payload.taskId
+      && candidate.status === "running"
+      && candidate.mainConversationId?.toLowerCase()
+        === command.payload.mainConversationId.toLowerCase()
+      && contextWatchIdFromEvidence(candidate.evidence) !== null);
+    if (task === undefined || task.sessionScope.kind === "private") return false;
+    const conversation = await this.kernel.store.getConversation(command.payload.mainConversationId);
+    if (
+      conversation === null
+      || !sessionScopesEqual(conversation.sessionScope, task.sessionScope)
+    ) return false;
+
+    const watches = await this.kernel.store.listActiveContextWatches(task.sessionScope);
+    const watch = watches.find((candidate) => candidate.taskId === task.id);
+    if (watch === undefined) return false;
+    const cancelledAt = new Date().toISOString();
+    const cancelled = await this.kernel.store.cancelContextWatch(
+      watch.id,
+      task.sessionScope,
+      cancelledAt,
+    );
+    if (cancelled === null) return false;
+    this.emitTaskPresence({
+      taskId: task.id,
+      parentId: cancelled.mandateId,
+      mainConversationId: cancelled.mainConversationId,
+      taskKind: "context_reminder",
+      watchState: "cancelled",
+      title: task.title,
+      status: "cancelled",
+      createdAt: task.createdAt,
+      updatedAt: cancelledAt,
+      resultKind: "cancelled",
+      summary: "提醒已取消。",
+      sequence: [],
+    });
+    return true;
+  }
+
+  /** Compatibility name retained for current stdio and Swift callers. */
   async cancelDelegatedTask(command: DelegatedTaskCancelCommand): Promise<boolean> {
-    return this.delegation.cancelDelegatedTask(command);
+    return this.cancelTask(command);
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    const deadline = Date.now() + RUNTIME_SHUTDOWN_TIMEOUT_MS;
+    const runBeforeDeadline = async (
+      operation: () => Promise<unknown>,
+      reserveMs = 0,
+    ): Promise<boolean> => {
+      const remaining = deadline - Date.now() - reserveMs;
+      if (remaining <= 0) return false;
+      return settlesWithin(
+        Promise.resolve().then(operation).catch(() => undefined),
+        remaining,
+      );
+    };
     // Mark delegation shutdown before the inner harness goes down so children
     // whose turns die with the harness settle as cancelled, deterministically.
     this.delegation.beginDispose();
-    // Abort product actions before waiting for active turn operations.  The
-    // registry receives this signal and returns a fixed cancelled receipt,
-    // allowing dispose to drain without late action writes or speech.
+    const productActionStates = new Set<TurnLedgerState>();
+    const ordinarySettlement: Array<Promise<void>> = [];
+
+    // Latch ordinary cancellation synchronously so late provider events are
+    // ignored. Product actions are different: abort requests reconciliation,
+    // but their terminal truth must wait for the receipt because the side
+    // effect may already have committed.
     for (const state of this.activeTurns.values()) {
       if (state.productActionAbortController !== undefined) {
+        productActionStates.add(state);
         state.productActionCancelRequested = true;
         state.productActionAbortController.abort("runtime_disposed");
+        continue;
       }
-    }
-    let disposeError: unknown;
-    try {
-      await this.inner.dispose();
-    } catch (error) {
-      disposeError = error;
+      if (state.terminalKind) continue;
+      const cancelled = runtimeEvent(
+        "turn.cancelled",
+        state.command.requestId,
+        state.traceId,
+        { reason: "runtime_disposed" },
+      );
+      this.taskTrackers.get(state.command.requestId)?.observe(cancelled);
+      this.suggestionTrackers.get(state.command.requestId)?.observe(cancelled);
+      this.acceptRuntimeEvent(state, cancelled);
+      ordinarySettlement.push((async () => {
+        await state.preparePromise?.catch(() => undefined);
+        this.taskTrackers.get(state.command.requestId)?.observe(cancelled);
+        this.suggestionTrackers.get(state.command.requestId)?.observe(cancelled);
+        await this.taskTrackers.get(state.command.requestId)?.flush().catch(() => undefined);
+        await this.suggestionTrackers.get(state.command.requestId)?.flush().catch(() => undefined);
+        await this.settleState(state);
+      })());
     }
 
-    // A runtime may dispose its session before its startTurn promise settles.
-    // Wait for every producer before taking the final durable snapshot.
-    await Promise.allSettled([...this.activeTurnOperations]);
+    let disposeError: unknown;
+    const innerDispose = this.inner.dispose().catch((error) => {
+      disposeError = error;
+    });
+    if (!await runBeforeDeadline(() => Promise.allSettled([
+      innerDispose,
+      ...ordinarySettlement,
+      ...this.activeTurnOperations,
+      this.trailObservationTail,
+    ]), 750)) {
+      disposeError = new Error("Inner runtime shutdown timed out.");
+    }
+
+    // A product action that still has no receipt at the deadline is not safely
+    // describable as cancelled: its side effect may have committed. Persist an
+    // explicit unknown outcome if the remaining store budget permits it.
+    const unknownActionSettlements: Array<Promise<void>> = [];
+    for (const state of productActionStates) {
+      if (state.terminalKind) continue;
+      this.replacePendingWithFailure(state, "action_outcome_unknown");
+      unknownActionSettlements.push(this.settleState(state));
+    }
+    if (!await runBeforeDeadline(
+      () => Promise.allSettled(unknownActionSettlements),
+      375,
+    )) {
+      disposeError ??= new Error("Product action reconciliation timed out.");
+    }
+
     // Drain delegated children after the inner harness is down: their settle
     // path writes TaskTruth, so they must finish before the final snapshot.
-    await this.delegation.dispose();
-    await Promise.allSettled([...this.taskTrackers.values()].map((tracker) => tracker.flush()));
-    await Promise.allSettled(
-      [...this.suggestionTrackers.values()].map((tracker) => tracker.flush()),
-    );
-    for (const state of this.activeTurns.values()) {
-      if (!state.terminalKind) {
-        const cancelled = runtimeEvent(
-          "turn.cancelled",
-          state.command.requestId,
-          state.traceId,
-          { reason: "runtime_disposed" },
-        );
-        this.suggestionTrackers.get(state.command.requestId)?.observe(cancelled);
-        this.acceptRuntimeEvent(state, cancelled);
-        await this.suggestionTrackers.get(state.command.requestId)?.flush();
-        await this.settleState(state);
-      }
+    if (!await runBeforeDeadline(async () => {
+      await this.delegation.dispose();
+      await Promise.allSettled([...this.taskTrackers.values()].map((tracker) => tracker.flush()));
+      await Promise.allSettled(
+        [...this.suggestionTrackers.values()].map((tracker) => tracker.flush()),
+      );
+      await this.flushLedger();
+    })) {
+      disposeError ??= new Error("Runtime durable shutdown timed out.");
     }
-    await this.flushLedger();
     this.taskTrackers.clear();
     this.suggestionTrackers.clear();
     this.activeRequestIds.clear();
+    this.pendingStartRequestIds.clear();
     this.activeTurns.clear();
     if (disposeError !== undefined) throw disposeError;
   }
@@ -1550,6 +1871,13 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
       return;
     }
+    // Project the already-durable terminal before settling its ResultInbox
+    // claim. If the process dies at this boundary, an at-least-once repeat is
+    // preferable to silently acknowledging a result the user never saw.
+    if (state.pendingTerminal && !state.terminalDelivered) {
+      state.emit(sanitizeClientEvent(state.pendingTerminal) ?? state.pendingTerminal);
+      state.terminalDelivered = true;
+    }
     // ResultInbox settlement follows, but does not participate in, the Main
     // turn's durable terminal transaction. A failed ack/release keeps the
     // claim for startup reconciliation; it must never contradict a completed
@@ -1562,10 +1890,6 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
     } catch {
       // Recovery inspects the durable claimTurnId status on next startup.
-    }
-    if (state.pendingTerminal && !state.terminalDelivered) {
-      state.emit(sanitizeClientEvent(state.pendingTerminal) ?? state.pendingTerminal);
-      state.terminalDelivered = true;
     }
   }
 
@@ -1593,6 +1917,184 @@ export class ProductKernelRuntime implements AgentRuntime {
 
   private async flushLedger(): Promise<void> {
     await this.ledgerTail;
+  }
+
+  private async acquireConversationAdmission(conversationId: string): Promise<() => void> {
+    const key = conversationId.toLowerCase();
+    const previous = this.conversationAdmissionTails.get(key) ?? Promise.resolve();
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.conversationAdmissionTails.set(key, tail);
+    await previous.catch(() => undefined);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseGate();
+      void tail.finally(() => {
+        if (this.conversationAdmissionTails.get(key) === tail) {
+          this.conversationAdmissionTails.delete(key);
+        }
+      });
+    };
+  }
+
+  private releaseInnerConversationSession(conversationId: string): void {
+    try {
+      (
+        this.inner as AgentRuntime & {
+          releaseConversationSession?: (id: string) => void;
+        }
+      ).releaseConversationSession?.(conversationId);
+    } catch {
+      // The bounded cancel path below remains authoritative. Session eviction
+      // is a supersede fence, never a reason to reject the replacement turn.
+    }
+  }
+
+  private emitTaskPresence(update: DelegatedTaskPresenceUpdate): void {
+    try {
+      this.taskPresenceSink?.(update);
+    } catch {
+      // Presence is a post-commit projection. Transport failure cannot roll
+      // durable task truth back or make a one-shot watch fire again.
+    }
+  }
+
+  private emitCreatedContextWatchPresence(output: unknown): void {
+    if (!isRecord(output) || !isRecord(output.watch) || !isRecord(output.task)) return;
+    const watch = output.watch;
+    const task = output.task;
+    if (
+      typeof watch.taskId !== "string"
+      || typeof watch.mandateId !== "string"
+      || typeof watch.mainConversationId !== "string"
+      || typeof watch.createdAt !== "string"
+      || typeof task.title !== "string"
+      || typeof task.updatedAt !== "string"
+    ) return;
+    this.emitTaskPresence({
+      taskId: watch.taskId,
+      parentId: watch.mandateId,
+      mainConversationId: watch.mainConversationId,
+      taskKind: "context_reminder",
+      watchState: "waiting_for_departure",
+      title: task.title,
+      status: "running",
+      createdAt: watch.createdAt,
+      updatedAt: task.updatedAt,
+    });
+  }
+
+  private activateTrailScope(sessionScope: SessionScope): void {
+    const nextScopeKey = sessionScopeKey(sessionScope);
+    if (
+      this.activeTrailScopeKey !== undefined
+      && this.activeTrailScopeKey !== nextScopeKey
+    ) {
+      this.kernel.trail.clear();
+    }
+    if (sessionScope.kind === "private") {
+      this.kernel.trail.clear();
+    }
+    this.activeTrailScopeKey = nextScopeKey;
+  }
+
+  /**
+   * Rebuild only the visible part of this exact durable conversation. The
+   * attachment is present on every product turn, but Pi renders it only when
+   * it has just created a cold session.
+   */
+  private async conversationHistoryForOrdinaryTurn(
+    state: TurnLedgerState,
+  ): Promise<PromptConversationTurn[]> {
+    if (state.sessionScope.kind === "private") return [];
+    try {
+      const conversation = await this.kernel.store.getConversation(state.conversationId);
+      if (
+        !conversation
+        || conversation.status === "archived"
+        || !sessionScopesEqual(conversation.sessionScope, state.sessionScope)
+      ) {
+        return [];
+      }
+      const turns = await this.kernel.store.listConversationTurns(state.conversationId);
+      return boundedConversationHistory(
+        turns.filter((turn) => (
+          turn.status === "completed"
+          && sessionScopesEqual(turn.sessionScope, state.sessionScope)
+        )).sort((left, right) => left.sequence - right.sequence),
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /** Recent sanitized observations from this exact scope, excluding this turn's live frame. */
+  private recentTrailForOrdinaryTurn(state: TurnLedgerState): PromptTrailObservation[] {
+    if (state.sessionScope.kind === "private") return [];
+    return this.kernel.trail.query({
+      sessionScope: state.sessionScope,
+      sinceMs: RECENT_TRAIL_WINDOW_MS,
+      // The current frame may occupy one result slot before it is removed.
+      limit: RECENT_TRAIL_MAX_ENTRIES + 1,
+    })
+      .filter((entry) => entry.frameId !== state.command.payload.contextFrame.frameId)
+      .slice(-RECENT_TRAIL_MAX_ENTRIES)
+      .map((entry) => ({
+        frameId: entry.frameId,
+        capturedAt: entry.capturedAt,
+        appName: entry.appName,
+        windowTitle: entry.windowTitle,
+        axRole: entry.axRole,
+        axTitle: entry.axTitle,
+        axValuePreview: entry.axValuePreview,
+        cursorRegion: entry.cursorRegion,
+        warnings: [...entry.warnings],
+      }));
+  }
+
+  /** Latest durable user corrections from this exact scope. */
+  private async behaviorRulesForOrdinaryTurn(
+    state: TurnLedgerState,
+  ): Promise<PromptBehaviorRule[]> {
+    if (state.sessionScope.kind === "private") return [];
+    const scope = memoryScopeForSession(state.sessionScope);
+    if (scope === null) return [];
+    try {
+      const rules = (await this.kernel.store.listLearnings())
+        .filter((learning) => learning.scope === scope)
+        .sort((left, right) => {
+          const byTime = right.capturedAt.localeCompare(left.capturedAt);
+          return byTime !== 0 ? byTime : right.id.localeCompare(left.id);
+        });
+      const selected: PromptBehaviorRule[] = [];
+      let totalChars = 0;
+      for (const learning of rules) {
+        if (selected.length >= BEHAVIOR_RULE_MAX_ITEMS) break;
+        const rule = safeHistoryText(learning.rule, "learning rule");
+        if (rule === undefined) continue;
+        if (
+          selected.length > 0
+          && totalChars + rule.length > BEHAVIOR_RULE_MAX_CHARS
+        ) {
+          break;
+        }
+        selected.push({
+          id: learning.id,
+          rule,
+          capturedAt: learning.capturedAt,
+          scope: learning.scope,
+        });
+        totalChars += rule.length;
+      }
+      return selected;
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -1651,20 +2153,23 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
   }
 
-  /** Typed, durable task projection used by task.list after sidecar restart. */
-  async listDelegatedTasks(mainConversationId: string): Promise<import("./delegation.js").DelegatedTaskPresenceUpdate[]> {
+  /** Typed, durable background-task projection used after sidecar restart. */
+  async listTasks(mainConversationId: string): Promise<DelegatedTaskPresenceUpdate[]> {
     await this.recoveryReady;
     await this.reconcileClaimedDeliveries(false);
     await this.delegation.reconcilePendingSettlements();
-    const [tasks, results] = await Promise.all([
+    const [conversation, tasks, results] = await Promise.all([
+      this.kernel.store.getConversation(mainConversationId),
       this.kernel.store.listTasks(),
       this.kernel.store.listDelegatedResults({ mainConversationId }),
     ]);
+    if (conversation === null || conversation.sessionScope.kind === "private") return [];
     const resultByTask = new Map(results.map((result) => [result.taskId, result]));
     return tasks
       .filter((task) => task.mainConversationId !== undefined
-        && task.parentId !== undefined
-        && task.evidence.some((entry) => entry.startsWith("delegate:accepted:"))
+        && (task.evidence.some((entry) => entry.startsWith("delegate:accepted:"))
+          || contextWatchIdFromEvidence(task.evidence) !== null)
+        && sessionScopesEqual(task.sessionScope, conversation.sessionScope)
         && task.mainConversationId.toLowerCase() === mainConversationId.toLowerCase())
       .sort((left, right) =>
         right.updatedAt.localeCompare(left.updatedAt)
@@ -1673,10 +2178,17 @@ export class ProductKernelRuntime implements AgentRuntime {
       .slice(0, 64)
       .map((task) => {
         const result = resultByTask.get(task.id);
+        const contextWatchId = contextWatchIdFromEvidence(task.evidence);
+        const taskKind = contextWatchId === null ? "delegated" : "context_reminder";
+        const watchState = taskKind === "context_reminder"
+          ? contextWatchStateFromTask(task.status, task.evidence)
+          : undefined;
         return {
           taskId: task.id,
-          parentId: task.parentId!,
+          parentId: result?.parentId ?? task.parentId ?? contextWatchId!,
           mainConversationId: task.mainConversationId!,
+          taskKind,
+          ...(watchState === undefined ? {} : { watchState }),
           title: task.title,
           status: task.status,
           createdAt: task.createdAt,
@@ -1686,8 +2198,20 @@ export class ProductKernelRuntime implements AgentRuntime {
             summary: result.summary,
             sequence: result.sequence,
           }),
+          ...(result === undefined && taskKind === "context_reminder" && task.status === "cancelled"
+            ? {
+                resultKind: "cancelled" as const,
+                summary: "提醒已取消。",
+                sequence: [],
+              }
+            : {}),
         };
       });
+  }
+
+  /** Compatibility name retained while clients still call task.list V1. */
+  async listDelegatedTasks(mainConversationId: string): Promise<DelegatedTaskPresenceUpdate[]> {
+    return this.listTasks(mainConversationId);
   }
 
   private async recoverDurableDelegationState(): Promise<void> {
@@ -1789,6 +2313,53 @@ export class ProductKernelRuntime implements AgentRuntime {
   }
 }
 
+function freshObservedBundleId(frame: ContextFrame, now = new Date()): string | null {
+  const capturedAt = Date.parse(frame.capturedAt);
+  const expiresAt = Date.parse(frame.expiresAt);
+  const observedAt = Date.parse(frame.frontmostApplication?.capturedAt ?? "");
+  const nowMs = now.getTime();
+  if (
+    !Number.isFinite(capturedAt)
+    || !Number.isFinite(expiresAt)
+    || !Number.isFinite(observedAt)
+    || capturedAt > nowMs + CONTEXT_WATCH_CLOCK_SKEW_MS
+    || observedAt > nowMs + CONTEXT_WATCH_CLOCK_SKEW_MS
+    || nowMs - capturedAt > CONTEXT_WATCH_OBSERVATION_MAX_AGE_MS
+    || nowMs - observedAt > CONTEXT_WATCH_OBSERVATION_MAX_AGE_MS
+    || expiresAt <= nowMs
+    || (frame.frontmostApplication?.confidence ?? 0) < 0.8
+  ) return null;
+  const bundleId = frame.frontmostApplication?.value.bundleIdentifier;
+  return typeof bundleId === "string" && bundleId.length > 0 ? bundleId : null;
+}
+
+function contextWatchIdFromEvidence(evidence: readonly string[]): string | null {
+  const prefix = "context_watch:waiting_for_departure:";
+  const row = evidence.find((entry) => entry.startsWith(prefix));
+  const id = row?.slice(prefix.length).trim() ?? "";
+  return id.length > 0 ? id : null;
+}
+
+function contextWatchStateFromTask(
+  status: "pending" | "running" | "blocked" | "done" | "failed" | "cancelled",
+  evidence: readonly string[],
+): DelegatedTaskPresenceUpdate["watchState"] {
+  if (status === "cancelled" || evidence.some((entry) => entry.startsWith("context_watch:cancelled:"))) {
+    return "cancelled";
+  }
+  if (status === "done" || evidence.some((entry) => entry.startsWith("context_watch:fired:"))) {
+    return "fired";
+  }
+  if (evidence.some((entry) => entry.startsWith("context_watch:armed:"))) {
+    return "armed";
+  }
+  return "waiting_for_departure";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function toPromptMemorySnippet(memory: RecalledMemory): PromptMemorySnippet {
   return {
     id: memory.id,
@@ -1809,6 +2380,7 @@ const SAFE_PRODUCT_ACTIONS = new Set([
   "share_context",
   "record_learning",
   "run_skill",
+  "watch_app_return",
   "finder_history_back",
 ]);
 
@@ -1840,6 +2412,7 @@ const SAFE_FAILURE_CODES = new Set([
   "conversation_ledger_failed",
   "conversation_ledger_unavailable",
   "action_committed_after_cancel",
+  "action_outcome_unknown",
   "duplicate_request",
   "invalid_model_preference",
   "late_failure_after_cancel",
@@ -1979,7 +2552,9 @@ function safeVisibleTextPayload(value: unknown): Record<string, string | boolean
 
 function safeComputerActionPayload(payload: Record<string, unknown>): ClientEventPayload | undefined {
   const actionId = safeIdentifier(payload.actionId);
-  const action = payload.action === "left_click" || payload.action === "finder_history_back"
+  const action = payload.action === "left_click"
+    || payload.action === "finder_history_back"
+    || payload.action === "set_text"
     ? payload.action
     : undefined;
   if (actionId === undefined || action === undefined) {
@@ -1993,11 +2568,27 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     if (x === undefined || y === undefined) return undefined;
     result.x = x;
     result.y = y;
-  } else {
+  } else if (action === "finder_history_back") {
     if (payload.targetBundleId !== "com.apple.finder" || !Number.isInteger(payload.targetPid)) {
       return undefined;
     }
     result.targetBundleId = payload.targetBundleId;
+    result.targetPid = payload.targetPid as number;
+  } else {
+    const text = typeof payload.text === "string" && payload.text.length > 0 && payload.text.length <= 10_000
+      ? payload.text
+      : undefined;
+    const targetBundleId = boundedVisibleString(payload.targetBundleId, 255);
+    if (
+      text === undefined
+      || targetBundleId === undefined
+      || !Number.isInteger(payload.targetPid)
+      || (payload.targetPid as number) <= 0
+    ) {
+      return undefined;
+    }
+    result.text = text;
+    result.targetBundleId = targetBundleId;
     result.targetPid = payload.targetPid as number;
   }
   if (Number.isInteger(payload.screen) && (payload.screen as number) > 0) {
@@ -2259,6 +2850,83 @@ function enrichFreeEvent(event: RuntimeEvent, conversationId: string): RuntimeEv
     ...event,
     conversationId: conversationId as ConversationId,
   };
+}
+
+function boundedConversationHistory(
+  turns: readonly ConversationTurn[],
+): PromptConversationTurn[] {
+  const candidates = turns.slice(-CONVERSATION_HISTORY_MAX_TURNS).map((turn) => ({
+    id: turn.id,
+    capturedAt: turn.createdAt,
+    userInput: safeHistoryText(turn.userInput, "conversation user input"),
+    assistantOutput: safeHistoryText(
+      turn.assistantOutput,
+      "conversation assistant output",
+    ),
+  }));
+  const selected: PromptConversationTurn[] = [];
+  let remainingBytes = CONVERSATION_HISTORY_TEXT_BYTES;
+
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index]!;
+    if (candidate.userInput === undefined && candidate.assistantOutput === undefined) continue;
+    let userInput = candidate.userInput;
+    let assistantOutput = candidate.assistantOutput;
+    const userBytes = utf8Bytes(userInput);
+    const assistantBytes = utf8Bytes(assistantOutput);
+    const candidateBytes = userBytes + assistantBytes;
+
+    if (candidateBytes > remainingBytes) {
+      if (selected.length > 0 || remainingBytes <= 0) break;
+      if (userBytes > 0 && assistantBytes > 0) {
+        const userBudget = Math.floor(remainingBytes * userBytes / candidateBytes);
+        userInput = truncateUtf8(userInput!, userBudget);
+        assistantOutput = truncateUtf8(
+          assistantOutput!,
+          remainingBytes - utf8Bytes(userInput),
+        );
+      } else if (userInput !== undefined) {
+        userInput = truncateUtf8(userInput, remainingBytes);
+      } else if (assistantOutput !== undefined) {
+        assistantOutput = truncateUtf8(assistantOutput, remainingBytes);
+      }
+    }
+
+    const usedBytes = utf8Bytes(userInput) + utf8Bytes(assistantOutput);
+    if (usedBytes === 0) break;
+    selected.unshift({
+      id: candidate.id,
+      capturedAt: candidate.capturedAt,
+      ...(userInput !== undefined && userInput.length > 0 ? { userInput } : {}),
+      ...(assistantOutput !== undefined && assistantOutput.length > 0
+        ? { assistantOutput }
+        : {}),
+    });
+    remainingBytes -= usedBytes;
+  }
+
+  return selected;
+}
+
+function safeHistoryText(value: string | undefined, fieldName: string): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const safe = sanitizeVisibleText(value, fieldName).trim();
+    return safe.length > 0 ? safe : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function utf8Bytes(value: string | undefined): number {
+  return value === undefined ? 0 : Buffer.byteLength(value, "utf8");
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= maxBytes) return value;
+  return bytes.subarray(0, maxBytes).toString("utf8").replace(/\uFFFD$/u, "");
 }
 
 function eventText(value: string): Record<string, string | boolean> {

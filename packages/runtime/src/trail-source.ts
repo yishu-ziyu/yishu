@@ -20,6 +20,12 @@ export function contextFrameToTrailSource(frame: ContextFrame): TrailSourceFrame
       mediaType: s.mediaType,
       displayWidthPoints: s.displayWidthPoints,
       displayHeightPoints: s.displayHeightPoints,
+      ...(s.displayOriginXPoints === undefined
+        ? {}
+        : { displayOriginXPoints: s.displayOriginXPoints }),
+      ...(s.displayOriginYPoints === undefined
+        ? {}
+        : { displayOriginYPoints: s.displayOriginYPoints }),
       screenshotWidthPixels: s.screenshotWidthPixels,
       screenshotHeightPixels: s.screenshotHeightPixels,
     })),
