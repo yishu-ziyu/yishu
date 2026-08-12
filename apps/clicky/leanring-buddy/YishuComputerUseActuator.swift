@@ -8,6 +8,18 @@ import Foundation
 /// checking that the captured target still belongs to the frontmost app.
 @MainActor
 enum YishuComputerUseActuator {
+    typealias AuthorizationFence = @MainActor () -> Bool
+
+    /// One reusable commit point for AXSet/AXPress/CGEvent. Keeping the fence
+    /// adjacent to the irreversible call makes cancellation testable without
+    /// manufacturing real Accessibility elements in unit tests.
+    static func authorizedCommit<Result>(
+        _ authorizationFence: AuthorizationFence,
+        operation: () -> Result
+    ) -> Result? {
+        guard authorizationFence() else { return nil }
+        return operation()
+    }
     /// Finder chrome navigation is two distinct actions. Back needs browse
     /// history (toolbar/menu 返回). Up is hierarchy (上层文件夹 / Enclosing).
     /// Never silent-substitute one for the other.
@@ -198,6 +210,13 @@ enum YishuComputerUseActuator {
         case nil: routeTag = "chrome_label"
         }
         switch performPress(liveElement) {
+        case .blocked:
+            return failed(
+                "The control press was cancelled before commit.",
+                code: .cancelled,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
         case .unsupported:
             return failed(
                 "The matched control does not support AXPress.",
@@ -727,7 +746,8 @@ enum YishuComputerUseActuator {
 
     static func perform(
         _ request: YishuComputerActionRequest,
-        screenCaptures: [CompanionScreenCapture]
+        screenCaptures: [CompanionScreenCapture],
+        authorizationFence: @escaping AuthorizationFence = { true }
     ) async -> YishuComputerActionResult {
         let receiptId = UUID().uuidString
         let attemptId = request.attemptId ?? UUID().uuidString
@@ -735,14 +755,16 @@ enum YishuComputerUseActuator {
             return await performFinderHistoryBack(
                 request,
                 receiptId: receiptId,
-                attemptId: attemptId
+                attemptId: attemptId,
+                authorizationFence: authorizationFence
             )
         }
         if request.action == "set_text" {
             return await performSetText(
                 request,
                 receiptId: receiptId,
-                attemptId: attemptId
+                attemptId: attemptId,
+                authorizationFence: authorizationFence
             )
         }
         guard request.action == "left_click" else {
@@ -815,7 +837,8 @@ enum YishuComputerUseActuator {
                 focusedElementBefore: focusedElementBefore,
                 windowSignatureBefore: windowSignatureBefore,
                 receiptId: receiptId,
-                attemptId: attemptId
+                attemptId: attemptId,
+                authorizationFence: authorizationFence
             )
         }
 
@@ -823,7 +846,14 @@ enum YishuComputerUseActuator {
         for _ in 0..<10 {
             guard let currentCandidate = candidate else { break }
             let before = snapshot(of: currentCandidate)
-            switch performPress(currentCandidate) {
+            switch performPress(currentCandidate, authorizationFence: authorizationFence) {
+            case .blocked:
+                return failed(
+                    "The desktop action was cancelled before commit.",
+                    code: .cancelled,
+                    receiptId: receiptId,
+                    attemptId: attemptId
+                )
             case .unsupported:
                 candidate = elementAttribute(kAXParentAttribute as String, from: currentCandidate)
                 continue
@@ -883,14 +913,16 @@ enum YishuComputerUseActuator {
             focusedElementBefore: focusedElementBefore,
             windowSignatureBefore: windowSignatureBefore,
             receiptId: receiptId,
-            attemptId: attemptId
+            attemptId: attemptId,
+            authorizationFence: authorizationFence
         )
     }
 
     private static func performFinderHistoryBack(
         _ request: YishuComputerActionRequest,
         receiptId: String,
-        attemptId: String
+        attemptId: String,
+        authorizationFence: @escaping AuthorizationFence
     ) async -> YishuComputerActionResult {
         guard AXIsProcessTrusted() else {
             return failed(
@@ -966,7 +998,14 @@ enum YishuComputerUseActuator {
                 attemptId: attemptId
             )
         }
-        switch performPress(live.element) {
+        switch performPress(live.element, authorizationFence: authorizationFence) {
+        case .blocked:
+            return failed(
+                "Finder navigation was cancelled before commit.",
+                code: .cancelled,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
         case .unsupported:
             return failed(
                 "Finder back does not support AXPress.",
@@ -1054,7 +1093,8 @@ enum YishuComputerUseActuator {
     private static func performSetText(
         _ request: YishuComputerActionRequest,
         receiptId: String,
-        attemptId: String
+        attemptId: String,
+        authorizationFence: @escaping AuthorizationFence
     ) async -> YishuComputerActionResult {
         guard AXIsProcessTrusted() else {
             return failed(
@@ -1149,11 +1189,20 @@ enum YishuComputerUseActuator {
             )
         }
 
-        let setResult = AXUIElementSetAttributeValue(
-            liveFocused,
-            kAXValueAttribute as CFString,
-            text as CFTypeRef
-        )
+        guard let setResult = authorizedCommit(authorizationFence, operation: {
+            AXUIElementSetAttributeValue(
+                liveFocused,
+                kAXValueAttribute as CFString,
+                text as CFTypeRef
+            )
+        }) else {
+            return failed(
+                "Text input was cancelled before commit.",
+                code: .cancelled,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
         guard setResult == .success else {
             return failed(
                 "macOS rejected the AX text update.",
@@ -1250,7 +1299,8 @@ enum YishuComputerUseActuator {
         focusedElementBefore: AXUIElement?,
         windowSignatureBefore: String?,
         receiptId: String,
-        attemptId: String
+        attemptId: String,
+        authorizationFence: @escaping AuthorizationFence
     ) async -> YishuComputerActionResult {
         let currentFrontmostProcessIdentifier = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let targetWindowOwnerProcessIdentifier = windowOwnerProcessIdentifier(at: point)
@@ -1310,12 +1360,20 @@ enum YishuComputerUseActuator {
 
         mouseDown.setIntegerValueField(.mouseEventClickState, value: 1)
         mouseUp.setIntegerValueField(.mouseEventClickState, value: 1)
-        await postPointerPreservingClick(
+        guard await postPointerPreservingClick(
             mouseDown: mouseDown,
             mouseUp: mouseUp,
             cursorBefore: cursorBefore,
-            targetPoint: point
-        )
+            targetPoint: point,
+            authorizationFence: authorizationFence
+        ) else {
+            return failed(
+                "The desktop click was cancelled before commit.",
+                code: .cancelled,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
 
         let verification = await readBack(
             before: screenCapture,
@@ -1350,8 +1408,9 @@ enum YishuComputerUseActuator {
         mouseDown: CGEvent,
         mouseUp: CGEvent,
         cursorBefore: CGPoint,
-        targetPoint: CGPoint
-    ) async {
+        targetPoint: CGPoint,
+        authorizationFence: AuthorizationFence
+    ) async -> Bool {
         let displays = Set([
             displayIdentifier(containing: cursorBefore),
             displayIdentifier(containing: targetPoint),
@@ -1364,9 +1423,15 @@ enum YishuComputerUseActuator {
             }
         }
 
-        mouseDown.post(tap: .cghidEventTap)
+        guard authorizedCommit(authorizationFence, operation: {
+            mouseDown.post(tap: .cghidEventTap)
+            return true
+        }) != nil else { return false }
         try? await Task.sleep(nanoseconds: 35_000_000)
+        // Once down is committed, up must always be paired even if ownership
+        // changes during the 35ms gap; otherwise macOS can retain a stuck drag.
         mouseUp.post(tap: .cghidEventTap)
+        return true
     }
 
     private static func displayIdentifier(containing point: CGPoint) -> CGDirectDisplayID? {
@@ -1469,11 +1534,15 @@ enum YishuComputerUseActuator {
     }
 
     private enum PressAttempt {
+        case blocked
         case unsupported
         case attempted(AXError)
     }
 
-    private static func performPress(_ element: AXUIElement) -> PressAttempt {
+    private static func performPress(
+        _ element: AXUIElement,
+        authorizationFence: AuthorizationFence = { true }
+    ) -> PressAttempt {
         var rawActions: CFArray?
         let actionResult = AXUIElementCopyActionNames(element, &rawActions)
         if actionResult == .success,
@@ -1481,7 +1550,10 @@ enum YishuComputerUseActuator {
            !actions.contains(kAXPressAction as String) {
             return .unsupported
         }
-        return .attempted(AXUIElementPerformAction(element, kAXPressAction as CFString))
+        guard let result = authorizedCommit(authorizationFence, operation: {
+            AXUIElementPerformAction(element, kAXPressAction as CFString)
+        }) else { return .blocked }
+        return .attempted(result)
     }
 
     private static func elementAttribute(_ attribute: String, from element: AXUIElement) -> AXUIElement? {

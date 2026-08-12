@@ -309,14 +309,32 @@ export const turnStartCommandSchema = z.object({
   }),
 });
 
+const turnGenerationSchema = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
+
 export const turnSteerCommandSchema = z.object({
   schemaVersion: z.literal(PROTOCOL_VERSION),
   type: z.literal("turn.steer"),
   requestId: z.string().uuid(),
   traceId: z.string().uuid(),
   sentAt: z.string().datetime(),
-  payload: z.object({ message: z.string().trim().min(1) }),
-});
+  payload: z.object({
+    message: z.string().trim().min(1),
+    nextGeneration: turnGenerationSchema,
+    interactionClass: z.literal("conversation"),
+  }).strict(),
+}).strict();
+
+export const turnInterruptCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("turn.interrupt"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    expectedGeneration: turnGenerationSchema,
+    reason: z.literal("user_barge_in"),
+  }).strict(),
+}).strict();
 
 export const turnCancelCommandSchema = z.object({
   schemaVersion: z.literal(PROTOCOL_VERSION),
@@ -521,6 +539,7 @@ export const memoryForgetCommandSchema = z.object({
 
 export const clientCommandSchema = z.discriminatedUnion("type", [
   turnStartCommandSchema,
+  turnInterruptCommandSchema,
   turnSteerCommandSchema,
   turnCancelCommandSchema,
   delegatedTaskCancelCommandSchema,
@@ -547,6 +566,7 @@ export type ConversationId = z.infer<typeof conversationIdSchema>;
 export type SessionScope = z.infer<typeof sessionScopeSchema>;
 export type { AuthModelPreference };
 export type TurnStartCommand = z.infer<typeof turnStartCommandSchema>;
+export type TurnInterruptCommand = z.infer<typeof turnInterruptCommandSchema>;
 export type TurnSteerCommand = z.infer<typeof turnSteerCommandSchema>;
 export type TurnCancelCommand = z.infer<typeof turnCancelCommandSchema>;
 export type DelegatedTaskCancelCommand = z.infer<typeof delegatedTaskCancelCommandSchema>;
@@ -582,6 +602,8 @@ export type RuntimeEventType =
   | "runtime.pong"
   | "runtime.status"
   | "turn.started"
+  | "turn.interrupt.accepted"
+  | "turn.interrupt.rejected"
   | "response.delta"
   | "tool.started"
   | "tool.completed"

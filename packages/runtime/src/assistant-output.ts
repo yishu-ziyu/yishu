@@ -11,6 +11,13 @@ export interface AssistantOutputProjection {
   computerActions: LegacyComputerAction[];
 }
 
+export interface AssistantOutputGenerationCompletion extends AssistantOutputProjection {
+  generation: number;
+  visibleDelta: string;
+  rawText: string;
+  stale: boolean;
+}
+
 const computerControlBlockPattern = /<computer_control\b[^>]*>([\s\S]*?)<\/computer_control\s*>/gi;
 const functionComputerControlBlockPattern = /<\s*function\s*=\s*["']?computer[ _-]?control["']?[^>]*>[\s\S]*?<\/\s*function\s*>/gi;
 const functionBlockPattern = /<\s*function(?:\s*=|\b)[^>]*>[\s\S]*?<\/\s*function\s*>/gi;
@@ -221,6 +228,95 @@ export class AssistantOutputStreamProjector {
     const delta = nextVisibleText.slice(this.emittedText.length);
     this.emittedText = nextVisibleText;
     return delta;
+  }
+}
+
+/**
+ * Owns one presentation projector per provider assistant message.  An
+ * interruption advances the acceptance floor synchronously, so already queued
+ * callbacks from an older provider message cannot publish more text or become
+ * the authoritative completion for the turn.
+ */
+export class AssistantOutputGenerationProjector {
+  private readonly projectors = new Map<number, AssistantOutputStreamProjector>();
+  private activeGeneration: number | undefined;
+  private minimumAcceptedGeneration = 1;
+
+  get currentGeneration(): number | undefined {
+    return this.activeGeneration;
+  }
+
+  get acceptanceFloor(): number {
+    return this.minimumAcceptedGeneration;
+  }
+
+  beginGeneration(requestedGeneration?: number): number {
+    const generation = requestedGeneration ?? Math.max(
+      (this.activeGeneration ?? 0) + 1,
+      this.minimumAcceptedGeneration,
+    );
+    if (!Number.isInteger(generation)
+      || generation < 1
+      || (this.activeGeneration !== undefined && generation <= this.activeGeneration)) {
+      throw new Error("Assistant generations must advance monotonically.");
+    }
+    this.activeGeneration = generation;
+    this.projectors.set(generation, new AssistantOutputStreamProjector());
+    return generation;
+  }
+
+  ensureGeneration(): number {
+    return this.activeGeneration ?? this.beginGeneration();
+  }
+
+  /**
+   * Advances the publication floor for an admitted product generation even
+   * when its provider assistant message has not started yet.
+   */
+  interruptGeneration(
+    interruptedGeneration: number,
+  ): { interruptedGeneration: number; nextGeneration: number } {
+    if (!Number.isInteger(interruptedGeneration) || interruptedGeneration < 1) {
+      throw new Error("Interrupted assistant generation must be a positive integer.");
+    }
+    const nextGeneration = interruptedGeneration + 1;
+    this.minimumAcceptedGeneration = Math.max(
+      this.minimumAcceptedGeneration,
+      nextGeneration,
+    );
+    return { interruptedGeneration, nextGeneration };
+  }
+
+  accepts(generation: number): boolean {
+    return generation >= this.minimumAcceptedGeneration
+      && generation === this.activeGeneration;
+  }
+
+  push(generation: number, delta: string, bufferUntilComplete = false): string {
+    if (!this.accepts(generation)) return "";
+    return this.projectors.get(generation)?.push(delta, bufferUntilComplete) ?? "";
+  }
+
+  complete(generation: number): AssistantOutputGenerationCompletion {
+    if (!this.accepts(generation)) {
+      return {
+        generation,
+        visibleText: "",
+        computerActions: [],
+        visibleDelta: "",
+        rawText: "",
+        stale: true,
+      };
+    }
+    const completed = this.projectors.get(generation)?.complete();
+    return {
+      generation,
+      visibleText: completed?.visibleText ?? "",
+      computerActions: completed?.computerActions ?? [],
+      visibleDelta: completed?.visibleDelta ?? "",
+      rawText: completed?.rawText ?? "",
+      stale: false,
+    };
   }
 }
 

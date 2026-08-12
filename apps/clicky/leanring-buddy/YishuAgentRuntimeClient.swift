@@ -53,14 +53,107 @@ struct YishuMemoryUsedItem: Equatable, Identifiable {
 }
 
 enum YishuRuntimeTurnEvent {
-    case started
-    case responseDelta(String)
-    case toolStarted(String)
-    case toolCompleted(name: String, isError: Bool)
-    case computerActionRequested(YishuComputerActionRequest)
-    case memoryUsed([YishuMemoryUsedItem])
-    case completed(text: String, verified: Bool)
-    case cancelled
+    case started(generation: Int)
+    case responseDelta(text: String, generation: Int)
+    case toolStarted(name: String, generation: Int)
+    case toolCompleted(name: String, isError: Bool, generation: Int)
+    case computerActionRequested(YishuComputerActionRequest, generation: Int)
+    case memoryUsed([YishuMemoryUsedItem], generation: Int)
+    case completed(text: String, verified: Bool, generation: Int)
+    case cancelled(generation: Int)
+
+    var generation: Int {
+        switch self {
+        case let .started(generation),
+             let .responseDelta(_, generation),
+             let .toolStarted(_, generation),
+             let .toolCompleted(_, _, generation),
+             let .computerActionRequested(_, generation),
+             let .memoryUsed(_, generation),
+             let .completed(_, _, generation),
+             let .cancelled(generation):
+            return generation
+        }
+    }
+}
+
+enum YishuTurnInterruptDecision: Equatable {
+    case accepted(interruptedGeneration: Int, nextGeneration: Int)
+    case rejected(generation: Int, code: String)
+}
+
+/// Second, client-side fence around Runtime-owned assistant generations.
+/// Runtime remains authoritative: Swift never invents `nextGeneration`; it
+/// blocks the interrupted generation immediately and advances only from the
+/// typed `turn.interrupt.accepted` receipt.
+struct YishuTurnProjectionReducer: Equatable {
+    let requestId: UUID
+    private(set) var currentGeneration = 1
+    private(set) var pendingInterruptedGeneration: Int?
+    private(set) var acceptedNextGeneration: Int?
+    private(set) var submittedSteerGeneration: Int?
+    private(set) var hasAdvancedGeneration = false
+
+    var interruptionPending: Bool {
+        pendingInterruptedGeneration != nil
+    }
+
+    mutating func beginInterruption(requestId: UUID, expectedGeneration: Int) -> Bool {
+        guard requestId == self.requestId,
+              expectedGeneration == currentGeneration,
+              pendingInterruptedGeneration == nil else { return false }
+        pendingInterruptedGeneration = expectedGeneration
+        acceptedNextGeneration = nil
+        // A newer interruption attempt supersedes interpretation of any late
+        // rejection from the prior generation's already-submitted steer.
+        submittedSteerGeneration = nil
+        return true
+    }
+
+    mutating func acceptInterruption(
+        requestId: UUID,
+        interruptedGeneration: Int,
+        nextGeneration: Int
+    ) -> Bool {
+        guard requestId == self.requestId,
+              pendingInterruptedGeneration == interruptedGeneration,
+              nextGeneration > interruptedGeneration else { return false }
+        currentGeneration = nextGeneration
+        acceptedNextGeneration = nextGeneration
+        submittedSteerGeneration = nil
+        pendingInterruptedGeneration = nil
+        hasAdvancedGeneration = true
+        return true
+    }
+
+    func accepts(requestId: UUID, generation: Int?) -> Bool {
+        guard requestId == self.requestId else { return false }
+        if let generation {
+            return !interruptionPending && generation == currentGeneration
+        }
+        // Protocol-v1 compatibility is safe only before an interruption. Once
+        // a floor exists, a generation-less event cannot prove ownership.
+        return !hasAdvancedGeneration && !interruptionPending && currentGeneration == 1
+    }
+
+    mutating func consumeSteer(requestId: UUID, nextGeneration: Int) -> Bool {
+        guard requestId == self.requestId,
+              acceptedNextGeneration == nextGeneration else { return false }
+        acceptedNextGeneration = nil
+        submittedSteerGeneration = nextGeneration
+        return true
+    }
+
+    func hasSubmittedSteer(requestId: UUID, generation: Int) -> Bool {
+        requestId == self.requestId && submittedSteerGeneration == generation
+    }
+
+    mutating func markGenerationLive(requestId: UUID, generation: Int) -> Bool {
+        guard requestId == self.requestId,
+              submittedSteerGeneration == generation else { return false }
+        submittedSteerGeneration = nil
+        return true
+    }
 }
 
 struct YishuRuntimeTurn {
@@ -88,6 +181,10 @@ enum YishuAgentRuntimeClientError: LocalizedError {
     case runtimeNotRunning
     case unsupportedModel
     case turnFailed
+    case turnTimedOut
+    case turnInterruptUnavailable
+    case turnInterruptTimedOut
+    case turnSteerRejected(message: String, code: String)
     case authFailed
     case invalidAuthEvent
     case authRequestUnavailable
@@ -113,6 +210,10 @@ enum YishuAgentRuntimeClientError: LocalizedError {
         case .runtimeNotRunning: return "奕枢 Runtime 尚未运行。"
         case .unsupportedModel: return "所选模型尚未接入奕枢 Runtime。"
         case .turnFailed: return "奕枢 Runtime 本轮执行失败。"
+        case .turnTimedOut: return "奕枢 Runtime 本轮响应超时。"
+        case .turnInterruptUnavailable: return "当前回答已经无法安全打断。"
+        case .turnInterruptTimedOut: return "等待打断确认超时。"
+        case .turnSteerRejected: return "这次续话需要用新鲜上下文重新开始。"
         case .authFailed: return "Provider 登录流程失败。"
         case .invalidAuthEvent: return "Provider 账号协议无效。"
         case .authRequestUnavailable: return "Provider 登录请求已结束。"
@@ -215,6 +316,20 @@ final class YishuAgentRuntimeClient {
     /// Every command belonging to one active turn reuses its start trace id.
     /// This prevents a cancel/late receipt from becoming a separate trace.
     private var activeTurnTraceIds: [UUID: UUID] = [:]
+    private var turnProjectionReducers: [UUID: YishuTurnProjectionReducer] = [:]
+    private var seenTurnEventIds: [UUID: Set<UUID>] = [:]
+    private var turnWatchdogTasks: [UUID: Task<Void, Never>] = [:]
+    private let foregroundTurnTimeoutNanoseconds: UInt64 = 60_000_000_000
+
+    private struct PendingTurnInterrupt {
+        let traceId: UUID
+        let expectedGeneration: Int
+        let continuation: CheckedContinuation<YishuTurnInterruptDecision, Error>
+        var timeoutTask: Task<Void, Never>?
+    }
+
+    private var turnInterruptContinuations: [UUID: PendingTurnInterrupt] = [:]
+    private var submittedSteerMessages: [UUID: String] = [:]
     private enum AuthRequestKind {
         case status(expectedCount: Int, provider: YishuAuthProvider?)
         case login(provider: YishuAuthProvider)
@@ -705,6 +820,8 @@ final class YishuAgentRuntimeClient {
         }
         turnContinuations[requestId] = streamContinuation
         activeTurnTraceIds[requestId] = traceId
+        turnProjectionReducers[requestId] = YishuTurnProjectionReducer(requestId: requestId)
+        seenTurnEventIds[requestId] = []
 
         let command = YishuTurnStartCommand(
             schemaVersion: yishuRuntimeProtocolVersion,
@@ -724,9 +841,12 @@ final class YishuAgentRuntimeClient {
 
         do {
             try send(command)
+            armTurnWatchdog(requestId: requestId)
         } catch {
             turnContinuations.removeValue(forKey: requestId)
             activeTurnTraceIds.removeValue(forKey: requestId)
+            turnProjectionReducers.removeValue(forKey: requestId)
+            seenTurnEventIds.removeValue(forKey: requestId)
             streamContinuation.finish(throwing: error)
             throw error
         }
@@ -902,6 +1022,121 @@ final class YishuAgentRuntimeClient {
             finishTurn(requestId, throwing: error)
             throw error
         }
+    }
+
+    /// Synchronous presentation fence used at PTT key-down. It runs before the
+    /// async interrupt RPC so a late old-generation delta cannot flash or enter
+    /// TTS while the acknowledgement is in flight.
+    func suppressTurnForInterruption(
+        requestId: UUID,
+        expectedGeneration: Int
+    ) -> Bool {
+        guard var reducer = turnProjectionReducers[requestId] else { return false }
+        let accepted = reducer.beginInterruption(
+            requestId: requestId,
+            expectedGeneration: expectedGeneration
+        )
+        if accepted {
+            turnProjectionReducers[requestId] = reducer
+            submittedSteerMessages.removeValue(forKey: requestId)
+        }
+        return accepted
+    }
+
+    func activeGeneration(requestId: UUID) -> Int? {
+        turnProjectionReducers[requestId]?.currentGeneration
+    }
+
+    func hasActiveTurn(requestId: UUID) -> Bool {
+        turnContinuations[requestId] != nil
+    }
+
+    /// Waits at most two seconds for the typed Runtime interrupt receipt.
+    /// `suppressTurnForInterruption` must already have established the local
+    /// presentation floor; failure leaves that old generation suppressed.
+    func interruptTurn(
+        requestId: UUID,
+        expectedGeneration: Int
+    ) async throws -> YishuTurnInterruptDecision {
+        guard let traceId = activeTurnTraceIds[requestId],
+              turnContinuations[requestId] != nil,
+              turnProjectionReducers[requestId]?.pendingInterruptedGeneration == expectedGeneration,
+              turnInterruptContinuations[requestId] == nil else {
+            throw YishuAgentRuntimeClientError.turnInterruptUnavailable
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            turnInterruptContinuations[requestId] = PendingTurnInterrupt(
+                traceId: traceId,
+                expectedGeneration: expectedGeneration,
+                continuation: continuation,
+                timeoutTask: nil
+            )
+            let timeoutTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch {
+                    return
+                }
+                self?.failTurnInterrupt(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.turnInterruptTimedOut
+                )
+            }
+            turnInterruptContinuations[requestId]?.timeoutTask = timeoutTask
+
+            do {
+                try send(YishuTurnInterruptCommand(
+                    schemaVersion: yishuRuntimeProtocolVersion,
+                    type: "turn.interrupt",
+                    requestId: requestId,
+                    traceId: traceId,
+                    sentAt: Date(),
+                    payload: YishuTurnInterruptPayload(
+                        expectedGeneration: expectedGeneration,
+                        reason: "user_barge_in"
+                    )
+                ))
+            } catch {
+                failTurnInterrupt(requestId, error: error)
+            }
+        }
+    }
+
+    func steerTurn(
+        requestId: UUID,
+        message: String,
+        nextGeneration: Int
+    ) throws {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let traceId = activeTurnTraceIds[requestId],
+              turnContinuations[requestId] != nil,
+              var reducer = turnProjectionReducers[requestId],
+              reducer.consumeSteer(
+                requestId: requestId,
+                nextGeneration: nextGeneration
+              ) else {
+            throw YishuAgentRuntimeClientError.turnInterruptUnavailable
+        }
+        try send(YishuTurnSteerCommand(
+            schemaVersion: yishuRuntimeProtocolVersion,
+            type: "turn.steer",
+            requestId: requestId,
+            traceId: traceId,
+            sentAt: Date(),
+            payload: YishuTurnSteerPayload(
+                message: trimmed,
+                nextGeneration: nextGeneration,
+                interactionClass: "conversation"
+            )
+        ))
+        turnProjectionReducers[requestId] = reducer
+        submittedSteerMessages[requestId] = trimmed
+        // Each accepted generation owns a fresh bounded foreground window;
+        // otherwise a barge-in near the original turn's deadline inherits only
+        // the few seconds left on that old watchdog.
+        armTurnWatchdog(requestId: requestId)
     }
 
     func listDelegatedTasks(
@@ -1168,6 +1403,69 @@ final class YishuAgentRuntimeClient {
         dispatch(raw)
     }
 
+    /// Test hook for strict voice-envelope and generation projection without
+    /// launching the Node sidecar.
+    func parkTurnForTests(
+        requestId: UUID = UUID(),
+        traceId: UUID = UUID()
+    ) -> (turn: YishuRuntimeTurn, traceId: UUID) {
+        var streamContinuation: AsyncThrowingStream<YishuRuntimeTurnEvent, Error>.Continuation?
+        let stream = AsyncThrowingStream<YishuRuntimeTurnEvent, Error> { continuation in
+            streamContinuation = continuation
+        }
+        guard let streamContinuation else {
+            preconditionFailure("AsyncThrowingStream did not provide a continuation")
+        }
+        turnContinuations[requestId] = streamContinuation
+        activeTurnTraceIds[requestId] = traceId
+        turnProjectionReducers[requestId] = YishuTurnProjectionReducer(requestId: requestId)
+        seenTurnEventIds[requestId] = []
+        return (
+            YishuRuntimeTurn(
+                requestId: requestId,
+                conversationId: currentConversationId,
+                events: stream
+            ),
+            traceId
+        )
+    }
+
+    var pendingTurnCountForTests: Int { turnContinuations.count }
+
+    func acceptTurnInterruptionForTests(
+        requestId: UUID,
+        interruptedGeneration: Int,
+        nextGeneration: Int
+    ) -> Bool {
+        guard var reducer = turnProjectionReducers[requestId] else { return false }
+        let accepted = reducer.acceptInterruption(
+            requestId: requestId,
+            interruptedGeneration: interruptedGeneration,
+            nextGeneration: nextGeneration
+        )
+        if accepted { turnProjectionReducers[requestId] = reducer }
+        return accepted
+    }
+
+    func markTurnSteeredForTests(
+        requestId: UUID,
+        message: String,
+        nextGeneration: Int
+    ) -> Bool {
+        guard var reducer = turnProjectionReducers[requestId],
+              reducer.consumeSteer(
+                requestId: requestId,
+                nextGeneration: nextGeneration
+              ) else { return false }
+        turnProjectionReducers[requestId] = reducer
+        submittedSteerMessages[requestId] = message
+        return true
+    }
+
+    func timeoutTurnForTests(requestId: UUID) {
+        timeoutTurn(requestId)
+    }
+
     /// Test hook: complete a parked memory.forget with a store-confirmed result.
     func finishParkedMemoryForgetForTests(
         requestId: UUID,
@@ -1369,6 +1667,98 @@ final class YishuAgentRuntimeClient {
             }
         }
 
+        if type == "turn.interrupt.accepted" || type == "turn.interrupt.rejected" {
+            guard let requestId,
+                  turnContinuations[requestId] != nil,
+                  traceId == activeTurnTraceIds[requestId],
+                  Self.isValidSchemaVersionValue(raw["schemaVersion"]),
+                  let eventId = (raw["eventId"] as? String).flatMap(UUID.init(uuidString:)),
+                  rememberTurnEvent(eventId, requestId: requestId) else {
+                return
+            }
+
+            if type == "turn.interrupt.accepted" {
+                guard let pending = turnInterruptContinuations[requestId] else { return }
+                guard let interruptedGeneration = Self.turnGeneration(payload["interruptedGeneration"]),
+                      let nextGeneration = Self.turnGeneration(payload["nextGeneration"]),
+                      interruptedGeneration == pending.expectedGeneration,
+                      var reducer = turnProjectionReducers[requestId],
+                      reducer.acceptInterruption(
+                        requestId: requestId,
+                        interruptedGeneration: interruptedGeneration,
+                        nextGeneration: nextGeneration
+                      ) else {
+                    failTurnInterrupt(
+                        requestId,
+                        error: YishuAgentRuntimeClientError.turnInterruptUnavailable
+                    )
+                    return
+                }
+                turnProjectionReducers[requestId] = reducer
+                finishTurnInterrupt(
+                    requestId,
+                    decision: .accepted(
+                        interruptedGeneration: interruptedGeneration,
+                        nextGeneration: nextGeneration
+                    )
+                )
+                return
+            }
+
+            guard let generation = Self.turnGeneration(payload["generation"]),
+                  let code = Self.boundedProtocolString(payload["code"], maximum: 80) else {
+                if turnInterruptContinuations[requestId] != nil {
+                    failTurnInterrupt(
+                        requestId,
+                        error: YishuAgentRuntimeClientError.turnInterruptUnavailable
+                    )
+                }
+                return
+            }
+            if turnInterruptContinuations[requestId] != nil {
+                finishTurnInterrupt(
+                    requestId,
+                    decision: .rejected(generation: generation, code: code)
+                )
+                return
+            }
+            // Runtime can reject a submitted steer after the interrupt receipt
+            // (for example if its effect classifier is stricter than Swift's).
+            // Surface that typed failure immediately instead of silently
+            // waiting for the Runtime's 35-second steer watchdog.
+            if let reducer = turnProjectionReducers[requestId],
+               !reducer.interruptionPending,
+               turnInterruptContinuations[requestId] == nil,
+               reducer.hasSubmittedSteer(
+                requestId: requestId,
+                generation: generation
+            ) == true,
+               let message = submittedSteerMessages[requestId] {
+                // A steer rejection is not itself a terminal Runtime event.
+                // Cancel with the still-owned start trace before `finishTurn`
+                // removes that trace; a later random-trace cancel would be
+                // rejected by the protocol and leave the old session alive.
+                if let activeTraceId = activeTurnTraceIds[requestId] {
+                    try? send(YishuTurnCancelCommand(
+                        schemaVersion: yishuRuntimeProtocolVersion,
+                        type: "turn.cancel",
+                        requestId: requestId,
+                        traceId: activeTraceId,
+                        sentAt: Date(),
+                        payload: YishuTurnCancelPayload(reason: "steer-rejected")
+                    ))
+                }
+                finishTurn(
+                    requestId,
+                    throwing: YishuAgentRuntimeClientError.turnSteerRejected(
+                        message: message,
+                        code: code
+                    )
+                )
+            }
+            return
+        }
+
         // Auth events use their own continuation map and strict envelope
         // validation. They must never be delivered to a voice turn just
         // because UUIDs share the same envelope.
@@ -1432,21 +1822,61 @@ final class YishuAgentRuntimeClient {
             return
         }
 
-        guard let requestId, let continuation = turnContinuations[requestId] else { return }
+        guard let requestId,
+              let continuation = turnContinuations[requestId],
+              activeTurnTraceIds[requestId] == traceId,
+              Self.isValidSchemaVersionValue(raw["schemaVersion"]),
+              let eventId = (raw["eventId"] as? String).flatMap(UUID.init(uuidString:)),
+              rememberTurnEvent(eventId, requestId: requestId),
+              var reducer = turnProjectionReducers[requestId] else { return }
+
+        let wireGeneration = Self.turnGeneration(payload["generation"])
+        guard reducer.accepts(requestId: requestId, generation: wireGeneration) else {
+            let isTerminal = type == "response.completed"
+                || type == "turn.cancelled"
+                || type == "turn.failed"
+                || type == "runtime.error"
+            if isTerminal,
+               reducer.interruptionPending,
+               (wireGeneration == nil
+                || wireGeneration == reducer.pendingInterruptedGeneration) {
+                // The old provider may finish concurrently with PTT/ASR. It
+                // closes that stream but never projects old text or success;
+                // transcript submission then takes exactly one fresh-start path.
+                finishTurn(requestId, throwing: CancellationError())
+            }
+            return
+        }
+        let generation = wireGeneration ?? reducer.currentGeneration
+        let provesSubmittedSteerIsLive = type == "turn.started"
+            || type == "response.delta"
+            || type == "response.completed"
+            || type == "tool.started"
+            || type == "tool.completed"
+            || type == "computer.action.requested"
+        if provesSubmittedSteerIsLive,
+           reducer.markGenerationLive(requestId: requestId, generation: generation) {
+            turnProjectionReducers[requestId] = reducer
+            submittedSteerMessages.removeValue(forKey: requestId)
+        }
 
         switch type {
         case "turn.started":
-            continuation.yield(.started)
+            continuation.yield(.started(generation: generation))
         case "response.delta":
             if let text = payload["text"] as? String {
-                continuation.yield(.responseDelta(text))
+                continuation.yield(.responseDelta(text: text, generation: generation))
             }
         case "tool.started":
-            continuation.yield(.toolStarted(payload["toolName"] as? String ?? "tool"))
+            continuation.yield(.toolStarted(
+                name: payload["toolName"] as? String ?? "tool",
+                generation: generation
+            ))
         case "tool.completed":
             continuation.yield(.toolCompleted(
                 name: payload["toolName"] as? String ?? "tool",
-                isError: payload["isError"] as? Bool ?? false
+                isError: payload["isError"] as? Bool ?? false,
+                generation: generation
             ))
         case "computer.action.requested":
             guard let traceId,
@@ -1459,22 +1889,53 @@ final class YishuAgentRuntimeClient {
                 finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnFailed)
                 return
             }
-            continuation.yield(.computerActionRequested(request))
+            continuation.yield(.computerActionRequested(request, generation: generation))
         case "memory.used":
             let items = Self.parseMemoryUsedItems(payload)
             if !items.isEmpty {
-                continuation.yield(.memoryUsed(items))
+                continuation.yield(.memoryUsed(items, generation: generation))
             }
         case "response.completed":
             continuation.yield(.completed(
                 text: payload["text"] as? String ?? "",
-                verified: payload["verified"] as? Bool ?? false
+                verified: payload["verified"] as? Bool ?? false,
+                generation: generation
             ))
             finishTurn(requestId)
         case "turn.cancelled":
-            continuation.yield(.cancelled)
+            continuation.yield(.cancelled(generation: generation))
             finishTurn(requestId)
         case "turn.failed", "runtime.error":
+            let code = Self.boundedProtocolString(payload["code"], maximum: 80)
+            let failedBeforeReplacementStarted = code == "steer_failed"
+                || code == "steer_replacement_failed_before_start"
+            if type == "turn.failed",
+               failedBeforeReplacementStarted,
+               !reducer.interruptionPending,
+               reducer.hasSubmittedSteer(
+                requestId: requestId,
+                generation: generation
+               ),
+               let message = submittedSteerMessages[requestId] {
+                if let activeTraceId = activeTurnTraceIds[requestId] {
+                    try? send(YishuTurnCancelCommand(
+                        schemaVersion: yishuRuntimeProtocolVersion,
+                        type: "turn.cancel",
+                        requestId: requestId,
+                        traceId: activeTraceId,
+                        sentAt: Date(),
+                        payload: YishuTurnCancelPayload(reason: "steer-failed")
+                    ))
+                }
+                finishTurn(
+                    requestId,
+                    throwing: YishuAgentRuntimeClientError.turnSteerRejected(
+                        message: message,
+                        code: code ?? "steer_failed"
+                    )
+                )
+                return
+            }
             finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnFailed)
         default:
             break
@@ -1804,9 +2265,70 @@ final class YishuAgentRuntimeClient {
         return plain.date(from: value)
     }
 
+    private func rememberTurnEvent(_ eventId: UUID, requestId: UUID) -> Bool {
+        guard var seen = seenTurnEventIds[requestId], !seen.contains(eventId) else {
+            return false
+        }
+        seen.insert(eventId)
+        seenTurnEventIds[requestId] = seen
+        return true
+    }
+
+    private func finishTurnInterrupt(
+        _ requestId: UUID,
+        decision: YishuTurnInterruptDecision
+    ) {
+        guard let pending = turnInterruptContinuations.removeValue(forKey: requestId) else {
+            return
+        }
+        pending.timeoutTask?.cancel()
+        pending.continuation.resume(returning: decision)
+    }
+
+    private func failTurnInterrupt(_ requestId: UUID, error: Error) {
+        guard let pending = turnInterruptContinuations.removeValue(forKey: requestId) else {
+            return
+        }
+        pending.timeoutTask?.cancel()
+        pending.continuation.resume(throwing: error)
+    }
+
+    private func armTurnWatchdog(requestId: UUID) {
+        turnWatchdogTasks[requestId]?.cancel()
+        turnWatchdogTasks[requestId] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: self.foregroundTurnTimeoutNanoseconds)
+            } catch {
+                return
+            }
+            self.timeoutTurn(requestId)
+        }
+    }
+
+    private func timeoutTurn(_ requestId: UUID) {
+        guard turnContinuations[requestId] != nil else { return }
+        if let traceId = activeTurnTraceIds[requestId] {
+            try? send(YishuTurnCancelCommand(
+                schemaVersion: yishuRuntimeProtocolVersion,
+                type: "turn.cancel",
+                requestId: requestId,
+                traceId: traceId,
+                sentAt: Date(),
+                payload: YishuTurnCancelPayload(reason: "foreground-turn-timeout")
+            ))
+        }
+        finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnTimedOut)
+    }
+
     private func finishTurn(_ requestId: UUID, throwing error: Error? = nil) {
         guard let continuation = turnContinuations.removeValue(forKey: requestId) else { return }
+        turnWatchdogTasks.removeValue(forKey: requestId)?.cancel()
+        failTurnInterrupt(requestId, error: error ?? YishuAgentRuntimeClientError.turnInterruptUnavailable)
         activeTurnTraceIds.removeValue(forKey: requestId)
+        turnProjectionReducers.removeValue(forKey: requestId)
+        seenTurnEventIds.removeValue(forKey: requestId)
+        submittedSteerMessages.removeValue(forKey: requestId)
         if let error {
             continuation.finish(throwing: error)
         } else {
@@ -1986,6 +2508,23 @@ final class YishuAgentRuntimeClient {
             && Int(doubleValue) == yishuRuntimeProtocolVersion
     }
 
+    private static func turnGeneration(_ value: Any?) -> Int? {
+        guard let number = nonBooleanNumber(value) else { return nil }
+        let raw = number.doubleValue
+        guard raw.isFinite,
+              raw.rounded() == raw,
+              raw >= 1,
+              raw <= Double(Int.max) else { return nil }
+        return Int(raw)
+    }
+
+    private static func boundedProtocolString(_ value: Any?, maximum: Int) -> String? {
+        guard let value = value as? String else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, normalized.count <= maximum else { return nil }
+        return normalized
+    }
+
     static func isValidOptionalLabelPayloadValue(_ value: Any?) -> Bool {
         guard let value else { return true }
         guard let string = value as? String else { return false }
@@ -2043,6 +2582,18 @@ final class YishuAgentRuntimeClient {
         let continuations = turnContinuations.values
         turnContinuations.removeAll()
         activeTurnTraceIds.removeAll()
+        turnProjectionReducers.removeAll()
+        seenTurnEventIds.removeAll()
+        submittedSteerMessages.removeAll()
+        let watchdogs = turnWatchdogTasks.values
+        turnWatchdogTasks.removeAll()
+        watchdogs.forEach { $0.cancel() }
+        let interrupts = turnInterruptContinuations
+        turnInterruptContinuations.removeAll()
+        for pending in interrupts.values {
+            pending.timeoutTask?.cancel()
+            pending.continuation.resume(throwing: error)
+        }
         for continuation in continuations {
             continuation.finish(throwing: error)
         }
@@ -2210,6 +2761,35 @@ private struct YishuTurnCancelCommand: Encodable {
     let traceId: UUID
     let sentAt: Date
     let payload: YishuTurnCancelPayload
+}
+
+private struct YishuTurnInterruptCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuTurnInterruptPayload
+}
+
+private struct YishuTurnInterruptPayload: Encodable {
+    let expectedGeneration: Int
+    let reason: String
+}
+
+private struct YishuTurnSteerCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuTurnSteerPayload
+}
+
+private struct YishuTurnSteerPayload: Encodable {
+    let message: String
+    let nextGeneration: Int
+    let interactionClass: String
 }
 
 private struct YishuTrailObserveCommand: Encodable {

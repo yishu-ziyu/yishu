@@ -65,7 +65,7 @@ describe("one-shot application return watch", () => {
     )
   })
 
-  it("rejects private scope before any durable truth is created", async () => {
+  it("rejects private scope and weak foreground evidence before durable creation", async () => {
     const now = new Date(CREATED_AT)
     const frame = makeFrame({ capturedAt: CREATED_AT })
     const kernel = createYishuKernel()
@@ -86,6 +86,23 @@ describe("one-shot application return watch", () => {
     assert.equal(kernel.store.getSnapshot().contextWatches.length, 0)
     assert.equal((await kernel.store.listTasks()).length, 0)
     assert.equal((await kernel.store.listMandates()).length, 0)
+
+    const lowConfidenceFrame = makeFrame({ capturedAt: CREATED_AT })
+    lowConfidenceFrame.frontmostApplication!.confidence = 0.79
+    const lowConfidenceReceipt = await kernel.registry.invoke("watch_app_return", {
+      caller: "voice",
+      input: {
+        reminder: "提交报销",
+        mainConversationId: creationInput().mainConversationId,
+        targetBundleId: "com.google.Chrome",
+        sourceFrameId: lowConfidenceFrame.frameId,
+      },
+      sessionScope: PERSONAL,
+      contextFrame: lowConfidenceFrame,
+      now,
+    })
+    assert.equal(lowConfidenceReceipt.status, "failed")
+    assert.equal(kernel.store.getSnapshot().contextWatches.length, 0)
   })
 
   it("recovers active truth from both durable backends", async () => {

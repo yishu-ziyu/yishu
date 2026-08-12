@@ -32,6 +32,7 @@ import type {
   RuntimeEvent,
   TrailObserveCommand,
   TurnCancelCommand,
+  TurnInterruptCommand,
   TurnStartCommand,
   TurnSteerCommand,
 } from "./protocol.js";
@@ -81,6 +82,20 @@ const RUNTIME_SHUTDOWN_TIMEOUT_MS = 2_000;
 const CONTEXT_WATCH_OBSERVATION_MAX_AGE_MS = 30_000;
 const CONTEXT_WATCH_CLOCK_SKEW_MS = 5_000;
 const CONVERSATION_SUPERSEDE_TIMEOUT_MS = 2_000;
+const INTERRUPT_STEER_TIMEOUT_MS = 35_000;
+
+const GENERATION_EVENT_TYPES = new Set<RuntimeEvent["type"]>([
+  "turn.started",
+  "response.delta",
+  "tool.started",
+  "tool.completed",
+  "computer.action.requested",
+  "runtime.status",
+  "response.completed",
+  "turn.cancelled",
+  "turn.failed",
+  "runtime.error",
+]);
 
 async function settlesWithin(
   operation: Promise<unknown>,
@@ -133,6 +148,15 @@ interface TurnLedgerState {
   readonly durable: boolean;
   productActionAbortController?: AbortController | undefined;
   productActionCancelRequested: boolean;
+  readonly interruptEligible: boolean;
+  generation: number;
+  effectsStarted: boolean;
+  effectsBlocked: boolean;
+  interruptPending: boolean;
+  interruptedGeneration?: number;
+  awaitingSteerGeneration?: number;
+  steerSubmitted: boolean;
+  interruptTimeout?: ReturnType<typeof setTimeout>;
   supersedeRequested: boolean;
   preparePromise?: Promise<unknown>;
   innerStarted: boolean;
@@ -162,7 +186,8 @@ export class ProductKernelRuntime implements AgentRuntime {
   private readonly taskTrackers = new Map<string, RuntimeTaskProgressTracker>();
   private readonly suggestionTrackers = new Map<string, RuntimeSuggestionTracker>();
   private readonly activeRequestIds = new Set<string>();
-  private readonly pendingStartRequestIds = new Set<string>();
+  private readonly pendingStartTraceByRequestId = new Map<string, string>();
+  private readonly cancelledPendingRequestIds = new Set<string>();
   private readonly activeTurns = new Map<string, TurnLedgerState>();
   private readonly activeTurnOperations = new Set<Promise<void>>();
   private readonly conversationAdmissionTails = new Map<string, Promise<void>>();
@@ -665,7 +690,16 @@ export class ProductKernelRuntime implements AgentRuntime {
 
   async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
     const conversationId = command.payload.conversationId ?? command.requestId;
-    this.pendingStartRequestIds.add(command.requestId);
+    const pendingTrace = this.pendingStartTraceByRequestId.get(command.requestId);
+    if (pendingTrace !== undefined) {
+      if (pendingTrace === command.traceId) return;
+      emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
+        code: "duplicate_request",
+        message: "A turn with this request id is already awaiting admission.",
+      }, conversationId));
+      return;
+    }
+    this.pendingStartTraceByRequestId.set(command.requestId, command.traceId);
     let releaseAdmission: (() => void) | undefined;
     let state: TurnLedgerState | undefined;
     let operation: Promise<void> | undefined;
@@ -680,6 +714,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
       if (this.activeRequestIds.has(command.requestId)) {
         const existing = this.activeTurns.get(command.requestId);
+        if (existing?.traceId === command.traceId) return;
         emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
           code: "duplicate_request",
           message: "A turn with this request id is already active.",
@@ -688,10 +723,13 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
 
       const sessionScope = normalizeSessionScope(command.payload.sessionScope);
-      const previous = [...this.activeTurns.values()].find((candidate) =>
-        candidate.conversationId.toLowerCase() === conversationId.toLowerCase()
-        && !candidate.terminalKind
-        && sessionScopesEqual(candidate.sessionScope, sessionScope));
+      const cancelledBeforeAdmission = this.cancelledPendingRequestIds.has(command.requestId);
+      const previous = cancelledBeforeAdmission
+        ? undefined
+        : [...this.activeTurns.values()].find((candidate) =>
+            candidate.conversationId.toLowerCase() === conversationId.toLowerCase()
+            && !candidate.terminalKind
+            && sessionScopesEqual(candidate.sessionScope, sessionScope));
       if (previous !== undefined) {
         // Last explicit turn wins inside one Main conversation. Latch a gate on
         // the old producer first, evict its cached Pi conversation immediately,
@@ -718,6 +756,15 @@ export class ProductKernelRuntime implements AgentRuntime {
         sessionScope,
         durable: sessionScope.kind !== "private",
         productActionCancelRequested: false,
+        interruptEligible:
+          command.payload.capabilityProfile === "conversation"
+          && contractForOrdinaryTurn(command).successMode === "read_only_delivery"
+          && routeProductUtterance(command.payload.utterance, command.payload.contextFrame) === null,
+        generation: 1,
+        effectsStarted: false,
+        effectsBlocked: false,
+        interruptPending: false,
+        steerSubmitted: false,
         supersedeRequested: false,
         innerStarted: false,
         terminalDelivered: false,
@@ -725,10 +772,13 @@ export class ProductKernelRuntime implements AgentRuntime {
       };
       this.activeRequestIds.add(command.requestId);
       this.activeTurns.set(command.requestId, state);
-      operation = this.runTurn(state);
+      operation = cancelledBeforeAdmission
+        ? this.runCancelledPendingStart(state)
+        : this.runTurn(state);
       this.activeTurnOperations.add(operation);
     } finally {
-      this.pendingStartRequestIds.delete(command.requestId);
+      this.pendingStartTraceByRequestId.delete(command.requestId);
+      this.cancelledPendingRequestIds.delete(command.requestId);
       releaseAdmission?.();
     }
 
@@ -742,6 +792,28 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
   }
 
+  private async runCancelledPendingStart(state: TurnLedgerState): Promise<void> {
+    if (state.durable) {
+      try {
+        await this.recoveryReady;
+        const preparation = this.prepareTurn(state);
+        state.preparePromise = preparation;
+        const replay = await preparation;
+        if (replay !== "new") return;
+      } catch {
+        this.emitSafeFailure(state, "conversation_ledger_unavailable");
+        return;
+      }
+    }
+    this.acceptRuntimeEvent(state, runtimeEvent(
+      "turn.cancelled",
+      state.command.requestId,
+      state.traceId,
+      { reason: "cancelled_before_admission", generation: state.generation },
+    ));
+    await this.settleState(state);
+  }
+
   private async runTurn(state: TurnLedgerState): Promise<void> {
     const { command } = state;
 
@@ -749,10 +821,6 @@ export class ProductKernelRuntime implements AgentRuntime {
       try {
         await this.recoveryReady;
         await this.reconcileClaimedDeliveries(false);
-        if (state.terminalKind) {
-          await this.settleState(state);
-          return;
-        }
         const preparation = this.prepareTurn(state);
         state.preparePromise = preparation;
         const replay = await preparation;
@@ -767,7 +835,10 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
     }
 
-    if (state.terminalKind) return;
+    if (state.terminalKind) {
+      await this.settleState(state);
+      return;
+    }
     if (state.supersedeRequested) {
       this.acceptRuntimeEvent(
         state,
@@ -1002,9 +1073,10 @@ export class ProductKernelRuntime implements AgentRuntime {
           return;
         }
         await this.inner.startTurn(commandForInner, (event) => {
-          tracker?.observe(event, trustedExternalVerification(event));
-          suggestionTracker?.observe(event);
-          this.acceptRuntimeEvent(state, event);
+          if (this.acceptRuntimeEvent(state, event)) {
+            tracker?.observe(event, trustedExternalVerification(event));
+            suggestionTracker?.observe(event);
+          }
         });
       } catch {
         tracker?.recordRuntimeFailure("start");
@@ -1013,6 +1085,7 @@ export class ProductKernelRuntime implements AgentRuntime {
             state,
             runtimeEvent("turn.failed", state.command.requestId, state.traceId, {
               code: "runtime_operation_failed",
+              generation: state.generation,
             }),
           );
         }
@@ -1027,6 +1100,7 @@ export class ProductKernelRuntime implements AgentRuntime {
             state,
             runtimeEvent("turn.failed", state.command.requestId, state.traceId, {
               code: "task_truth_unavailable",
+              generation: state.generation,
             }),
           );
         } else if (state.terminalKind === "completed" && !state.terminalPersistence) {
@@ -1050,6 +1124,7 @@ export class ProductKernelRuntime implements AgentRuntime {
         state,
         runtimeEvent("turn.failed", state.command.requestId, state.traceId, {
           code: "turn_ended_without_terminal",
+          generation: state.generation,
         }),
       );
     }
@@ -1328,21 +1403,229 @@ export class ProductKernelRuntime implements AgentRuntime {
     );
   }
 
+  async interruptTurn(command: TurnInterruptCommand, emit: RuntimeEventSink): Promise<void> {
+    const state = this.activeTurns.get(command.requestId);
+    const reject = (generation: number, code: string): void => {
+      emit(runtimeEvent(
+        "turn.interrupt.rejected",
+        command.requestId,
+        command.traceId,
+        { generation, code },
+        state?.conversationId as ConversationId | undefined,
+      ));
+    };
+
+    if (!state) {
+      reject(command.payload.expectedGeneration, "turn_not_active");
+      return;
+    }
+    if (command.traceId !== state.traceId) {
+      reject(state.generation, "trace_mismatch");
+      return;
+    }
+    if (state.terminalKind) {
+      reject(state.generation, "turn_terminal");
+      return;
+    }
+    if (command.payload.expectedGeneration !== state.generation) {
+      reject(state.generation, "stale_generation");
+      return;
+    }
+    if (!state.interruptEligible) {
+      reject(state.generation, "ineligible_turn");
+      return;
+    }
+    if (state.effectsStarted) {
+      reject(state.generation, "effect_started");
+      return;
+    }
+    if (state.interruptPending || state.awaitingSteerGeneration !== undefined) {
+      reject(state.generation, "interrupt_in_progress");
+      return;
+    }
+    if (state.generation >= Number.MAX_SAFE_INTEGER) {
+      reject(state.generation, "generation_exhausted");
+      return;
+    }
+
+    // This synchronous latch wins or loses atomically against the synchronous
+    // Runtime event sink. Once set, no later product/tool/computer effect can
+    // cross the Product boundary while the inner Pi gate is being installed.
+    const interruptedGeneration = state.generation;
+    const nextGeneration = interruptedGeneration + 1;
+    const effectsWereBlocked = state.effectsBlocked;
+    const previouslyInterruptedGeneration = state.interruptedGeneration;
+    state.effectsBlocked = true;
+    state.interruptPending = true;
+    state.interruptedGeneration = interruptedGeneration;
+
+    const innerInterrupt = this.inner.interruptTurn;
+    if (!innerInterrupt) {
+      state.interruptPending = false;
+      state.effectsBlocked = effectsWereBlocked;
+      if (previouslyInterruptedGeneration === undefined) delete state.interruptedGeneration;
+      else state.interruptedGeneration = previouslyInterruptedGeneration;
+      reject(state.generation, "unsupported");
+      return;
+    }
+
+    let innerAccepted = false;
+    let innerRejectedCode: string | undefined;
+    let innerSettled = false;
+    try {
+      innerSettled = await settlesWithin(
+        innerInterrupt.call(this.inner, command, (event) => {
+          if (event.requestId !== command.requestId || event.traceId !== command.traceId) return;
+          if (event.type === "turn.interrupt.accepted"
+            && event.payload.interruptedGeneration === interruptedGeneration
+            && event.payload.nextGeneration === nextGeneration) {
+            innerAccepted = true;
+            return;
+          }
+          if (event.type === "turn.interrupt.rejected"
+            && event.payload.generation === interruptedGeneration
+            && typeof event.payload.code === "string") {
+            innerRejectedCode = mapInnerInterruptRejection(event.payload.code);
+          }
+        }),
+        RUNTIME_SHUTDOWN_TIMEOUT_MS,
+      );
+    } catch {
+      // An exception is ambiguous: Pi may already have raised its output and
+      // effect floor before the acknowledgement was lost. Keep the Product
+      // floor and cancel below instead of reopening the old generation.
+    }
+
+    state.interruptPending = false;
+    if (innerSettled && !innerAccepted && innerRejectedCode !== undefined) {
+      state.effectsBlocked = effectsWereBlocked;
+      if (previouslyInterruptedGeneration === undefined) delete state.interruptedGeneration;
+      else state.interruptedGeneration = previouslyInterruptedGeneration;
+      reject(state.generation, innerRejectedCode);
+      return;
+    }
+    if (state.terminalKind || !innerSettled || !innerAccepted || innerRejectedCode !== undefined) {
+      reject(state.generation, "inner_rejected");
+      await this.cancelTurn({
+        schemaVersion: command.schemaVersion,
+        type: "turn.cancel",
+        requestId: command.requestId,
+        traceId: command.traceId,
+        sentAt: new Date().toISOString(),
+        payload: { reason: "interrupt_ack_ambiguous" },
+      }, () => undefined);
+      return;
+    }
+
+    state.generation = nextGeneration;
+    state.awaitingSteerGeneration = nextGeneration;
+    state.steerSubmitted = false;
+    this.armInterruptTimeout(state);
+    emit(runtimeEvent(
+      "turn.interrupt.accepted",
+      command.requestId,
+      command.traceId,
+      { interruptedGeneration, nextGeneration },
+      state.conversationId as ConversationId,
+    ));
+  }
+
+  private armInterruptTimeout(state: TurnLedgerState): void {
+    this.clearInterruptTimeout(state);
+    state.interruptTimeout = setTimeout(() => {
+      if (state.terminalKind
+        || state.awaitingSteerGeneration === undefined
+        || state.steerSubmitted) return;
+      void this.cancelTurn({
+        schemaVersion: state.command.schemaVersion,
+        type: "turn.cancel",
+        requestId: state.command.requestId,
+        traceId: state.traceId,
+        sentAt: new Date().toISOString(),
+        payload: { reason: "interrupt_steer_timeout" },
+      }, () => undefined);
+    }, INTERRUPT_STEER_TIMEOUT_MS);
+    state.interruptTimeout.unref?.();
+  }
+
+  private clearInterruptTimeout(state: TurnLedgerState): void {
+    if (state.interruptTimeout !== undefined) clearTimeout(state.interruptTimeout);
+    delete state.interruptTimeout;
+  }
+
   async steerTurn(command: TurnSteerCommand, emit: RuntimeEventSink): Promise<void> {
     const state = this.activeTurns.get(command.requestId);
     if (!state) {
-      await this.inner.steerTurn(command, (event) => {
-        const safeEvent = sanitizeClientEvent(enrichFreeEvent(event, command.requestId));
-        if (safeEvent) emit(safeEvent);
-      });
+      emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
+        generation: command.payload.nextGeneration,
+        code: "turn_not_active",
+      }));
       return;
     }
-    await state.preparePromise?.catch(() => undefined);
+    if (command.traceId !== state.traceId) {
+      emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
+        generation: state.generation,
+        code: "trace_mismatch",
+      }, state.conversationId as ConversationId));
+      return;
+    }
+    if (state.terminalKind
+      || state.awaitingSteerGeneration !== command.payload.nextGeneration
+      || state.generation !== command.payload.nextGeneration) {
+      emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
+        generation: state.generation,
+        code: state.terminalKind ? "turn_terminal" : "stale_generation",
+      }, state.conversationId as ConversationId));
+      return;
+    }
+    if (state.steerSubmitted) {
+      emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
+        generation: state.generation,
+        code: "duplicate_steer",
+      }, state.conversationId as ConversationId));
+      return;
+    }
+    if (COMPUTER_EFFECT_INTENT.test(command.payload.message)
+      || routeProductUtterance(command.payload.message, state.command.payload.contextFrame) !== null) {
+      emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
+        generation: state.generation,
+        code: "effectful_steer",
+      }, state.conversationId as ConversationId));
+      return;
+    }
+
+    // One-shot CAS occurs before the first await and therefore before the
+    // durable user-input append. Concurrent duplicate steers cannot both win.
+    state.steerSubmitted = true;
+    this.clearInterruptTimeout(state);
+    const preparationSettled = state.preparePromise === undefined
+      || await settlesWithin(
+        state.preparePromise.catch(() => undefined),
+        RUNTIME_SHUTDOWN_TIMEOUT_MS,
+      );
+    if (!preparationSettled) {
+      await this.cancelTurn({
+        schemaVersion: command.schemaVersion,
+        type: "turn.cancel",
+        requestId: command.requestId,
+        traceId: command.traceId,
+        sentAt: new Date().toISOString(),
+        payload: { reason: "steer_prepare_timeout" },
+      }, () => undefined);
+      return;
+    }
     if (state.terminalKind) return;
 
     if (state.durable) {
       try {
         await this.enqueueLedger(state, async () => {
+          const replaced = await this.kernel.store.replaceOpenConversationTurnInput({
+            conversationId: state.conversationId,
+            turnId: state.command.requestId,
+            traceId: state.traceId,
+            userInput: ledgerText(command.payload.message),
+          });
+          if (!replaced) throw new Error("steer_turn_input_conflict");
           await this.kernel.store.appendConversationEvent({
             id: randomUUID(),
             conversationId: state.conversationId,
@@ -1354,6 +1637,8 @@ export class ProductKernelRuntime implements AgentRuntime {
         });
         await this.flushState(state);
       } catch {
+        state.steerSubmitted = false;
+        this.armInterruptTimeout(state);
         this.emitSafeFailure(state, "conversation_ledger_failed");
         return;
       }
@@ -1364,9 +1649,10 @@ export class ProductKernelRuntime implements AgentRuntime {
     try {
       state.innerStarted = true;
       await this.inner.steerTurn(command, (event) => {
-        tracker?.observe(event);
-        suggestionTracker?.observe(event);
-        this.acceptRuntimeEvent(state, event);
+        if (this.acceptRuntimeEvent(state, event)) {
+          tracker?.observe(event);
+          suggestionTracker?.observe(event);
+        }
       });
     } catch {
       tracker?.recordRuntimeFailure("steer");
@@ -1375,6 +1661,7 @@ export class ProductKernelRuntime implements AgentRuntime {
           state,
           runtimeEvent("turn.failed", command.requestId, state.traceId, {
             code: "steer_failed",
+            generation: state.generation,
           }),
         );
       }
@@ -1393,6 +1680,7 @@ export class ProductKernelRuntime implements AgentRuntime {
   }
 
   async cancelTurn(command: TurnCancelCommand, emit: RuntimeEventSink): Promise<void> {
+    const cancelDeadline = Date.now() + RUNTIME_SHUTDOWN_TIMEOUT_MS;
     const cancelInnerAtMost = async (sink: RuntimeEventSink): Promise<void> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<void>((resolve) => {
@@ -1410,16 +1698,14 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
     };
 
-    let state = this.activeTurns.get(command.requestId);
-    if (!state) {
-      // startTurn admission is intentionally asynchronous. Give a same-tick
-      // cancel one microtask to observe the registered product gate before
-      // falling back to an unscoped inner cancellation.
-      for (let attempt = 0; attempt < 8 && this.pendingStartRequestIds.has(command.requestId); attempt += 1) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        state = this.activeTurns.get(command.requestId);
-        if (state) break;
-      }
+    const state = this.activeTurns.get(command.requestId);
+    if (!state
+      && this.pendingStartTraceByRequestId.get(command.requestId) === command.traceId) {
+      // Tombstone the request itself. The pending start owns emission and
+      // durable settlement once it acquires conversation admission; no
+      // unscoped inner cancellation can race and then let the start through.
+      this.cancelledPendingRequestIds.add(command.requestId);
+      return;
     }
     if (!state) {
       let acceptingEvents = true;
@@ -1431,8 +1717,9 @@ export class ProductKernelRuntime implements AgentRuntime {
       acceptingEvents = false;
       return;
     }
-    await state.preparePromise?.catch(() => undefined);
+    if (command.traceId !== state.traceId) return;
     if (state.terminalKind) return;
+    this.clearInterruptTimeout(state);
 
     // Product actions are reconciled by the registry receipt.  Do not close
     // the turn gate here: a post-commit receipt must be able to record the
@@ -1444,30 +1731,54 @@ export class ProductKernelRuntime implements AgentRuntime {
       return;
     }
 
-    // Close the product gate before invoking a potentially slow inner
-    // cancellation.  Product actions do not have an inner turn to cancel.
+    // Close the product gate before waiting for preparation or invoking a
+    // potentially slow inner cancellation. A hung store must not keep stdio
+    // cancellation open; runTurn owns eventual durable settlement.
+    // This is a Product-authored terminal, not an old provider terminal. Drop
+    // the interruption wait latch first so supersede, watchdog, and explicit
+    // cancellation can always close an accepted-but-not-yet-steered turn.
+    state.interruptPending = false;
+    delete state.awaitingSteerGeneration;
+    state.steerSubmitted = false;
     const cancelledEvent = runtimeEvent("turn.cancelled", command.requestId, state.traceId, {
       reason: state.productActionAbortController === undefined
         ? safeMetadata(command.payload.reason) ?? "user_cancelled"
         : "product_action_cancelled",
+      generation: state.generation,
     });
     this.taskTrackers.get(command.requestId)?.observe(cancelledEvent);
     this.suggestionTrackers.get(command.requestId)?.observe(cancelledEvent);
     this.acceptRuntimeEvent(state, cancelledEvent);
+    const innerCancellation = state.innerStarted
+      ? cancelInnerAtMost(() => undefined)
+      : Promise.resolve();
+    const preparationSettled = !state.durable
+      || (state.preparePromise !== undefined
+        && await settlesWithin(
+          state.preparePromise.catch(() => undefined),
+          Math.max(0, cancelDeadline - Date.now()),
+        ));
+    if (!preparationSettled) {
+      await innerCancellation;
+      return;
+    }
     try {
-      await this.taskTrackers.get(command.requestId)?.flush();
+      await settlesWithin(
+        this.taskTrackers.get(command.requestId)?.flush() ?? Promise.resolve(),
+        Math.max(0, cancelDeadline - Date.now()),
+      );
     } catch {
       // Preserve an explicit user cancellation even if TaskTruth persistence
       // is unavailable; the ledger turn remains the authoritative outcome.
     }
-    await this.suggestionTrackers.get(command.requestId)?.flush();
-    await this.settleState(state);
-    if (state.innerStarted) {
-      // The product cancellation is already durable and visible. The inner
-      // harness gets a bounded cleanup window; its late events cannot reopen
-      // tracker, ledger, or UI state.
-      await cancelInnerAtMost(() => undefined);
-    }
+    await settlesWithin(
+      this.suggestionTrackers.get(command.requestId)?.flush() ?? Promise.resolve(),
+      Math.max(0, cancelDeadline - Date.now()),
+    );
+    await settlesWithin(this.settleState(state), Math.max(0, cancelDeadline - Date.now()));
+    // The product cancellation gate is already closed. The inner harness gets
+    // the same bounded cleanup window; late events cannot reopen the turn.
+    await innerCancellation;
   }
 
   async cancelTask(command: DelegatedTaskCancelCommand): Promise<boolean> {
@@ -1543,6 +1854,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     // but their terminal truth must wait for the receipt because the side
     // effect may already have committed.
     for (const state of this.activeTurns.values()) {
+      this.clearInterruptTimeout(state);
       if (state.productActionAbortController !== undefined) {
         productActionStates.add(state);
         state.productActionCancelRequested = true;
@@ -1554,7 +1866,7 @@ export class ProductKernelRuntime implements AgentRuntime {
         "turn.cancelled",
         state.command.requestId,
         state.traceId,
-        { reason: "runtime_disposed" },
+        { reason: "runtime_disposed", generation: state.generation },
       );
       this.taskTrackers.get(state.command.requestId)?.observe(cancelled);
       this.suggestionTrackers.get(state.command.requestId)?.observe(cancelled);
@@ -1613,32 +1925,74 @@ export class ProductKernelRuntime implements AgentRuntime {
     this.taskTrackers.clear();
     this.suggestionTrackers.clear();
     this.activeRequestIds.clear();
-    this.pendingStartRequestIds.clear();
+    this.pendingStartTraceByRequestId.clear();
+    this.cancelledPendingRequestIds.clear();
     this.activeTurns.clear();
     if (disposeError !== undefined) throw disposeError;
   }
 
-  private acceptRuntimeEvent(state: TurnLedgerState, rawEvent: RuntimeEvent): void {
-    if (state.terminalKind) return;
-    if (state.seenEventIds.has(rawEvent.eventId)) return;
+  private acceptRuntimeEvent(state: TurnLedgerState, rawEvent: RuntimeEvent): boolean {
+    if (state.terminalKind) return false;
+    if (rawEvent.requestId !== state.command.requestId || rawEvent.traceId !== state.traceId) return false;
+    if (state.seenEventIds.has(rawEvent.eventId)) return false;
     state.seenEventIds.add(rawEvent.eventId);
+
+    if (GENERATION_EVENT_TYPES.has(rawEvent.type)) {
+      const rawGeneration = safeGeneration(rawEvent.payload.generation);
+      // Before the first interrupt, v1 inner test doubles may omit generation;
+      // after the floor moves, ambiguity is unsafe and therefore suppressed.
+      if (rawGeneration === undefined && state.interruptedGeneration !== undefined) return false;
+      const generation = rawGeneration ?? state.generation;
+      if (state.interruptPending && generation === state.interruptedGeneration) return false;
+      if (generation !== state.generation) return false;
+      const isTerminal = rawEvent.type === "response.completed"
+        || rawEvent.type === "turn.cancelled"
+        || rawEvent.type === "turn.failed"
+        || rawEvent.type === "runtime.error";
+      if (isTerminal && (state.interruptPending
+        || (state.awaitingSteerGeneration !== undefined && !state.steerSubmitted))) return false;
+
+      // The first replacement presentation event proves that the admitted
+      // generation is live. Release only the one-shot steer latch so the same
+      // turn can be interrupted again (1 -> 2 -> 3); the effect floor stays.
+      if (state.steerSubmitted
+        && state.awaitingSteerGeneration === generation
+        && (rawEvent.type === "turn.started"
+          || rawEvent.type === "response.delta"
+          || (rawEvent.type === "runtime.status"
+            && rawEvent.payload.status === "steering_received"))) {
+        delete state.awaitingSteerGeneration;
+        state.steerSubmitted = false;
+      }
+    }
+
+    if (rawEvent.type === "tool.started"
+      || rawEvent.type === "computer.action.requested"
+      || rawEvent.type === "product.action.completed") {
+      if (state.effectsBlocked) return false;
+      state.effectsStarted = true;
+    }
+
     const event = sanitizeClientEvent(enrichEvent(rawEvent, state));
-    if (!event) return;
+    if (!event) return false;
 
     if (event.type === "response.completed") {
+      this.clearInterruptTimeout(state);
       state.terminalKind = "completed";
       state.pendingTerminal = event;
-      return;
+      return true;
     }
     if (event.type === "turn.cancelled") {
+      this.clearInterruptTimeout(state);
       state.terminalKind = "cancelled";
       state.pendingTerminal = event;
-      return;
+      return true;
     }
     if (event.type === "turn.failed" || event.type === "runtime.error") {
+      this.clearInterruptTimeout(state);
       state.terminalKind = "failed";
       state.pendingTerminal = event;
-      return;
+      return true;
     }
 
     // The outer gate wrote the canonical turn.started before invoking the
@@ -1646,18 +2000,18 @@ export class ProductKernelRuntime implements AgentRuntime {
     // but do not create a second durable start record.
     if (event.type === "turn.started") {
       state.emit(event);
-      return;
+      return true;
     }
 
     const projection = projectionFor(event);
     if (!projection) {
       // response.delta intentionally remains a live-only stream.
       state.emit(event);
-      return;
+      return true;
     }
     if (!state.durable) {
       state.emit(event);
-      return;
+      return true;
     }
     void this.enqueueLedger(state, async () => {
       await this.kernel.store.appendConversationEvent({
@@ -1670,6 +2024,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       });
     }).catch(() => undefined);
     state.emit(event);
+    return true;
   }
 
   private async persistCompleted(state: TurnLedgerState, event: RuntimeEvent): Promise<void> {
@@ -2424,9 +2779,25 @@ const SAFE_FAILURE_CODES = new Set([
   "runtime_operation_failed",
   "scripted_failure",
   "steer_failed",
+  "steer_replacement_failed_before_start",
   "task_truth_unavailable",
   "turn_ended_without_terminal",
   "turn_not_active",
+]);
+
+const SAFE_INTERRUPT_REJECTION_CODES = new Set([
+  "duplicate_steer",
+  "effect_started",
+  "effectful_steer",
+  "generation_exhausted",
+  "ineligible_turn",
+  "inner_rejected",
+  "interrupt_in_progress",
+  "stale_generation",
+  "trace_mismatch",
+  "turn_not_active",
+  "turn_terminal",
+  "unsupported",
 ]);
 
 /**
@@ -2443,15 +2814,37 @@ function sanitizeClientEvent(event: RuntimeEvent): RuntimeEvent | undefined {
         "capabilityProfile",
         "provider",
         "model",
+        "generation",
       ]));
-    case "response.delta":
-      return withClientPayload(event, safeVisibleTextPayload(payload.text));
+    case "turn.interrupt.accepted": {
+      const interruptedGeneration = safeGeneration(payload.interruptedGeneration);
+      const nextGeneration = safeGeneration(payload.nextGeneration);
+      if (interruptedGeneration === undefined
+        || nextGeneration !== interruptedGeneration + 1) return undefined;
+      return withClientPayload(event, { interruptedGeneration, nextGeneration });
+    }
+    case "turn.interrupt.rejected": {
+      const generation = safeGeneration(payload.generation);
+      const code = safeMetadata(payload.code);
+      if (generation === undefined || code === undefined
+        || !SAFE_INTERRUPT_REJECTION_CODES.has(code)) return undefined;
+      return withClientPayload(event, { generation, code });
+    }
+    case "response.delta": {
+      const generation = safeGeneration(payload.generation);
+      return withClientPayload(event, {
+        ...safeVisibleTextPayload(payload.text),
+        ...(generation === undefined ? {} : { generation }),
+      });
+    }
     case "response.completed": {
       const safeText = safeVisibleTextPayload(payload.text);
+      const generation = safeGeneration(payload.generation);
       return withClientPayload(event, {
         ...safeText,
         verified: payload.verified === true,
         ...(payload.replayed === true ? { replayed: true } : {}),
+        ...(generation === undefined ? {} : { generation }),
       });
     }
     case "tool.started":
@@ -2461,26 +2854,44 @@ function sanitizeClientEvent(event: RuntimeEvent): RuntimeEvent | undefined {
         "runtime",
         "isError",
         "compatibilityMode",
+        "generation",
       ]));
     case "computer.action.requested": {
       const safeAction = safeComputerActionPayload(payload);
-      return safeAction ? withClientPayload(event, safeAction) : undefined;
+      const generation = safeGeneration(payload.generation);
+      return safeAction ? withClientPayload(event, {
+        ...safeAction,
+        ...(generation === undefined ? {} : { generation }),
+      }) : undefined;
     }
-    case "runtime.status":
-      return withClientPayload(event, safeRuntimeStatusPayload(payload));
+    case "runtime.status": {
+      const generation = safeGeneration(payload.generation);
+      return withClientPayload(event, {
+        ...safeRuntimeStatusPayload(payload),
+        ...(generation === undefined ? {} : { generation }),
+      });
+    }
     case "product.action.completed":
       return withClientPayload(event, safeProductActionPayload(payload));
     case "memory.used":
       return withClientPayload(event, safeMemoryUsedPayload(payload));
     case "turn.cancelled":
+      {
+        const generation = safeGeneration(payload.generation);
       return withClientPayload(event, {
         reason: safeCancellationReason(payload.reason),
+        ...(generation === undefined ? {} : { generation }),
       });
+      }
     case "turn.failed":
     case "runtime.error":
+      {
+        const generation = safeGeneration(payload.generation);
       return withClientPayload(event, {
         code: safeFailureCode(payload.code),
+        ...(generation === undefined ? {} : { generation }),
       });
+      }
     default:
       return undefined;
   }
@@ -2775,6 +3186,21 @@ function safeFailureCode(value: unknown): string {
   return code && SAFE_FAILURE_CODES.has(code) ? code : "runtime_operation_failed";
 }
 
+function mapInnerInterruptRejection(value: unknown): string {
+  switch (safeMetadata(value)) {
+    case "already_interrupted":
+      return "interrupt_in_progress";
+    case "effect_already_dispatched":
+      return "effect_started";
+    case "generation_mismatch":
+      return "stale_generation";
+    case "terminal":
+      return "turn_terminal";
+    default:
+      return "inner_rejected";
+  }
+}
+
 function projectionFor(event: RuntimeEvent): {
   type: "turn.started" | "tool.started" | "tool.completed" | "action.requested" | "action.completed" | "task.updated";
   payload: Record<string, string | number | boolean | null>;
@@ -2783,22 +3209,22 @@ function projectionFor(event: RuntimeEvent): {
     case "turn.started":
       return {
         type: "turn.started",
-        payload: pickSafe(event.payload, ["runtime", "capabilityProfile", "provider", "model"]),
+        payload: pickSafe(event.payload, ["runtime", "capabilityProfile", "provider", "model", "generation"]),
       };
     case "tool.started":
       return {
         type: "tool.started",
-        payload: pickSafe(event.payload, ["toolName", "runtime", "compatibilityMode"]),
+        payload: pickSafe(event.payload, ["toolName", "runtime", "compatibilityMode", "generation"]),
       };
     case "tool.completed":
       return {
         type: "tool.completed",
-        payload: pickSafe(event.payload, ["toolName", "runtime", "isError", "compatibilityMode"]),
+        payload: pickSafe(event.payload, ["toolName", "runtime", "isError", "compatibilityMode", "generation"]),
       };
     case "computer.action.requested":
       return {
         type: "action.requested",
-        payload: pickSafe(event.payload, ["actionId", "effectClass"]),
+        payload: pickSafe(event.payload, ["actionId", "effectClass", "generation"]),
       };
     case "product.action.completed":
       return {
@@ -2808,7 +3234,7 @@ function projectionFor(event: RuntimeEvent): {
     case "runtime.status":
       return {
         type: "task.updated",
-        payload: pickSafe(event.payload, ["status", "stepCount", "toolsUsed", "accepted"]),
+        payload: pickSafe(event.payload, ["status", "stepCount", "toolsUsed", "accepted", "generation"]),
       };
     default:
       return undefined;
@@ -2837,11 +3263,16 @@ function pickSafe(
 }
 
 function enrichEvent(event: RuntimeEvent, state: TurnLedgerState): RuntimeEvent {
+  const payload = asRecord(event.payload);
+  const generation = safeGeneration(payload.generation) ?? state.generation;
   return {
     ...event,
     requestId: state.command.requestId,
     traceId: state.traceId,
     conversationId: state.conversationId as ConversationId,
+    payload: GENERATION_EVENT_TYPES.has(event.type)
+      ? { ...payload, generation }
+      : payload,
   };
 }
 
@@ -2953,6 +3384,14 @@ function safeMetadata(value: unknown): string | undefined {
     .replace(/^_+|_+$/gu, "")
     .slice(0, 120);
   return compact.length > 0 ? compact : undefined;
+}
+
+function safeGeneration(value: unknown): number | undefined {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 1
+    ? value
+    : undefined;
 }
 
 function summarizeOutput(output: unknown): unknown {

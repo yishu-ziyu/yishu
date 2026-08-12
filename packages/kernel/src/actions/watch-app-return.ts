@@ -89,7 +89,13 @@ function assertFreshBoundApplication(
     ? contextFrame.frontmostApplication
     : null
   const application = observed && isRecord(observed.value) ? observed.value : null
-  if (!application || application.bundleIdentifier !== targetBundleId) {
+  if (
+    !application
+    || application.bundleIdentifier !== targetBundleId
+    || typeof observed?.confidence !== "number"
+    || !Number.isFinite(observed.confidence)
+    || observed.confidence < 0.8
+  ) {
     throw new Error("context_watch_frontmost_application_changed")
   }
 }

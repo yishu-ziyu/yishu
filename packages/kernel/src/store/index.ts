@@ -35,6 +35,7 @@ export type {
   MindLearnResult,
   MindSectionWriteInput,
   PromoteSkillOptions,
+  ReplaceOpenConversationTurnInput,
   SkillCandidate,
   SkillCandidateInput,
   SkillStep,

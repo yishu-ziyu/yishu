@@ -23,6 +23,9 @@ for (const mode of ["mock", "pi"] as const) {
     let sawReady = false;
     const requestId = randomUUID();
     const traceId = randomUUID();
+    const interruptRequestId = randomUUID();
+    const interruptTraceId = randomUUID();
+    let sentInterrupt = false;
 
     await new Promise<void>((resolve, reject) => {
       // Full suite load + heavier dependency graph can push cold start past 20s
@@ -67,6 +70,20 @@ for (const mode of ["mock", "pi"] as const) {
           }
 
           if (event.type === "runtime.pong" && event.requestId === requestId) {
+            sentInterrupt = true;
+            child.stdin.write(`${JSON.stringify({
+              schemaVersion: 1,
+              type: "turn.interrupt",
+              requestId: interruptRequestId,
+              traceId: interruptTraceId,
+              sentAt: new Date().toISOString(),
+              payload: { expectedGeneration: 1, reason: "user_barge_in" },
+            })}\n`);
+          }
+
+          if (sentInterrupt
+            && event.type === "turn.interrupt.rejected"
+            && event.requestId === interruptRequestId) {
             clearTimeout(timeout);
             child.kill("SIGTERM");
             resolve();

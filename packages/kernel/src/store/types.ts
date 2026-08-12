@@ -391,6 +391,17 @@ export type ConversationTurnInput = Partial<
   sessionScope?: SessionScope
 }
 
+/**
+ * Same-turn conversational steer. All identity fields must match exactly and
+ * the turn must still be open; callers cannot reopen or rewrite terminal turns.
+ */
+export interface ReplaceOpenConversationTurnInput {
+  conversationId: string
+  turnId: string
+  traceId: string
+  userInput: string
+}
+
 export type ConversationEventInput = Omit<
   ConversationEvent,
   "id" | "sequence" | "occurredAt"

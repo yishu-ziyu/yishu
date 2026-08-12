@@ -39,6 +39,51 @@ test("turn command validates as the shared protocol", () => {
   assert.equal(clientCommandSchema.parse(command).type, "turn.start");
 });
 
+test("barge-in commands bind one exact generation and conversation steer", () => {
+  const requestId = randomUUID();
+  const traceId = randomUUID();
+  const sentAt = new Date().toISOString();
+  const interrupt = {
+    schemaVersion: 1,
+    type: "turn.interrupt",
+    requestId,
+    traceId,
+    sentAt,
+    payload: { expectedGeneration: 1, reason: "user_barge_in" },
+  } as const;
+  const steer = {
+    schemaVersion: 1,
+    type: "turn.steer",
+    requestId,
+    traceId,
+    sentAt,
+    payload: {
+      message: "换一个问题",
+      nextGeneration: 2,
+      interactionClass: "conversation",
+    },
+  } as const;
+
+  assert.equal(clientCommandSchema.parse(interrupt).type, "turn.interrupt");
+  assert.equal(clientCommandSchema.parse(steer).type, "turn.steer");
+  assert.throws(() => clientCommandSchema.parse({
+    ...interrupt,
+    payload: { ...interrupt.payload, expectedGeneration: 0 },
+  }));
+  assert.throws(() => clientCommandSchema.parse({
+    ...interrupt,
+    payload: { ...interrupt.payload, extra: true },
+  }));
+  assert.throws(() => clientCommandSchema.parse({
+    ...steer,
+    payload: { message: steer.payload.message, nextGeneration: 2 },
+  }));
+  assert.throws(() => clientCommandSchema.parse({
+    ...steer,
+    payload: { ...steer.payload, interactionClass: "computer_action" },
+  }));
+});
+
 test("display origins survive protocol validation and trail projection", () => {
   const parsed = clientCommandSchema.parse(makeTurnStartCommand());
   if (parsed.type !== "turn.start") throw new Error("expected turn.start");

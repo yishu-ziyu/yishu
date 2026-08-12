@@ -32,6 +32,7 @@ import type {
   MindLearnResult,
   MindSectionWriteInput,
   PromoteSkillOptions,
+  ReplaceOpenConversationTurnInput,
   SkillCandidate,
   SkillCandidateInput,
   StoreMutationOptions,
@@ -953,6 +954,7 @@ export interface YishuStorePort {
   releaseDelegatedResults(claimTurnId: string): Promise<number>
   upsertConversation(input: ConversationInput): Promise<Conversation>
   upsertConversationTurn(input: ConversationTurnInput): Promise<ConversationTurn>
+  replaceOpenConversationTurnInput(input: ReplaceOpenConversationTurnInput): Promise<boolean>
   appendConversationEvent(input: ConversationEventInput): Promise<ConversationEvent>
   getConversation(id: string): Promise<Conversation | null>
   getConversationTurn(id: string): Promise<ConversationTurn | null>
@@ -1842,6 +1844,30 @@ class YishuStoreCore {
     return cloneTurn(turn)
   }
 
+  replaceOpenConversationTurnInputSync(
+    input: ReplaceOpenConversationTurnInput,
+  ): boolean {
+    this.ensureData()
+    const turn = this.data.turns.find((candidate) => candidate.id === input.turnId)
+    if (
+      !turn
+      || turn.status !== "open"
+      || turn.conversationId !== input.conversationId
+      || turn.traceId !== input.traceId
+    ) {
+      return false
+    }
+    const conversation = this.data.conversations.find(
+      (candidate) => candidate.id === input.conversationId,
+    )
+    if (!conversation) return false
+    const stamp = nowIso()
+    turn.userInput = sanitizeVisibleText(input.userInput, "conversation user input")
+    turn.updatedAt = stamp
+    conversation.updatedAt = stamp
+    return true
+  }
+
   appendConversationEventSync(input: ConversationEventInput): ConversationEvent {
     this.ensureData()
     const conversation = this.data.conversations.find(
@@ -2588,6 +2614,24 @@ export class YishuStore extends YishuStoreCore implements YishuStorePort {
     })
   }
 
+  async replaceOpenConversationTurnInput(
+    input: ReplaceOpenConversationTurnInput,
+  ): Promise<boolean> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const before = cloneSnapshot(this.data)
+      try {
+        const changed = this.replaceOpenConversationTurnInputSync(input)
+        if (changed) await this.saveUnsafe()
+        return changed
+      } catch (error) {
+        this.data = before
+        await this.writeSnapshotUnsafe(before).catch(() => undefined)
+        throw error
+      }
+    })
+  }
+
   async appendConversationEvent(input: ConversationEventInput): Promise<ConversationEvent> {
     return this.enqueue(async () => {
       await this.ensureLoadedUnsafe()
@@ -2969,6 +3013,12 @@ export class InMemoryYishuStore extends YishuStoreCore implements YishuStorePort
 
   async upsertConversationTurn(input: ConversationTurnInput): Promise<ConversationTurn> {
     return this.upsertConversationTurnSync(input)
+  }
+
+  async replaceOpenConversationTurnInput(
+    input: ReplaceOpenConversationTurnInput,
+  ): Promise<boolean> {
+    return this.replaceOpenConversationTurnInputSync(input)
   }
 
   async appendConversationEvent(input: ConversationEventInput): Promise<ConversationEvent> {
