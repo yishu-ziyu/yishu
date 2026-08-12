@@ -103,12 +103,12 @@ enum BuddyNavigationMode {
     case pointingAtTarget
 }
 
-// SwiftUI view for the blue glowing cursor pointer.
+// SwiftUI view for Yishu's cursor-following presence.
 // Each screen gets its own BlueCursorView. The view checks whether
 // the cursor is currently on THIS screen and only shows the buddy
-// triangle when it is. During voice interaction, the triangle is
-// replaced by a waveform (listening), spinner (processing), or
-// streaming text bubble (responding).
+// when it is. Yishu's visible body remains one thinking-orb whose geometry
+// changes with typed product state. Response text stays a separate readable
+// surface attached to that stable body.
 struct BlueCursorView: View {
     let screenFrame: CGRect
     let isFirstAppearance: Bool
@@ -146,10 +146,6 @@ struct BlueCursorView: View {
 
     /// The buddy's current behavioral mode (following cursor, navigating, or pointing).
     @State private var buddyNavigationMode: BuddyNavigationMode = .followingCursor
-
-    /// The rotation angle of the triangle in degrees. Default is -35° (cursor-like).
-    /// Changes to face the direction of travel when navigating to a target.
-    @State private var triangleRotationDegrees: Double = -35.0
 
     /// Speech bubble text shown when pointing at a detected element.
     @State private var navigationBubbleText: String = ""
@@ -312,7 +308,9 @@ struct BlueCursorView: View {
             if buddyIsVisibleOnThisScreen,
                buddyNavigationMode == .followingCursor,
                responseOverlayViewModel.isShowingResponse,
-               companionManager.voiceState != .listening {
+               companionManager.voiceState != .listening,
+               companionManager.voiceState != .processing
+                    || !responseOverlayViewModel.streamingResponseText.isEmpty {
                 CompanionResponsePresenceView(
                     viewModel: responseOverlayViewModel,
                     attachesToRightOfCursor: responseAttachesToRightOfCursor
@@ -336,37 +334,18 @@ struct BlueCursorView: View {
                 }
             }
 
-            // Blue triangle cursor — shown when idle or while TTS is playing (responding).
-            // All three states (triangle, waveform, spinner) stay in the view tree
-            // permanently and cross-fade via opacity so SwiftUI doesn't remove/re-insert
-            // them (which caused a visible cursor "pop").
+            // Yishu has one visible body. Its official thinking-orb geometry
+            // changes with typed voice, runtime, turn, and delegated-work state.
+            // Keeping one view mounted avoids the pop caused by swapping unrelated
+            // waveform, spinner, and cursor implementations.
             //
             // During cursor following: fast spring animation for snappy tracking.
             // During navigation: NO implicit animation — the frame-by-frame bezier
             // timer controls position directly at 60fps for a smooth arc flight.
-            Triangle()
-                .fill(DS.Colors.overlayCursorBlue)
-                .frame(width: 16, height: 16)
-                .rotationEffect(.degrees(triangleRotationDegrees))
-                .shadow(
-                    color: DS.Colors.overlayCursorBlue.opacity(
-                        responseOverlayViewModel.isShowingResponse ? 0.42 : 0.82
-                    ),
-                    radius: (responseOverlayViewModel.isShowingResponse ? 3.5 : 7)
-                        + (buddyFlightScale - 1.0) * 20,
-                    x: 0,
-                    y: 0
-                )
+            YishuThinkingOrbView(state: companionManager.visualState)
+                .frame(width: 20, height: 20)
                 .scaleEffect(buddyFlightScale)
-                .opacity(
-                    buddyIsVisibleOnThisScreen
-                        && (companionManager.voiceState == .idle
-                            || companionManager.voiceState == .responding
-                            || responseOverlayViewModel.isShowingResponse)
-                        && !agentPresenceViewModel.hasTasks
-                        ? cursorOpacity
-                        : 0
-                )
+                .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(
                     buddyNavigationMode == .followingCursor
@@ -374,21 +353,7 @@ struct BlueCursorView: View {
                         : nil,
                     value: cursorPosition
                 )
-                .animation(.easeIn(duration: 0.25), value: companionManager.voiceState)
-                .animation(
-                    buddyNavigationMode == .navigatingToTarget ? nil : .easeInOut(duration: 0.3),
-                    value: triangleRotationDegrees
-                )
-
-            // Blue waveform — replaces the triangle while listening
-            BlueCursorWaveformView(
-                audioPowerLevel: companionManager.currentAudioPowerLevel,
-                expandsRight: cursorPosition.x <= screenFrame.width - 84
-            )
-                .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .listening ? cursorOpacity : 0)
-                .position(cursorPosition)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
+                .animation(.easeInOut(duration: 0.16), value: companionManager.visualState)
 
             // Apple Speech shadow text is a tiny listening-only hint. It is
             // never reused as a final response, TTS input, or computer action.
@@ -409,19 +374,6 @@ struct BlueCursorView: View {
                     )
                     .transition(.opacity)
             }
-
-            // Blue spinner — shown while the AI is processing (transcription + Claude + waiting for TTS)
-            BlueCursorSpinnerView()
-                .opacity(
-                    buddyIsVisibleOnThisScreen
-                        && companionManager.voiceState == .processing
-                        && !responseOverlayViewModel.isShowingResponse
-                        ? cursorOpacity
-                        : 0
-                )
-                .position(cursorPosition)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
         }
         .frame(width: screenFrame.width, height: screenFrame.height)
@@ -562,7 +514,7 @@ struct BlueCursorView: View {
         }
     }
 
-    /// Preserve Clicky's offset from the physical mouse while keeping Hanako's
+    /// Preserve Clicky's offset from the physical mouse while keeping Yishu's
     /// own visible anchor on-screen. The user's cursor remains untouched.
     private func clampedVisibleCursorPosition(for preferredPosition: CGPoint) -> CGPoint {
         let edgeInset: CGFloat = 12
@@ -680,16 +632,6 @@ struct BlueCursorView: View {
 
             self.cursorPosition = CGPoint(x: bezierX, y: bezierY)
 
-            // Rotation: face the direction of travel by computing the tangent
-            // to the bezier curve. B'(t) = 2(1-t)(P1-P0) + 2t(P2-P1)
-            let tangentX = 2.0 * oneMinusT * (controlPoint.x - startPosition.x)
-                         + 2.0 * t * (endPosition.x - controlPoint.x)
-            let tangentY = 2.0 * oneMinusT * (controlPoint.y - startPosition.y)
-                         + 2.0 * t * (endPosition.y - controlPoint.y)
-            // +90° offset because the triangle's "tip" points up at 0° rotation,
-            // and atan2 returns 0° for rightward movement
-            self.triangleRotationDegrees = atan2(tangentY, tangentX) * (180.0 / .pi) + 90.0
-
             // Scale pulse: sin curve peaks at midpoint of the flight.
             // Buddy grows to ~1.3x at the apex, then shrinks back to 1.0x on landing.
             let scalePulse = sin(linearProgress * .pi)
@@ -701,9 +643,6 @@ struct BlueCursorView: View {
     /// scale-in entrance and variable-speed character streaming.
     private func startPointingAtElement() {
         buddyNavigationMode = .pointingAtTarget
-
-        // Rotate back to default pointer angle now that we've arrived
-        triangleRotationDegrees = -35.0
 
         // Reset navigation bubble state — start small for the scale-bounce entrance
         navigationBubbleText = ""
@@ -794,7 +733,6 @@ struct BlueCursorView: View {
         navigationAnimationTimer = nil
         buddyNavigationMode = .followingCursor
         isReturningToCursor = false
-        triangleRotationDegrees = -35.0
         buddyFlightScale = 1.0
         navigationBubbleText = ""
         navigationBubbleOpacity = 0.0
@@ -832,222 +770,67 @@ struct BlueCursorView: View {
     }
 }
 
-// MARK: - Blue Cursor Waveform
+// MARK: - Yishu Thinking Orb
 
-/// A slim spectral ribbon that grows from the triangle while the user speaks.
-/// The existing microphone envelope controls bend and color separation.
-private struct BlueCursorWaveformView: View {
-    let audioPowerLevel: CGFloat
-    let expandsRight: Bool
+/// The official 20 px thinking-orbs visual vocabulary. Every agent state uses
+/// the same transparent dots-and-lines body, so state changes read as one
+/// continuous Yishu presence rather than a collection of unrelated indicators.
+struct YishuThinkingOrbView: View {
+    let state: YishuVisualState
 
-    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
-    @State private var followedAudioPowerLevel: CGFloat = 0
-
-    private let ribbonWidth: CGFloat = 64
-    private let ribbonHeight: CGFloat = 26
-    private let spectralColors: [Color] = [
-        DS.Colors.overlaySpectralAmber,
-        DS.Colors.overlaySpectralPink,
-        DS.Colors.overlaySpectralMagenta,
-        DS.Colors.overlaySpectralViolet,
-        DS.Colors.overlayCursorBlue
-    ]
-    private let spectralPhaseOffsets: [CGFloat] = [0.95, 0.48, 0, -0.48, -0.95]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        ZStack {
-            TimelineView(.animation(minimumInterval: 1.0 / 36.0)) { timelineContext in
-                Canvas(rendersAsynchronously: true) { graphicsContext, canvasSize in
-                    let animationTime = accessibilityReduceMotion
-                        ? 0
-                        : timelineContext.date.timeIntervalSinceReferenceDate
+        TimelineView(.animation(minimumInterval: reduceMotion ? 1 : 1.0 / 30.0)) { timeline in
+            let time = reduceMotion
+                ? YishuBreathingOrbGeometry.reducedMotionTime
+                : timeline.date.timeIntervalSinceReferenceDate
+                    * YishuBreathingOrbGeometry.speed(for: state.orbState)
+            let frame = YishuBreathingOrbGeometry.frame(
+                state: state.orbState,
+                time: time
+            )
 
-                    for spectralIndex in spectralColors.indices {
-                        let spectralPath = ribbonPath(
-                            in: canvasSize,
-                            animationTime: animationTime,
-                            spectralPhaseOffset: spectralPhaseOffsets[spectralIndex],
-                            audioPowerLevel: followedAudioPowerLevel
+            Canvas { context, _ in
+                for line in frame.lines {
+                    var path = Path()
+                    path.move(to: CGPoint(x: line.x1, y: line.y1))
+                    path.addLine(to: CGPoint(x: line.x2, y: line.y2))
+                    context.stroke(
+                        path,
+                        with: .color(orbColor(white: line.white, alpha: line.alpha)),
+                        style: StrokeStyle(
+                            lineWidth: line.width,
+                            lineCap: .round,
+                            lineJoin: .round
                         )
-                        let spectralColor = spectralColors[spectralIndex]
-                        let spectralGradient = Gradient(stops: [
-                            .init(color: spectralColor.opacity(0), location: 0),
-                            .init(
-                                color: spectralColor.opacity(0.72 + followedAudioPowerLevel * 0.2),
-                                location: 0.17
-                            ),
-                            .init(
-                                color: spectralColor.opacity(0.72 + followedAudioPowerLevel * 0.2),
-                                location: 0.78
-                            ),
-                            .init(color: spectralColor.opacity(0), location: 1)
-                        ])
-                        let spectralGlowGradient = Gradient(stops: [
-                            .init(color: spectralColor.opacity(0), location: 0),
-                            .init(
-                                color: spectralColor.opacity(0.28 + followedAudioPowerLevel * 0.14),
-                                location: 0.17
-                            ),
-                            .init(
-                                color: spectralColor.opacity(0.28 + followedAudioPowerLevel * 0.14),
-                                location: 0.78
-                            ),
-                            .init(color: spectralColor.opacity(0), location: 1)
-                        ])
-
-                        graphicsContext.drawLayer { glowContext in
-                            glowContext.addFilter(.blur(radius: 3.2))
-                            glowContext.stroke(
-                                spectralPath,
-                                with: .linearGradient(
-                                    spectralGlowGradient,
-                                    startPoint: CGPoint(x: 0, y: canvasSize.height / 2),
-                                    endPoint: CGPoint(x: canvasSize.width, y: canvasSize.height / 2)
-                                ),
-                                style: StrokeStyle(lineWidth: 4.2, lineCap: .round, lineJoin: .round)
-                            )
-                        }
-
-                        graphicsContext.stroke(
-                            spectralPath,
-                            with: .linearGradient(
-                                spectralGradient,
-                                startPoint: CGPoint(x: 0, y: canvasSize.height / 2),
-                                endPoint: CGPoint(x: canvasSize.width, y: canvasSize.height / 2)
-                            ),
-                            style: StrokeStyle(lineWidth: 1.15, lineCap: .round, lineJoin: .round)
-                        )
-                    }
-
-                    let whiteCorePath = ribbonPath(
-                        in: canvasSize,
-                        animationTime: animationTime,
-                        spectralPhaseOffset: 0,
-                        audioPowerLevel: followedAudioPowerLevel
-                    )
-                    graphicsContext.stroke(
-                        whiteCorePath,
-                        with: .linearGradient(
-                            Gradient(stops: [
-                                .init(color: Color.white.opacity(0), location: 0),
-                                .init(color: Color.white.opacity(0.92), location: 0.13),
-                                .init(color: Color.white.opacity(0.92), location: 0.84),
-                                .init(color: Color.white.opacity(0), location: 1)
-                            ]),
-                            startPoint: CGPoint(x: 0, y: canvasSize.height / 2),
-                            endPoint: CGPoint(x: canvasSize.width, y: canvasSize.height / 2)
-                        ),
-                        style: StrokeStyle(lineWidth: 1.05, lineCap: .round, lineJoin: .round)
                     )
                 }
-                .frame(width: ribbonWidth, height: ribbonHeight)
-            }
-            .frame(width: ribbonWidth, height: ribbonHeight)
-            .scaleEffect(x: expandsRight ? 1 : -1, y: 1)
-            .offset(x: expandsRight ? ribbonWidth / 2 : -ribbonWidth / 2)
 
-            Triangle()
-                .fill(DS.Colors.overlayCursorBlue)
-                .frame(width: 8, height: 8)
-                .rotationEffect(.degrees(expandsRight ? -35 : 35))
-                .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.48), radius: 2.5, x: 0, y: 0)
-        }
-        .frame(width: 16, height: ribbonHeight)
-        .onAppear {
-            followedAudioPowerLevel = normalizedAudioPowerLevel
-        }
-        .onChange(of: audioPowerLevel) { _ in
-            let nextAudioPowerLevel = normalizedAudioPowerLevel
-            if nextAudioPowerLevel >= followedAudioPowerLevel {
-                followedAudioPowerLevel = followedAudioPowerLevel * 0.18 + nextAudioPowerLevel * 0.82
-            } else {
-                followedAudioPowerLevel = followedAudioPowerLevel * 0.88 + nextAudioPowerLevel * 0.12
+                for dot in frame.dots {
+                    let ink = min(1, max(0, dot.white))
+                    let grayscale = colorScheme == .dark ? 1 - ink : ink
+                    let rect = CGRect(
+                        x: dot.x - dot.radius,
+                        y: dot.y - dot.radius,
+                        width: dot.radius * 2,
+                        height: dot.radius * 2
+                    )
+                    context.fill(
+                        Path(ellipseIn: rect),
+                        with: .color(Color(white: grayscale).opacity(dot.alpha))
+                    )
+                }
             }
         }
-        .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 
-    private var normalizedAudioPowerLevel: CGFloat {
-        let noiseReducedAudioPowerLevel = max(audioPowerLevel - 0.008, 0)
-        return pow(min(noiseReducedAudioPowerLevel * 2.85, 1), 0.76)
-    }
-
-    private func ribbonPath(
-        in canvasSize: CGSize,
-        animationTime: TimeInterval,
-        spectralPhaseOffset: CGFloat,
-        audioPowerLevel: CGFloat
-    ) -> Path {
-        var path = Path()
-        let sampleCount = 72
-
-        for sampleIndex in 0...sampleCount {
-            let horizontalProgress = CGFloat(sampleIndex) / CGFloat(sampleCount)
-            let horizontalInset: CGFloat = 3
-            let horizontalPosition = horizontalInset
-                + horizontalProgress * (canvasSize.width - horizontalInset * 2)
-            let taperedEnvelope = pow(max(sin(.pi * horizontalProgress), 0), 1.12)
-            let baseAmplitude = 1.15 + audioPowerLevel * 6.2
-            let animatedPhase = CGFloat(animationTime * 2.45)
-            let colorSeparation = spectralPhaseOffset * (0.22 + audioPowerLevel * 0.92)
-            let primaryWave = sin(
-                horizontalProgress * .pi * 3.15
-                    + animatedPhase
-                    + colorSeparation
-            )
-            let secondaryWave = sin(
-                horizontalProgress * .pi * 6.4
-                    - animatedPhase * 0.58
-                    + colorSeparation * 1.7
-            ) * 0.26
-            let verticalSeparation = spectralPhaseOffset
-                * (0.55 + audioPowerLevel * 3.7)
-                * taperedEnvelope
-            let verticalPosition = canvasSize.height / 2
-                + (primaryWave + secondaryWave) * baseAmplitude * taperedEnvelope
-                + verticalSeparation
-
-            let point = CGPoint(x: horizontalPosition, y: verticalPosition)
-            if sampleIndex == 0 {
-                path.move(to: point)
-            } else {
-                path.addLine(to: point)
-            }
-        }
-
-        return path
-    }
-}
-
-// MARK: - Blue Cursor Spinner
-
-/// A small blue spinning indicator that replaces the triangle cursor
-/// while the AI is processing a voice input.
-private struct BlueCursorSpinnerView: View {
-    @State private var isSpinning = false
-
-    var body: some View {
-        Circle()
-            .trim(from: 0.15, to: 0.85)
-            .stroke(
-                AngularGradient(
-                    colors: [
-                        DS.Colors.overlayCursorBlue.opacity(0.0),
-                        DS.Colors.overlayCursorBlue
-                    ],
-                    center: .center
-                ),
-                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
-            )
-            .frame(width: 14, height: 14)
-            .rotationEffect(.degrees(isSpinning ? 360 : 0))
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
-            .onAppear {
-                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
-                    isSpinning = true
-                }
-            }
+    private func orbColor(white: Double, alpha: Double) -> Color {
+        let ink = min(1, max(0, white))
+        let grayscale = colorScheme == .dark ? 1 - ink : ink
+        return Color(white: grayscale).opacity(alpha)
     }
 }
 
