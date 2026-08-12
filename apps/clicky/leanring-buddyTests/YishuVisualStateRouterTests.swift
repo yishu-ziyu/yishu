@@ -95,6 +95,49 @@ struct YishuVisualStateRouterTests {
         )) == .shaping)
     }
 
+    @Test func foregroundTurnPhasesWinOverConcurrentDelegatedWork() {
+        let expectations: [(YishuTurnVisualPhase, YishuVisualState)] = [
+            (.observingContext, .searching),
+            (.reasoning, .solving),
+            (.usingTool, .working),
+            (.composingResponse, .composing),
+            (.shapingOutput, .shaping),
+        ]
+
+        for (turnPhase, visualState) in expectations {
+            #expect(YishuVisualStateRouter.route(YishuVisualStateInputs(
+                voiceState: .processing,
+                turnPhase: turnPhase,
+                delegatedPresence: .activeWorkerCount(3)
+            )) == visualState)
+        }
+    }
+
+    @Test func realTypedEventLifecycleDrivesEveryObservableVisualPhase() {
+        var machine = YishuVisualStateMachine()
+        #expect(machine.visualState(voiceState: .idle, delegatedTasks: []) == .breathing)
+
+        machine.setRuntimePhase(.connecting)
+        #expect(machine.visualState(voiceState: .idle, delegatedTasks: []) == .connecting)
+        machine.apply(runtimeEvent: .ready(mode: "pi"))
+        #expect(machine.visualState(voiceState: .listening, delegatedTasks: []) == .listening)
+
+        machine.setTurnPhase(.finalizingSpeech)
+        #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .composing)
+        machine.setTurnPhase(.observingContext)
+        #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .searching)
+        machine.apply(turnEvent: .started)
+        #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .solving)
+        machine.apply(turnEvent: .toolStarted("search"))
+        #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .working)
+        machine.apply(turnEvent: .responseDelta("你好"))
+        #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .composing)
+        machine.apply(turnEvent: .completed(text: "好了", verified: true))
+        #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .shaping)
+        machine.setTurnPhase(.idle)
+        #expect(machine.visualState(voiceState: .idle, delegatedTasks: []) == .breathing)
+    }
+
     private func delegatedTask(
         status: YishuDelegatedTaskStatus,
         updatedAt: Date,

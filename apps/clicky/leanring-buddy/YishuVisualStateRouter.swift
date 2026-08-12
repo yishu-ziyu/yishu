@@ -83,29 +83,60 @@ enum YishuDelegatedPresenceVisualPhase: Equatable {
     }
 }
 
+/// Stateful adapter between the shell's typed lifecycle events and the pure
+/// visual router. CompanionManager uses this same type that tests exercise, so
+/// event propagation is not verified through a separate test-only mapping.
+struct YishuVisualStateMachine: Equatable {
+    private(set) var runtimePhase: YishuRuntimeVisualPhase = .idle
+    private(set) var turnPhase: YishuTurnVisualPhase = .idle
+
+    mutating func setRuntimePhase(_ phase: YishuRuntimeVisualPhase) {
+        runtimePhase = phase
+    }
+
+    mutating func apply(runtimeEvent: YishuRuntimeLifecycleEvent) {
+        runtimePhase = YishuVisualStateRouter.route(runtimeEvent: runtimeEvent)
+    }
+
+    mutating func setTurnPhase(_ phase: YishuTurnVisualPhase) {
+        turnPhase = phase
+    }
+
+    mutating func apply(turnEvent: YishuRuntimeTurnEvent) {
+        turnPhase = YishuVisualStateRouter.route(turnEvent: turnEvent)
+    }
+
+    func visualState(
+        voiceState: CompanionVoiceState,
+        delegatedTasks: [YishuDelegatedTaskPresenceEvent]
+    ) -> YishuVisualState {
+        YishuVisualStateRouter.route(YishuVisualStateInputs(
+            voiceState: voiceState,
+            runtimePhase: runtimePhase,
+            turnPhase: turnPhase,
+            delegatedPresence: YishuVisualStateRouter.route(delegatedTasks: delegatedTasks)
+        ))
+    }
+}
+
 enum YishuVisualStateRouter {
     static func route(_ inputs: YishuVisualStateInputs) -> YishuVisualState {
-        if inputs.voiceState == .listening {
-            return .listening
-        }
-
-        if inputs.voiceState == .responding {
-            return .shaping
-        }
-
-        if inputs.delegatedPresence.hasActiveWork {
-            return .weaving
-        }
-
         switch inputs.voiceState {
         case .listening:
             return .listening
         case .responding:
             return .shaping
         case .processing:
+            // A foreground turn is the interaction the user is currently
+            // watching. Background workers must not mask its searching,
+            // reasoning, tool, composing, or shaping phase.
             return routeTurnPhase(inputs.turnPhase)
         case .idle:
             break
+        }
+
+        if inputs.delegatedPresence.hasActiveWork {
+            return .weaving
         }
 
         if inputs.runtimePhase == .connecting {
