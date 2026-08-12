@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: c268654 2026-08-13
+Verified: 209de51 2026-08-13
 Review: apps/ 或 packages/ 结构、ownership、数据流变化时
 
 ```text
@@ -148,9 +148,17 @@ Computer actions use the same boundary: Pi emits a typed `computer.action.reques
 
 Pure conversation deltas may enter a fail-closed, sentence-level serial TTS
 pipeline before model completion. Tool markup, ambiguous partial syntax, and
-all desktop-effect utterances remain final-only. PTT stops audio immediately
-and cancels the turn; generation-aware same-turn steer is not yet a shipping
-claim.
+all desktop-effect utterances remain final-only. A PTT keydown immediately
+stops old audio and clears old presentation. When the interrupted turn is pure
+conversation and no desktop effect has begun, the accepted transcript may
+continue in the same Pi session as the next generation. Screen-dependent,
+effectful, or uncertain input cancels that path and starts a new turn from a
+fresh ContextFrame. Runtime generation/effect fences and Clicky's voice-turn,
+presentation, and actuator ownership guards independently drop stale output
+and block stale desktop effects. This is not provider-token preemption: Pi
+switches at a safe assistant/tool-batch boundary, while the user-facing audio
+and presentation switch immediately. The physical PTT path still requires
+human acceptance.
 
 The shipping action set includes verified `left_click`, a Finder-only typed
 `finder_history_back`, and `set_text` on the currently focused writable AX

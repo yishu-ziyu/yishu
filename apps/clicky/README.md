@@ -21,7 +21,14 @@ The app keeps the existing Clicky interaction contract:
 - one durable application-return reminder that waits for a post-creation
   departure, arms, and returns exactly once when the user comes back;
 - sentence-level serial TTS for pure conversation, with desktop-effect turns
-  held final-only and PTT interruption restarted from fresh context;
+  held final-only; a PTT keydown immediately stops old audio and old
+  presentation;
+- same-session continuation only while the interrupted turn is pure
+  conversation and no desktop effect has begun; screen-dependent, effectful,
+  or uncertain input starts a new turn from fresh context;
+- independent Runtime and Clicky ownership fences drop stale output and block
+  stale desktop effects; the model switches at a safe reply boundary, not at
+  an arbitrary provider token;
 - stable `com.yishu.yishu-buddy` signing/TCC identity and
   `/Applications/Clicky.app` install path.
 
@@ -55,6 +62,7 @@ pretending the task stopped.
 
 See [PROVENANCE.md](PROVENANCE.md) for the import boundary and source
 snapshot. A build or real-device interaction is not implied by this source
-import; task-card clicks, `SystemSequence` layout, physical push-to-talk, TTS,
-signing/TCC continuity, restart delivery, and visible final state still require
-the normal human Yishu acceptance checks.
+import; task-card clicks, `SystemSequence` layout, physical push-to-talk,
+same-session interruption cutover, TTS, signing/TCC continuity, restart
+delivery, and visible final state still require the normal human Yishu
+acceptance checks.

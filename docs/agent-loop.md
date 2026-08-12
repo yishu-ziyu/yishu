@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: c268654 2026-08-13
+Verified: 209de51 2026-08-13
 Review: Pi SDK 版本、九阶段产品规则、Runtime 工厂、Kernel 真相边界或 AgentCore 定位变化时
 
 ## 结论
@@ -54,7 +54,8 @@ flowchart LR
 - Pi 的 session persistence 是可用 SDK 能力，但正式产品仍故意使用 in-memory Pi session；Kernel 是唯一恢复真相。
   冷启动时 Runtime 会从同 scope / conversation 的 durable completed turns 有界回填可见对话，热 session 不重复注入；子 session 终态后仍立即释放，不把 Pi JSONL 当产品状态。
 - 后台委派已能在用户空闲时主动回访并保留后续指代。明确说“我下次切回这个应用时，提醒我…”也已形成持久的一次性 initiative：离开后 armed、返回后原子完成并主动播报一次；它仍不是通用时间/外部状态 scheduler。
-- 普通纯对话已按安全句界串行 TTS，首个完整句可在模型终态前开口，终态只补未播尾句；桌面动作意图仍 final-only。二次 PTT 会立即停播并 cancel，以新 ContextFrame 从新 turn 开始；同 turn 的 generation-aware 全双工 barge-in/steer 尚未实现。
+- 普通纯对话已按安全句界串行 TTS，首个完整句可在模型终态前开口，终态只补未播尾句；桌面动作意图仍 final-only。二次 PTT 按下会立即停掉旧语音并撤下旧显示。若旧轮仍是纯对话且尚无桌面效果，新话在同一会话中接成下一段；只要涉及屏幕、动作或无法确定，便取消旧轮，重新采集现场并开始新轮。Runtime 的代际/动作门与 Clicky 的语音轮次/展示/执行所有权共同隔离旧回答与旧动作。
+- 这不是底层模型逐字即时中断：切换发生在安全的回答边界，用户听到和看到的切换则是立即的。真人 Control + Option PTT 整链仍待人工验收。
 
 ## AgentCore 处置
 
