@@ -118,7 +118,6 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var visualState: YishuVisualState = .breathing
     @Published private(set) var lastTranscript: String?
     @Published private(set) var livePartialTranscript = ""
-    @Published private(set) var currentAudioPowerLevel: CGFloat = 0
     @Published private(set) var hasAccessibilityPermission = false
     @Published private(set) var hasScreenRecordingPermission = false
     @Published private(set) var hasMicrophonePermission = false
@@ -236,6 +235,9 @@ final class CompanionManager: ObservableObject {
     private var turnVisualPhase: YishuTurnVisualPhase = .idle {
         didSet { updateVisualState() }
     }
+    #if DEBUG
+    private var visualStateDemoOverride: YishuVisualState?
+    #endif
     /// At most one computer action may be consumed for a voice turn. A Pi
     /// response can still contain a point tag after its action event; that tag
     /// must not replay the same click in `presentVoiceResponse`.
@@ -254,7 +256,6 @@ final class CompanionManager: ObservableObject {
 
     private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
-    private var audioPowerCancellable: AnyCancellable?
     private var delegatedPresenceCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
@@ -284,7 +285,12 @@ final class CompanionManager: ObservableObject {
     }
 
     private var routedVisualState: YishuVisualState {
-        YishuVisualStateRouter.route(YishuVisualStateInputs(
+        #if DEBUG
+        if let visualStateDemoOverride {
+            return visualStateDemoOverride
+        }
+        #endif
+        return YishuVisualStateRouter.route(YishuVisualStateInputs(
             voiceState: voiceState,
             runtimePhase: runtimeVisualPhase,
             turnPhase: turnVisualPhase,
@@ -821,7 +827,6 @@ final class CompanionManager: ObservableObject {
         print("🔑 奕枢 start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
-        bindAudioPowerLevel()
         bindShortcutTransitions()
         bindVoiceProxyAvailability()
         bindDelegatedPresenceObservation()
@@ -931,6 +936,15 @@ final class CompanionManager: ObservableObject {
         }
 
         ensureOverlayVisibleForVoiceFeedback()
+        if let requestedState = YishuVisualState(rawValue: requestedDemo) {
+            visualStateDemoOverride = requestedState
+            updateVisualState()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.updateVisualState()
+            }
+            return
+        }
+
         switch requestedDemo {
         case "response":
             voiceState = .responding
@@ -948,7 +962,6 @@ final class CompanionManager: ObservableObject {
         case "listening":
             responseOverlayManager.hideOverlay()
             isPushToTalkKeyHeld = true
-            currentAudioPowerLevel = 0.64
             voiceState = .listening
         default:
             break
@@ -1079,7 +1092,6 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
-        audioPowerCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
     }
@@ -1199,14 +1211,6 @@ final class CompanionManager: ObservableObject {
                 self?.refreshAllPermissions()
             }
         }
-    }
-
-    private func bindAudioPowerLevel() {
-        audioPowerCancellable = buddyDictationManager.$currentAudioPowerLevel
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] powerLevel in
-                self?.currentAudioPowerLevel = powerLevel
-            }
     }
 
     private func bindVoiceStateObservation() {
