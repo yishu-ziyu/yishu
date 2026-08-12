@@ -2,7 +2,7 @@
 
 Type: debt
 Status: current
-Verified: 2cfddf1 2026-08-11
+Verified: 4b1e3b1 2026-08-12
 Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 使用规则：
@@ -123,18 +123,18 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 - revisit trigger: 触及语音转写 provider 选择路径，或决定启用 / 移除 AssemblyAI 时。
 - severity: low
 
-## debt-016: Result Inbox 为内存态，重启后丢失
+## debt-016: Result Inbox 跨后端重开回归矩阵不完整
 
-- what: Delegated Execution V1 的 `ResultInbox` 保存在进程内存中；App 重启后，已完成但尚未被 Main turn 消费的 child result 会丢失（TaskTruth 中的任务终态仍在，但结果摘要不会再注入对话）。
-- why deferred: V1 只需证明异步 delegation 语义成立；持久化 inbox 涉及跨重启交付语义与 scheduler crash recovery，属下一阶段。
-- evidence: `packages/runtime/src/delegation.ts` `ResultInbox`（`private readonly entries = new Map<string, DelegatedResult[]>()`，无持久化后端）
-- revisit trigger: 需要跨重启交付结果，或实现 scheduler crash recovery 时。
-- severity: medium
+- what: Result Inbox 已从 Runtime 内存迁入 Kernel store，并有 SQLite / JSON 持久化、claim / ack / release 与 startup orphan fail-closed recovery；但尚缺一组具名回归，用同一契约逐一覆盖 memory / JSON / SQLite 的 reopen + claim / ack / release 矩阵。
+- why deferred: 产品路径和现有全套 Kernel / Runtime 回归已通过；当前优先功能与短周期迭代，不为已有合同重复堆大量测试。
+- evidence: `packages/kernel/src/store/yishu-store.ts` 与 `sqlite-store.ts` 的 delegated result API；`packages/runtime/src/product-kernel-runtime.ts` 的 terminal ack / failure release / startup recovery；现有 suite 覆盖 facade 和存储 reopen/migration，但不是完整三后端状态矩阵。
+- revisit trigger: 修改 delegated result schema、store migration、claim 语义或重启交付路径时；或真实重启验收出现重复 / 丢失时。
+- severity: low
 
-## debt-017: delegated child session 在 adapter 缓存中累积
+## debt-017: delegated child session release 缺少穷举生命周期回归
 
-- what: 每次 delegation 使用全新 uuid conversationId，`PiRuntimeAdapter.sessions` 缓存随之单调增长，child session 只有 adapter dispose 时才释放；长时间运行且频繁 delegation 会累积内存与历史。
-- why deferred: V1 只需证明语义正确；按 delegation 频率增长速度有限，session 生命周期管理（LRU / 完成即释放）属下一阶段统一设计。
-- evidence: `packages/runtime/src/pi-runtime-adapter.ts` `sessionFor()`（`this.sessions.set(sessionKey, session)`，无逐会话释放路径）、`packages/runtime/src/delegation.ts` `acceptDelegation()`（每次 `randomUUID()` 新 conversationId）
-- revisit trigger: delegation 频率显著上升、出现内存压力，或实现 session 生命周期管理时。
+- what: `DelegationCoordinator` 已在 child promise 的 `finally` 中按 conversationId 调用 `PiRuntimeAdapter.releaseConversationSession()`，实现终态后精确释放；但尚缺一项回归，穷举 success / failed / cancel / exception / dispose 后都断言 child cache 尺寸不增长。
+- why deferred: 生产接线和全套 Runtime 回归已通过；保留一项聚焦的测试债，不扩展成重复的终态组合测试。
+- evidence: `packages/runtime/src/delegation.ts` 的 child `finally`，`packages/runtime/src/pi-runtime-adapter.ts` 的 `releaseConversationSession()`；现有 suite 已跑通实际 child session 创建边界，但未穷举各类终态的 cache non-growth。
+- revisit trigger: 修改 delegation 终态、cancel / dispose、Pi session cache 或 child promise 生命周期时；或出现 session 累积证据时。
 - severity: low

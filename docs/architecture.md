@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: 23b2e07 2026-08-11
+Verified: 4b1e3b1 2026-08-12
 Review: apps/ 或 packages/ 结构、ownership、数据流变化时
 
 ```text
@@ -89,18 +89,23 @@ projection linked by the same turn ID, so a conversation is not mistaken for a
 task.
 
 The shipping concurrency boundary is one Clicky-managed sidecar using SQLite.
-The ledger is not yet a distributed execution lease: multiple runtime processes
-must not share one request ID, and the JSON backend is a single-process
-development fallback rather than a multi-process store. A future process lease
-is required before multi-runtime execution can claim exactly-once semantics.
+Desktop actions share one process-local token/epoch lease and fail busy without
+queueing when another action owns the desktop. This prevents two action ports
+inside the same runtime process from driving the desktop concurrently; it is not
+a distributed execution lease. Multiple runtime processes must not share one
+request ID, and the JSON backend remains a single-process development fallback.
+Multi-process or distributed exactly-once execution remains outside the current
+contract.
 
 The durable ledger stores user-visible input, final assistant output, and a
 small allowlist of typed receipts/status metadata. Streaming deltas, tool
 arguments, screenshots, audio, hidden reasoning, credentials, and arbitrary
 provider payloads are not persisted. Clicky now provides personal history
 list/open/delete, personal memory list/forget, and bounded scoped memory recall.
-Project management UI, conflict/expiry review, export, and durable delegated
-result delivery remain incomplete.
+Project management UI, conflict/expiry review, and export remain incomplete.
+Delegated result delivery is durable in the SQLite and JSON stores: one Main
+turn claims pending results, acknowledges them only after its terminal turn is
+durable, and releases the claim on failure or cancellation.
 
 Agent Native is a design-methodology source only, not a Swift or Node
 dependency. We borrow the shape of one typed Action, a fresh
@@ -125,19 +130,27 @@ An explicit click on a visually named control first goes through a deterministic
 ### Task truth boundary
 
 `ProductKernelRuntime` observes typed runtime events but does not let Pi own
-task state. The first `tool.started` or `computer.action.requested` creates a
-Kernel progress signal; Kernel's `TaskTruthProjector` applies lifecycle,
-privacy, evidence bounds, and persistence policy. `response.completed` reaches
-`done` only with `verified: true`; otherwise the task stays `blocked`. Pure
-conversation and local product actions do not manufacture `TaskTruth`—the
-latter already return a product-owned `ActionReceipt`.
+task state. Each request receives one immutable `TaskExecutionContract` with
+objective, success mode, authority, risk, and one product attempt. The first
+`tool.started` or `computer.action.requested` creates a Kernel progress signal;
+Kernel's `TaskTruthProjector` applies lifecycle, privacy, evidence bounds, and
+persistence policy. A read-only task reaches `completed` only with a non-empty
+deliverable. An external effect reaches `verified` only from a process-trusted
+actuator receipt or fresh read-back; wire-provided `verified: true` alone is not
+trusted. Everything else stays `blocked`. Pure conversation and local product
+actions do not manufacture `TaskTruth`—the latter already return a
+product-owned `ActionReceipt`.
 
 Pi and protocol test doubles remain replaceable event producers. Cancellation
 closes the request before delayed events can create or reopen a task, and
 runtime disposal waits for active event producers before the final store
-flush. The delegated-execution branch now projects parent-linked TaskTruth into
-Clicky Agent Presence. Durable result acknowledgement, restart recovery, and a
-reopenable task result surface remain later product work.
+flush. Parent-linked delegated TaskTruth and its Result Inbox are persisted
+atomically. On restart, a claimed result is acknowledged when its claiming Main
+turn is already durably completed, otherwise it is released; an orphan running
+child is marked failed with a durable result and is never auto-rerun. Every
+terminal, cancellation, and exception path releases that child's Pi session.
+This is fail-closed recovery, not checkpoint resume. Clicky restores a typed
+task snapshot and can reopen the stored summary and SystemSequence projection.
 
 ## Capability profiles
 
@@ -164,9 +177,9 @@ Current exceptions are tracked as migration work rather than alternate architect
 
 - Clicky's direct `/chat` fallback and short `conversationHistory` cache;
 - Swift-owned named-click decision/execution before Kernel routing;
-- Runtime-memory delegated Result Inbox;
 - Runtime calls into Kernel's raw store instead of a product service facade;
-- AgentCore's optional runtime path and transitive shipping dependency.
+- project UI, conflict/expiry review, and export;
+- durable skill replay, initiative adoption, and distributed execution control.
 
 New capabilities must not copy these exceptions. They enter through a Kernel
 capability and one typed execution port, then prove their final visible result.
