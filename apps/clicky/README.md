@@ -18,8 +18,16 @@ The app keeps the existing Clicky interaction contract:
   acknowledged cancellation and event-backed `SystemSequence` steps;
 - one quiet-window return of a terminal background result beside the cursor,
   without creating a fake turn or consuming its follow-up context;
-- one durable application-return reminder that waits for a post-creation
-  departure, arms, and returns exactly once when the user comes back;
+- one-shot reminders: an application-return reminder waits for a
+  post-creation departure and returns exactly once, while an explicit relative
+  “X minutes/hours from now” reminder uses the system notification so it still
+  arrives through sleep, exit, or restart; first-time notification permission
+  is not reported as set until the pending request is read back exactly, and
+  an unknown result is never retried. Reminder delivery shows the foreground
+  banner immediately, speaks once after the quiet window without losing it
+  across conversations, and never replays from a history click or PTT
+  interruption; absolute dates, repeats, list/edit/delete, and the real
+  voice-at-due-time chain remain human-acceptance gaps;
 - sentence-level serial TTS for pure conversation, with desktop-effect turns
   held final-only; a PTT keydown immediately stops old audio and old
   presentation;

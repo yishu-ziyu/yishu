@@ -340,6 +340,137 @@ test("an explicit Notes request creates once, requires read-back, and never star
   assert.equal(JSON.stringify(safeReceipt?.payload).includes(content), false);
 });
 
+test("an explicit relative reminder schedules once, requires system read-back, and keeps its body private", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const actions: unknown[] = [];
+  const port: ComputerUsePort = {
+    async perform(action) {
+      actions.push(action);
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_system_notification",
+        method: "native_command",
+        message: "System reminder was read back.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  let innerStarts = 0;
+  const inner: AgentRuntime = {
+    async startTurn() { innerStarts += 1; },
+    async steerTurn() {},
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const runtime = new ProductKernelRuntime(inner, kernel, port);
+  const body = "喝水";
+  const events: RuntimeEvent[] = [];
+  await runtime.startTurn(makeCommand(`20分钟后提醒我${body}`), (event) => events.push(event));
+
+  assert.equal(innerStarts, 0);
+  assert.equal(actions.length, 1);
+  const action = actions[0] as Record<string, unknown>;
+  assert.equal(action.action, "schedule_reminder");
+  assert.equal(action.delaySeconds, 1_200);
+  assert.equal(action.body, body);
+  assert.match(String(action.reminderId), /^[0-9a-f-]{36}$/i);
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed?.payload.verified, true);
+  assert.match(String(completed?.payload.text), /设好提醒/);
+  const receipt = events.find((event) => event.type === "product.action.completed");
+  assert.equal(receipt?.payload.status, "verified");
+  assert.equal(JSON.stringify(receipt?.payload).includes(body), false);
+});
+
+test("cancelling after a reminder dispatch waits for its single receipt", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  let dispatches = 0;
+  let release!: () => void;
+  let markDispatched!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+  const port: ComputerUsePort = {
+    async perform(action, _context, signal) {
+      dispatches += 1;
+      assert.equal(action.action, "schedule_reminder");
+      assert.equal(signal, undefined);
+      markDispatched();
+      await gate;
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_system_notification",
+        method: "native_command",
+        message: "System reminder was read back.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel, port);
+  const command = makeCommand("20分钟后提醒我喝水");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await dispatched;
+  await runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined);
+  release();
+  await start;
+
+  assert.equal(dispatches, 1);
+  assert.ok(!visible.some((event) => event.type === "response.completed"));
+  const events = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.ok(events.some((event) => event.type === "turn.failed"
+    && event.payload.code === "action_committed_after_cancel"));
+  assert.ok(!events.some((event) => event.type === "turn.cancelled"));
+});
+
+test("a reminder timeout is treated as possibly scheduled and is never retried", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  let dispatches = 0;
+  const port: ComputerUsePort = {
+    async perform(_action, context) {
+      dispatches += 1;
+      throw new ComputerActionError("Timed out after dispatch.", {
+        status: "failed",
+        code: "timeout",
+        method: "unknown",
+        attemptId: context.attemptId,
+      });
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel, port);
+  const body = "喝水";
+  const events: RuntimeEvent[] = [];
+  await runtime.startTurn(makeCommand(`20分钟后提醒我${body}`), (event) => events.push(event));
+
+  assert.equal(dispatches, 1);
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed?.payload.verified, false);
+  assert.match(String(completed?.payload.text), /可能已经设好/);
+  assert.match(String(completed?.payload.text), /不会重复/);
+  const receipt = events.find((event) => event.type === "product.action.completed");
+  assert.equal(receipt?.payload.succeeded, true);
+  assert.equal(receipt?.payload.code, "timeout");
+  assert.equal(JSON.stringify(receipt?.payload).includes(body), false);
+});
+
 test("a Notes delivery timeout is treated as possibly committed and is never retried", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   let dispatches = 0;

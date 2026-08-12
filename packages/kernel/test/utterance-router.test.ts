@@ -61,6 +61,21 @@ describe("routeProductUtterance", () => {
     );
   });
 
+  it("routes only bounded explicit relative time reminders", () => {
+    assert.deepEqual(routeProductUtterance("20分钟后提醒我喝水")?.input, {
+      delaySeconds: 1_200,
+      body: "喝水",
+    });
+    assert.equal(routeProductUtterance("2小时后提醒我开会")?.action, "schedule_time_reminder");
+    assert.equal(routeProductUtterance("20分钟后提醒我喝水吗？"), null);
+    assert.equal(routeProductUtterance("20分钟后提醒我喝水吗"), null);
+    assert.equal(routeProductUtterance("20分钟后提醒我喝水好吗"), null);
+    assert.equal(routeProductUtterance("0分钟后提醒我喝水"), null);
+    assert.equal(routeProductUtterance("25小时后提醒我开会"), null);
+    assert.equal(routeProductUtterance("明天提醒我开会"), null);
+    assert.equal(routeProductUtterance("20分钟后别提醒我喝水"), null);
+  });
+
   it("leaves ordinary questions for Pi", () => {
     assert.equal(routeProductUtterance("这个按钮为什么是灰色的？"), null);
     assert.equal(routeProductUtterance("刚才那个可以给 Agent 读视频链接的东西在哪？"), null);

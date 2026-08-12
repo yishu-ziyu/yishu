@@ -216,6 +216,7 @@ final class CompanionManager: ObservableObject {
             updateVisualState()
             if voiceState == .idle {
                 scheduleDelegatedTaskReturnProcessing()
+                scheduleTimeReminderReturnProcessing()
             }
         }
     }
@@ -320,6 +321,12 @@ final class CompanionManager: ObservableObject {
     private var delegatedTaskReturnProcessingToken: UUID?
     private var activeDelegatedTaskReturnID: UUID?
     private let delegatedReturnQuietInterval: TimeInterval = 3
+    /// System delivery is global rather than tied to whichever conversation is
+    /// currently open. The identifier is remembered in a small in-memory ring
+    /// so duplicated foreground callbacks never speak twice.
+    private var timeReminderReturnState = YishuTimeReminderReturnState()
+    private var timeReminderReturnProcessingTask: Task<Void, Never>?
+    private let timeReminderQuietInterval: TimeInterval = 3
     private var agentRuntimeRestartTask: Task<Void, Never>?
     private var agentRuntimeRestartAttempts: [Date] = []
     private var agentRuntimeReadyWatchdogTask: Task<Void, Never>?
@@ -1233,6 +1240,71 @@ final class CompanionManager: ObservableObject {
         scheduleDelegatedTaskReturnProcessing()
     }
 
+    /// Called only after macOS has already shown the foreground banner. This
+    /// optional spoken follow-up is intentionally not attached to a turn, so a
+    /// conversation change can never lose a reminder the system delivered.
+    func enqueueTimeReminderReturn(identifier: String, body: String) {
+        guard timeReminderReturnState.enqueue(identifier: identifier, body: body) else { return }
+        scheduleTimeReminderReturnProcessing()
+    }
+
+    private func scheduleTimeReminderReturnProcessing() {
+        guard timeReminderReturnProcessingTask == nil,
+              !timeReminderReturnState.pending.isEmpty else { return }
+        timeReminderReturnProcessingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.timeReminderReturnProcessingTask = nil }
+            while !Task.isCancelled, !self.timeReminderReturnState.pending.isEmpty {
+                guard await self.waitForTimeReminderQuietWindow(),
+                      let reminder = self.timeReminderReturnState.takeNext() else {
+                    return
+                }
+                // The banner is already the delivery truth. Remove before TTS
+                // so an interruption cannot replay this reminder later.
+                let announcement = "提醒你：\(reminder.body)"
+                self.ensureOverlayVisibleForVoiceFeedback()
+                self.responseOverlayManager.showStaticMessage(announcement, autoHideAfter: 12)
+                do {
+                    try await self.elevenLabsTTSClient.speakText(
+                        announcement,
+                        speed: self.speechSpeed
+                    )
+                } catch {
+                    // The system banner remains visible delivery; never retry
+                    // or log the reminder text.
+                }
+            }
+        }
+    }
+
+    private func waitForTimeReminderQuietWindow() async -> Bool {
+        while !Task.isCancelled {
+            let foregroundBusy = voiceState != .idle
+                || currentResponseTask != nil
+                || activeRuntimeRequestId != nil
+                || yishuAgentRuntimeClient.hasActiveTurn
+                || isPushToTalkKeyHeld
+                || elevenLabsTTSClient.isPlaying
+            let secondsSinceLastUserInput = CGEventSource.secondsSinceLastEventType(
+                .hidSystemState,
+                eventType: CGEventType(rawValue: UInt32.max)!
+            )
+            if YishuDelegatedTaskReturnState.canPresent(
+                foregroundBusy: foregroundBusy,
+                secondsSinceLastUserInput: secondsSinceLastUserInput,
+                quietInterval: timeReminderQuietInterval
+            ) {
+                return true
+            }
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return false
+            }
+        }
+        return false
+    }
+
     private func suppressDelegatedTaskReturn(_ taskID: UUID) {
         delegatedTaskReturnState.markAnnounced(taskID)
         for conversationID in Array(delegatedTaskReturnQueues.keys) {
@@ -1512,6 +1584,9 @@ final class CompanionManager: ObservableObject {
         cancelAgentRuntimeReadyWatchdog()
         cancelDelegatedTaskReturnProcessing(stopActiveAnnouncement: true)
         delegatedTaskReturnQueues.removeAll()
+        timeReminderReturnProcessingTask?.cancel()
+        timeReminderReturnProcessingTask = nil
+        timeReminderReturnState.clearPending()
 
         pendingVoiceTurnOrigin = nil
         currentResponseTask?.cancel()
@@ -3562,10 +3637,26 @@ final class CompanionManager: ObservableObject {
         return runtimeIsRunning ? .surfaceFailure : .restartRuntime
     }
 
-    private static func directActionConfirmation(
+    static func directActionConfirmation(
         for result: YishuComputerActionResult,
         action: String?
     ) -> String {
+        if action == "schedule_reminder" {
+            switch result.code {
+            case .notificationPermissionPending:
+                return "还没有设置，请允许后再说一次。"
+            case .notificationPermissionDenied:
+                return "系统提醒权限没有允许，所以这次没有设置。"
+            default:
+                if result.status == .verified {
+                    return "提醒已经设好。"
+                }
+                if result.succeeded || result.status == .unverified {
+                    return "提醒可能已经设好，但我没能确认；我不会重复设置。"
+                }
+                return "这次没有设置提醒。"
+            }
+        }
         let wording: (verified: String, delivered: String, unverified: String, failed: String)
         switch action {
         case "set_text":

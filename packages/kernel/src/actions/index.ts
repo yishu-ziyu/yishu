@@ -14,6 +14,8 @@ export { createFinderHistoryBackAction } from "./finder-history-back.js";
 export type { FinderHistoryBackInput } from "./finder-history-back.js";
 export { createNoteAction } from "./create-note.js";
 export type { CreateNoteInput } from "./create-note.js";
+export { createScheduleTimeReminderAction } from "./schedule-time-reminder.js";
+export type { ScheduleTimeReminderInput } from "./schedule-time-reminder.js";
 export { createRecordSuggestionAction } from "./record-suggestion.js";
 export type { RecordSuggestionInput } from "./record-suggestion.js";
 export { createSettleSuggestionAction } from "./settle-suggestion.js";

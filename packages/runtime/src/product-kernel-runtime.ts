@@ -11,6 +11,7 @@ import {
   sanitizeVisibleText,
   selectRelevantMindLessons,
   type CreateNoteExecutor,
+  type ScheduleTimeReminderExecutor,
   type FinderHistoryBackExecutor,
   type ConversationEvent,
   type ConversationTurn,
@@ -1172,10 +1173,12 @@ export class ProductKernelRuntime implements AgentRuntime {
     const { command } = state;
     const actionRoute = route.action === "finder_history_back"
       || route.action === "create_note"
+      || route.action === "schedule_time_reminder"
       ? {
           ...route,
           input: {
             ...route.input,
+            ...(route.action === "schedule_time_reminder" ? { reminderId: randomUUID() } : {}),
             intentId: randomUUID(),
             attemptId: randomUUID(),
             basisFrameId: command.payload.contextFrame.frameId,
@@ -1202,6 +1205,8 @@ export class ProductKernelRuntime implements AgentRuntime {
         ? { finderHistoryBack: this.finderHistoryBackExecutor(state) }
         : actionRoute.action === "create_note"
           ? { createNote: this.createNoteExecutor(state) }
+          : actionRoute.action === "schedule_time_reminder"
+            ? { scheduleTimeReminder: this.scheduleTimeReminderExecutor(state) }
           : undefined;
       receipt = await this.kernel.registry.invoke(actionRoute.action, {
         caller: "voice",
@@ -1209,7 +1214,9 @@ export class ProductKernelRuntime implements AgentRuntime {
         contextFrame: command.payload.contextFrame,
         sessionScope: state.sessionScope,
         signal: productActionAbortController.signal,
-        ...(actionRoute.action === "create_note" ? { approved: true } : {}),
+        ...(actionRoute.action === "create_note" || actionRoute.action === "schedule_time_reminder"
+          ? { approved: true }
+          : {}),
       }, actionDeps);
     } catch {
       if (productActionAbortController.signal.aborted || state.terminalKind === "cancelled") {
@@ -1431,6 +1438,58 @@ export class ProductKernelRuntime implements AgentRuntime {
               method: "unknown",
               attemptId: request.attemptId,
               message: "Note creation may have been submitted, but its result is unknown.",
+            };
+          }
+          throw error;
+        }
+      },
+    };
+  }
+
+  /** Schedule once through macOS, then require pending-notification read-back. */
+  private scheduleTimeReminderExecutor(state: TurnLedgerState): ScheduleTimeReminderExecutor {
+    return {
+      perform: async (request, signal) => {
+        if (!this.computerUsePort) {
+          return { succeeded: false, verified: false, status: "failed", code: "runtime_error", method: "unknown", message: "The reminder bridge is unavailable." };
+        }
+        try {
+          return await this.computerUsePort.perform({
+            action: "schedule_reminder",
+            x: 0,
+            y: 0,
+            reminderId: request.reminderId,
+            delaySeconds: request.delaySeconds,
+            body: request.body,
+          }, {
+            requestId: state.command.requestId,
+            traceId: state.traceId,
+            intentId: request.intentId,
+            attemptId: request.attemptId,
+            basisFrameId: request.basisFrameId,
+            effectClass: "schedule",
+          });
+        } catch (error) {
+          if (error instanceof ComputerActionError) {
+            if (error.code === "timeout") {
+              return {
+                succeeded: true,
+                verified: false,
+                status: "unverified",
+                code: "timeout",
+                method: "unknown",
+                attemptId: request.attemptId,
+                message: "The reminder may have been submitted, but its result is unknown.",
+              };
+            }
+            return {
+              succeeded: false,
+              verified: false,
+              status: "failed",
+              code: error.code,
+              method: error.method,
+              attemptId: request.attemptId,
+              message: "The reminder was not confirmed as scheduled.",
             };
           }
           throw error;
@@ -2791,6 +2850,7 @@ const SAFE_PRODUCT_ACTIONS = new Set([
   "watch_app_return",
   "finder_history_back",
   "create_note",
+  "schedule_time_reminder",
 ]);
 
 const SAFE_PRODUCT_STATUSES = new Set([
@@ -3021,6 +3081,7 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     || payload.action === "finder_history_back"
     || payload.action === "set_text"
     || payload.action === "create_note"
+    || payload.action === "schedule_reminder"
     ? payload.action
     : undefined;
   if (actionId === undefined || action === undefined) {
@@ -3056,7 +3117,7 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     result.text = text;
     result.targetBundleId = targetBundleId;
     result.targetPid = payload.targetPid as number;
-  } else {
+  } else if (action === "create_note") {
     const content = typeof payload.content === "string"
       && payload.content.trim().length > 0
       && payload.content.length <= 5_000
@@ -3077,6 +3138,22 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     result.content = content;
     result.title = title;
     result.targetBundleId = "com.apple.Notes";
+  } else {
+    const reminderId = safeIdentifier(payload.reminderId);
+    const delaySeconds = payload.delaySeconds;
+    const body = typeof payload.body === "string"
+      && payload.body.trim().length > 0
+      && payload.body.length <= 500
+      ? payload.body
+      : undefined;
+    if (reminderId === undefined
+      || !Number.isInteger(delaySeconds)
+      || (delaySeconds as number) < 60
+      || (delaySeconds as number) > 86_400
+      || body === undefined) return undefined;
+    result.reminderId = reminderId;
+    result.delaySeconds = delaySeconds as number;
+    result.body = body;
   }
   if (Number.isInteger(payload.screen) && (payload.screen as number) > 0) {
     result.screen = payload.screen as number;
@@ -3181,7 +3258,7 @@ function summarizeProductActionOutput(
     const retiredId = safeIdentifier(value.retiredId);
     return retiredId === undefined ? {} : { retiredId };
   }
-  if (actionName === "finder_history_back" || actionName === "create_note") {
+  if (actionName === "finder_history_back" || actionName === "create_note" || actionName === "schedule_time_reminder") {
     const result: ClientEventPayload = {};
     if (typeof value.succeeded === "boolean") result.succeeded = value.succeeded;
     if (typeof value.verified === "boolean") result.verified = value.verified;
@@ -3197,14 +3274,18 @@ function summarizeProductActionOutput(
       "ax_press_failed",
       "ax_press_unverified",
       "verified_accessibility",
+      "verified_system_notification",
       "permission_denied",
+      "notification_permission_pending",
+      "notification_permission_denied",
+      "notification_schedule_failed",
       "timeout",
       "runtime_error",
     ].includes(code)) {
       result.code = code;
     }
     const method = safeMetadata(value.method);
-    const safeMethods = actionName === "create_note"
+    const safeMethods = actionName === "create_note" || actionName === "schedule_time_reminder"
       ? ["native_command", "unknown"]
       : ["ax_press", "unknown"];
     if (method && safeMethods.includes(method)) result.method = method;

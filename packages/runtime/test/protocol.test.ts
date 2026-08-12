@@ -280,6 +280,25 @@ test("requested action metadata is optional for old clients but typed for new cl
     ...createNote,
     targetBundleId: "com.evil.Notes",
   }));
+
+  const reminder = computerActionRequestedPayloadSchema.parse({
+    actionId,
+    action: "schedule_reminder",
+    x: 0,
+    y: 0,
+    reminderId: randomUUID(),
+    delaySeconds: 1_200,
+    body: "喝水",
+    intentId,
+    attemptId,
+    basisFrameId,
+    effectClass: "schedule",
+  });
+  assert.equal(reminder.action, "schedule_reminder");
+  assert.throws(() => computerActionRequestedPayloadSchema.parse({
+    ...reminder,
+    delaySeconds: 30,
+  }));
 });
 
 test("model preference round-trips only the local Grok route", () => {

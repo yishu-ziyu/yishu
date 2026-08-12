@@ -44,6 +44,10 @@ enum YishuActionCode: String, Codable, Equatable, Sendable {
     case runtimeError = "runtime_error"
     case cancelled
     case timeout
+    case notificationPermissionPending = "notification_permission_pending"
+    case notificationPermissionDenied = "notification_permission_denied"
+    case notificationScheduleFailed = "notification_schedule_failed"
+    case verifiedSystemNotification = "verified_system_notification"
 }
 
 extension YishuActionCode {
@@ -76,7 +80,9 @@ enum YishuActionPolicy {
              .axSetValueUnsupported, .axSetValueFailed, .axSetValueUnverified,
              .frontmostMismatch, .targetStale, .quartzEventCreationFailed,
              .quartzUnverified, .verifiedAccessibility, .verifiedScreen,
-             .actionLimitReached, .runtimeError, .cancelled, .timeout:
+             .actionLimitReached, .runtimeError, .cancelled, .timeout,
+             .notificationPermissionPending, .notificationPermissionDenied,
+             .notificationScheduleFailed, .verifiedSystemNotification:
             return false
         }
     }
@@ -102,6 +108,9 @@ struct YishuComputerActionRequest: Equatable, Sendable {
     let text: String?
     let title: String?
     let content: String?
+    let reminderId: String?
+    let delaySeconds: Int?
+    let reminderBody: String?
     let targetBundleId: String?
     let targetPid: pid_t?
     let intentId: String?
@@ -121,6 +130,9 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         text: String? = nil,
         title: String? = nil,
         content: String? = nil,
+        reminderId: String? = nil,
+        delaySeconds: Int? = nil,
+        reminderBody: String? = nil,
         targetBundleId: String? = nil,
         targetPid: pid_t? = nil,
         intentId: String? = nil,
@@ -139,6 +151,9 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         self.text = text
         self.title = title
         self.content = content
+        self.reminderId = reminderId
+        self.delaySeconds = delaySeconds
+        self.reminderBody = reminderBody
         self.targetBundleId = targetBundleId
         self.targetPid = targetPid
         self.intentId = intentId

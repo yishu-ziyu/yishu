@@ -2532,6 +2532,42 @@ final class YishuAgentRuntimeClient {
                 basisFrameId: basisFrameId,
                 effectClass: "write"
             )
+        case "schedule_reminder":
+            guard doubleValue(payload["x"]) == 0,
+                  doubleValue(payload["y"]) == 0,
+                  let reminderId = payload["reminderId"] as? String,
+                  UUID(uuidString: reminderId) != nil,
+                  let rawDelaySeconds = nonBooleanNumber(payload["delaySeconds"]),
+                  rawDelaySeconds.doubleValue.isFinite,
+                  rawDelaySeconds.doubleValue.rounded() == rawDelaySeconds.doubleValue,
+                  (60...86_400).contains(rawDelaySeconds.intValue),
+                  let rawBody = payload["body"] as? String,
+                  let intentId = common.intentId,
+                  UUID(uuidString: intentId) != nil,
+                  let attemptId = common.attemptId,
+                  UUID(uuidString: attemptId) != nil,
+                  let basisFrameId = common.basisFrameId,
+                  UUID(uuidString: basisFrameId) != nil,
+                  common.effectClass == "schedule" else {
+                return nil
+            }
+            let body = rawBody.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard (1...500).contains(body.count) else { return nil }
+            return YishuComputerActionRequest(
+                requestId: requestId,
+                traceId: traceId,
+                actionId: actionId,
+                action: action,
+                x: 0,
+                y: 0,
+                reminderId: reminderId,
+                delaySeconds: rawDelaySeconds.intValue,
+                reminderBody: body,
+                intentId: intentId,
+                attemptId: attemptId,
+                basisFrameId: basisFrameId,
+                effectClass: "schedule"
+            )
         default:
             return nil
         }
