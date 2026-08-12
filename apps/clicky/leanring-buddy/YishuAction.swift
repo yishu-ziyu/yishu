@@ -13,6 +13,7 @@ enum YishuActionStatus: String, Codable, Equatable, Sendable {
 
 enum YishuActionMethod: String, Codable, Equatable, Sendable {
     case axPress = "ax_press"
+    case axSetValue = "ax_set_value"
     case quartz
     case nativeCommand = "native_command"
     case shortcut
@@ -27,12 +28,18 @@ enum YishuActionCode: String, Codable, Equatable, Sendable {
     case axPressUnsupported = "ax_press_unsupported"
     case axPressUnknown = "ax_press_failed"
     case axPressUnverified = "ax_press_unverified"
+    case focusedElementUnavailable = "focused_element_unavailable"
+    case secureTextBlocked = "secure_text_blocked"
+    case axSetValueUnsupported = "ax_set_value_unsupported"
+    case axSetValueFailed = "ax_set_value_failed"
+    case axSetValueUnverified = "ax_set_value_unverified"
     case frontmostMismatch = "frontmost_mismatch"
     case targetStale = "target_stale"
     case quartzEventCreationFailed = "quartz_event_creation_failed"
     case quartzUnverified = "quartz_unverified"
     case verifiedAccessibility = "verified_accessibility"
     case verifiedScreen = "verified_screen"
+    case actionLimitReached = "action_limit_reached"
     case runtimeError = "runtime_error"
     case cancelled
     case timeout
@@ -64,9 +71,11 @@ enum YishuActionPolicy {
             return true
         case .permissionDenied, .screenUnavailable, .targetOutOfBounds,
              .axPressUnknown, .axPressUnverified,
+             .focusedElementUnavailable, .secureTextBlocked,
+             .axSetValueUnsupported, .axSetValueFailed, .axSetValueUnverified,
              .frontmostMismatch, .targetStale, .quartzEventCreationFailed,
              .quartzUnverified, .verifiedAccessibility, .verifiedScreen,
-             .runtimeError, .cancelled, .timeout:
+             .actionLimitReached, .runtimeError, .cancelled, .timeout:
             return false
         }
     }
@@ -89,6 +98,9 @@ struct YishuComputerActionRequest: Equatable, Sendable {
     let y: Double
     let screen: Int?
     let label: String?
+    let text: String?
+    let targetBundleId: String?
+    let targetPid: pid_t?
     let intentId: String?
     let attemptId: String?
     let basisFrameId: String?
@@ -103,6 +115,9 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         y: Double,
         screen: Int? = nil,
         label: String? = nil,
+        text: String? = nil,
+        targetBundleId: String? = nil,
+        targetPid: pid_t? = nil,
         intentId: String? = nil,
         attemptId: String? = nil,
         basisFrameId: String? = nil,
@@ -116,6 +131,9 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         self.y = y
         self.screen = screen
         self.label = label
+        self.text = text
+        self.targetBundleId = targetBundleId
+        self.targetPid = targetPid
         self.intentId = intentId
         self.attemptId = attemptId
         self.basisFrameId = basisFrameId

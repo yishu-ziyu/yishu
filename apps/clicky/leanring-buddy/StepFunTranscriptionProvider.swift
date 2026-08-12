@@ -248,6 +248,7 @@ private final class StepFunAudioTranscriptionSession: BuddyStreamingTranscriptio
         var request = URLRequest(url: proxyURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        YishuVoiceProxySupervisor.authorize(&request)
         request.timeoutInterval = 60
 
         let body = StepFunTranscriptionRequest(

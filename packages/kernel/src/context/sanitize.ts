@@ -9,6 +9,7 @@
  */
 
 import { sanitizePortableText } from "../store/ledger-safety.js";
+import { cloneSessionScope, type SessionScope } from "../session-scope.js";
 
 export interface Observed<T> {
   value: T;
@@ -57,6 +58,8 @@ export interface TrailSourceScreenshot {
   mediaType?: string;
   displayWidthPoints?: number;
   displayHeightPoints?: number;
+  displayOriginXPoints?: number;
+  displayOriginYPoints?: number;
   screenshotWidthPixels?: number;
   screenshotHeightPixels?: number;
 }
@@ -83,6 +86,8 @@ export type CursorRegion =
   | "unknown";
 
 export interface ContextTrailEntry {
+  /** Exact product scope that owned this observation. */
+  sessionScope: SessionScope;
   frameId: string;
   capturedAt: string;
   appName: string | null;
@@ -124,22 +129,84 @@ export function sanitizeWarnings(warnings: string[] | undefined): string[] {
   return warnings.map(sanitizeWarningText);
 }
 
-function displaySizeFromFrame(frame: TrailSourceFrame): { width: number; height: number } | null {
-  const shots = frame.screenshots;
-  if (shots) {
-    for (const shot of shots) {
-      const w = shot.displayWidthPoints;
-      const h = shot.displayHeightPoints;
-      if (typeof w === "number" && typeof h === "number" && w > 0 && h > 0) {
-        return { width: w, height: h };
-      }
-    }
+interface DisplayFrame {
+  originX: number;
+  originY: number;
+  width: number;
+  height: number;
+}
+
+type SizedScreenshot = TrailSourceScreenshot & {
+  displayWidthPoints: number;
+  displayHeightPoints: number;
+};
+
+function validDisplaySize(shot: TrailSourceScreenshot): shot is SizedScreenshot {
+  return typeof shot.displayWidthPoints === "number" &&
+    Number.isFinite(shot.displayWidthPoints) &&
+    shot.displayWidthPoints > 0 &&
+    typeof shot.displayHeightPoints === "number" &&
+    Number.isFinite(shot.displayHeightPoints) &&
+    shot.displayHeightPoints > 0;
+}
+
+function containsPoint(display: DisplayFrame, x: number, y: number): boolean {
+  return x >= display.originX &&
+    x < display.originX + display.width &&
+    y >= display.originY &&
+    y < display.originY + display.height;
+}
+
+function displayFrameForCursor(
+  frame: TrailSourceFrame,
+  cursor: TrailSourceCursor,
+): DisplayFrame | null {
+  const sourceShots = frame.screenshots ?? [];
+  const shots = sourceShots.filter(validDisplaySize);
+  if (shots.length === 0) return null;
+
+  const explicitMatches = shots.flatMap((shot): DisplayFrame[] => {
+    const originX = shot.displayOriginXPoints;
+    const originY = shot.displayOriginYPoints;
+    if (typeof originX !== "number" || !Number.isFinite(originX) ||
+        typeof originY !== "number" || !Number.isFinite(originY)) return [];
+    const display = {
+      originX,
+      originY,
+      width: shot.displayWidthPoints,
+      height: shot.displayHeightPoints,
+    };
+    return containsPoint(display, cursor.x, cursor.y) ? [display] : [];
+  });
+
+  if (explicitMatches.length === 1) return explicitMatches[0] ?? null;
+  if (explicitMatches.length > 1) {
+    const first = explicitMatches[0];
+    const sameGeometry = first != null && explicitMatches.every((display) =>
+      display.originX === first.originX &&
+      display.originY === first.originY &&
+      display.width === first.width &&
+      display.height === first.height
+    );
+    return sameGeometry ? first : null;
   }
-  const bounds = frame.activeWindow?.value.bounds;
-  if (bounds && bounds.width > 0 && bounds.height > 0) {
-    // Window-local size is a weak prior for global cursor; only use when nothing else exists.
-    return { width: bounds.width, height: bounds.height };
+
+  // Compatibility for old protocol-v1 frames: origin (0, 0) is knowable only
+  // when exactly one screen was supplied. Never guess from the first of
+  // multiple originless screenshots or from active-window dimensions.
+  const onlyShot = sourceShots.length === 1 ? shots[0] : undefined;
+  if (onlyShot &&
+      onlyShot.displayOriginXPoints == null &&
+      onlyShot.displayOriginYPoints == null) {
+    const display = {
+      originX: 0,
+      originY: 0,
+      width: onlyShot.displayWidthPoints,
+      height: onlyShot.displayHeightPoints,
+    };
+    return containsPoint(display, cursor.x, cursor.y) ? display : null;
   }
+
   return null;
 }
 
@@ -161,27 +228,22 @@ function bucketVertical(ratio: number): Exclude<CursorVertical, "unknown"> {
  */
 export function cursorRegionFromFrame(frame: TrailSourceFrame): CursorRegion {
   const cursor = frame.cursor?.value;
-  if (!cursor) return "unknown";
+  if (!cursor || !Number.isFinite(cursor.x) || !Number.isFinite(cursor.y)) return "unknown";
+  if (cursor.coordinateSpace !== "global-top-left" &&
+      cursor.coordinateSpace !== "appkit-bottom-left") return "unknown";
 
-  const size = displaySizeFromFrame(frame);
-  if (!size) return "unknown";
+  const display = displayFrameForCursor(frame, cursor);
+  if (!display) return "unknown";
 
-  let y = cursor.y;
-  // appkit-bottom-left: origin at bottom-left; normalize to top-left ratio space
-  if (cursor.coordinateSpace === "appkit-bottom-left") {
-    y = size.height - cursor.y;
-  }
+  const localX = cursor.x - display.originX;
+  const localY = cursor.y - display.originY;
+  const topDownY = cursor.coordinateSpace === "appkit-bottom-left"
+    ? display.height - localY
+    : localY;
 
-  const xRatio = clamp01(cursor.x / size.width);
-  const yRatio = clamp01(y / size.height);
+  const xRatio = localX / display.width;
+  const yRatio = topDownY / display.height;
   return `${bucketHorizontal(xRatio)}-${bucketVertical(yRatio)}`;
-}
-
-function clamp01(n: number): number {
-  if (!Number.isFinite(n)) return 0.5;
-  if (n < 0) return 0;
-  if (n > 1) return 1;
-  return n;
 }
 
 function sanitizePortableField(
@@ -197,6 +259,8 @@ function sanitizePortableField(
 }
 
 export interface ToTrailEntryOptions {
+  /** Exact product scope that owns this observation. */
+  sessionScope: SessionScope;
   /** Override "now" for screenshot TTL computation. */
   now?: Date;
   /** Screenshot metadata TTL in ms. Default 30s. */
@@ -209,10 +273,8 @@ export interface ToTrailEntryOptions {
  */
 export function toTrailEntry(
   frame: TrailSourceFrame,
-  nowOrOptions?: Date | ToTrailEntryOptions,
+  options: ToTrailEntryOptions,
 ): ContextTrailEntry {
-  const options: ToTrailEntryOptions =
-    nowOrOptions instanceof Date ? { now: nowOrOptions } : (nowOrOptions ?? {});
   const now = options.now ?? new Date();
   const screenshotTtlMs = options.screenshotTtlMs ?? DEFAULT_SCREENSHOT_TTL_MS;
 
@@ -222,6 +284,7 @@ export function toTrailEntry(
   const hasScreenshot = Array.isArray(frame.screenshots) && frame.screenshots.length > 0;
 
   const entry: ContextTrailEntry = {
+    sessionScope: cloneSessionScope(options.sessionScope),
     frameId: frame.frameId,
     capturedAt: frame.capturedAt,
     appName: sanitizePortableField(app?.name, "trail app name"),

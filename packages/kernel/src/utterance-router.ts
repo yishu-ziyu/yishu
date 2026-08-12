@@ -10,6 +10,7 @@ export type ProductActionName =
   | "share_context"
   | "record_learning"
   | "run_skill"
+  | "watch_app_return"
   | "finder_history_back";
 
 export interface ProductUtteranceRoute {
@@ -39,6 +40,23 @@ export function routeProductUtterance(
     return {
       action: "finder_history_back",
       input: finderTarget,
+      confidence: 0.99,
+    };
+  }
+
+  // This is the only initiative phrase handled here: one explicit reminder
+  // bound to leaving and then returning to the freshly observed application.
+  // Questions, negations, vague reminders, and generic scheduling fall to Pi.
+  const appReturnReminder = parseAppReturnReminder(text);
+  const appReturnTarget = frontmostApplicationReference(contextFrame);
+  if (appReturnReminder && appReturnTarget) {
+    return {
+      action: "watch_app_return",
+      input: {
+        reminder: appReturnReminder,
+        targetBundleId: appReturnTarget.targetBundleId,
+        sourceFrameId: appReturnTarget.sourceFrameId,
+      },
       confidence: 0.99,
     };
   }
@@ -185,6 +203,15 @@ export function formatProductActionSpeech(
   }
 
   switch (action) {
+    case "watch_app_return": {
+      const result = output as {
+        accepted?: boolean;
+        watch?: { reminder?: string };
+      } | null;
+      return result?.accepted
+        ? `好。你离开这个应用后，下次切回来我会提醒你：${result.watch?.reminder ?? "这件事"}`
+        : "这次没有设好提醒。";
+    }
     case "remember": {
       const claim =
         output && typeof output === "object" && "claim" in output
@@ -241,6 +268,19 @@ export function formatProductActionSpeech(
   }
 }
 
+function parseAppReturnReminder(text: string): string | null {
+  if (/[？?]\s*$/u.test(text) || /(?:吗|么|嘛)\s*[。！!.]?\s*$/u.test(text)) {
+    return null;
+  }
+  const match = text.match(
+    /^(?:请\s*)?(?:我\s*)?下次(?:再)?切回(?:到)?(?:这个|当前)应用(?:程序)?时[，,\s]*(?:请\s*)?提醒我[：:\s]*(.{1,200}?)[。！!]?$/u,
+  );
+  const reminder = match?.[1]?.trim();
+  if (!reminder || reminder.length < 2) return null;
+  if (/^(?:一下|这件事|这个|到时候|别忘了)$/u.test(reminder)) return null;
+  return reminder;
+}
+
 function isDirectFinderBackUtterance(text: string): boolean {
   return /^(?:(?:请|帮我|麻烦)\s*)?(?:点击|点一下|点|按下|按|click|press)\s*(?:左上角(?:的)?\s*)?(?:返回|后退|back)(?:按钮|键)?[。！？!?]?$/iu.test(
     text,
@@ -268,6 +308,29 @@ function finderFrontmostTarget(
   return {
     targetBundleId: "com.apple.finder",
     targetPid: application.processIdentifier as number,
+  };
+}
+
+function frontmostApplicationReference(
+  contextFrame: unknown,
+): { targetBundleId: string; sourceFrameId: string } | null {
+  if (!isRecord(contextFrame) || typeof contextFrame.frameId !== "string") return null;
+  const frontmost = isRecord(contextFrame.frontmostApplication)
+    ? contextFrame.frontmostApplication
+    : null;
+  const application = frontmost && isRecord(frontmost.value)
+    ? frontmost.value
+    : null;
+  if (
+    !application
+    || typeof application.bundleIdentifier !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$/u.test(application.bundleIdentifier)
+  ) {
+    return null;
+  }
+  return {
+    targetBundleId: application.bundleIdentifier,
+    sourceFrameId: contextFrame.frameId,
   };
 }
 

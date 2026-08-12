@@ -7,6 +7,8 @@ import type { ShareContextResult } from "../src/actions/share-context.js";
 import type { MemoryClaim } from "../src/store/types.js";
 import { makeFrame } from "./fixtures.js";
 
+const PERSONAL = { kind: "personal" } as const;
+
 describe("product actions via createYishuKernel", () => {
   beforeEach(() => {
     clearAuditLog();
@@ -155,6 +157,7 @@ describe("product actions via createYishuKernel", () => {
         appName: "Chrome",
         windowTitle: "github.com/yishu-ziyu/yishu",
       }),
+      PERSONAL,
       new Date(t0),
     );
     trail.append(
@@ -163,6 +166,7 @@ describe("product actions via createYishuKernel", () => {
         appName: "Chrome",
         windowTitle: "Switch branch",
       }),
+      PERSONAL,
       new Date(t0 + 30_000),
     );
     trail.append(
@@ -171,6 +175,7 @@ describe("product actions via createYishuKernel", () => {
         appName: "Codex",
         windowTitle: "yishu session",
       }),
+      PERSONAL,
       new Date(t0 + 60_000),
     );
 
@@ -183,6 +188,7 @@ describe("product actions via createYishuKernel", () => {
         autoVerify: true,
         verifyThreshold: 0.55,
       },
+      sessionScope: PERSONAL,
       now: new Date(t0 + 90_000),
     });
 
@@ -204,7 +210,7 @@ describe("product actions via createYishuKernel", () => {
   it("does not persist remember_how when its skill mutation is cancelled", async () => {
     const { registry, trail, store } = createYishuKernel();
     const now = new Date("2026-08-07T12:40:00.000Z");
-    trail.append(makeFrame({ capturedAt: now.toISOString() }), now);
+    trail.append(makeFrame({ capturedAt: now.toISOString() }), PERSONAL, now);
     const controller = new AbortController();
     const originalAddSkill = store.addSkillCandidate.bind(store);
     store.addSkillCandidate = async (input, options) => {
@@ -215,6 +221,7 @@ describe("product actions via createYishuKernel", () => {
     const receipt = await registry.invoke("remember_how", {
       caller: "voice",
       input: { minutes: 5, autoVerify: false },
+      sessionScope: PERSONAL,
       signal: controller.signal,
       now,
     });
@@ -226,7 +233,7 @@ describe("product actions via createYishuKernel", () => {
   it("reports remember_how cancellation after the candidate commit", async () => {
     const { registry, trail, store } = createYishuKernel();
     const now = new Date("2026-08-07T12:40:00.000Z");
-    trail.append(makeFrame({ capturedAt: now.toISOString() }), now);
+    trail.append(makeFrame({ capturedAt: now.toISOString() }), PERSONAL, now);
     const controller = new AbortController();
     const originalAddSkill = store.addSkillCandidate.bind(store);
     store.addSkillCandidate = async (input, options) => {
@@ -238,6 +245,7 @@ describe("product actions via createYishuKernel", () => {
     const receipt = await registry.invoke("remember_how", {
       caller: "voice",
       input: { minutes: 5, autoVerify: false },
+      sessionScope: PERSONAL,
       signal: controller.signal,
       now,
     });
@@ -254,7 +262,7 @@ describe("product actions via createYishuKernel", () => {
       appName: "Chrome",
       withScreenshot: true,
     });
-    trail.append(frame, now);
+    trail.append(frame, PERSONAL, now);
 
     const receipt = await registry.invoke(
       "share_context",
@@ -265,6 +273,7 @@ describe("product actions via createYishuKernel", () => {
           projectHint: "project:yishu",
         },
         contextFrame: frame,
+        sessionScope: PERSONAL,
         now,
       },
     );
@@ -351,6 +360,7 @@ describe("product actions via createYishuKernel", () => {
         "run_skill",
         "settle_suggestion",
         "share_context",
+        "watch_app_return",
       ].sort(),
     );
   });
@@ -358,7 +368,7 @@ describe("product actions via createYishuKernel", () => {
   it("run_skill falls back to capsule when no verified skill", async () => {
     const { registry, trail } = createYishuKernel();
     const now = new Date();
-    trail.append(makeFrame({ capturedAt: now.toISOString() }), now);
+    trail.append(makeFrame({ capturedAt: now.toISOString() }), PERSONAL, now);
     const receipt = await registry.invoke("run_skill", {
       caller: "voice",
       input: {
@@ -366,6 +376,7 @@ describe("product actions via createYishuKernel", () => {
         fallbackShareContext: true,
       },
       contextFrame: makeFrame({ capturedAt: now.toISOString() }),
+      sessionScope: PERSONAL,
       now,
     });
     assert.equal(receipt.status, "verified");

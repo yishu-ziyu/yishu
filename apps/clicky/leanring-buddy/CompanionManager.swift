@@ -9,6 +9,7 @@
 
 import AVFoundation
 import Combine
+import CoreGraphics
 import Foundation
 import os.log
 import ScreenCaptureKit
@@ -37,7 +38,7 @@ private enum DirectClickFastPathMissReason: String {
 enum YishuRuntimeFailureRecoveryRoute: Equatable {
     case useActionReceipt
     case restartRuntime
-    case legacyProxy
+    case surfaceFailure
 }
 
 enum YishuAgentRuntimeAvailability: Equatable {
@@ -49,6 +50,11 @@ enum YishuAgentRuntimeAvailability: Equatable {
 private struct VoiceTurnOrigin {
     let traceID: String
     let releaseAt: UInt64?
+}
+
+private struct YishuRuntimeVoiceResponse {
+    let text: String
+    let speechAlreadyPresented: Bool
 }
 
 private struct DirectClickPrewarmCache {
@@ -119,7 +125,12 @@ final class CompanionManager: ObservableObject {
     )
 
     @Published private(set) var voiceState: CompanionVoiceState = .idle {
-        didSet { updateVisualState() }
+        didSet {
+            updateVisualState()
+            if voiceState == .idle {
+                scheduleDelegatedTaskReturnProcessing()
+            }
+        }
     }
     @Published private(set) var visualState: YishuVisualState = .breathing
     @Published private(set) var lastTranscript: String?
@@ -212,27 +223,30 @@ final class CompanionManager: ObservableObject {
     /// Background ContextTrail sampling (metadata only, no screenshot bytes).
     private var trailSampleTask: Task<Void, Never>?
     private var taskSnapshotRefreshTask: Task<Void, Never>?
-    private let trailSampleIntervalNanoseconds: UInt64 = 15_000_000_000
+    private let trailSampleIntervalNanoseconds: UInt64 = 5_000_000_000
+
+    /// A terminal delegated result remains in ResultInbox; this queue only
+    /// controls its one-time, conversation-scoped return beside the cursor.
+    private var delegatedTaskReturnState = YishuDelegatedTaskReturnState()
+    private var delegatedTaskReturnQueues: [UUID: [YishuDelegatedTaskPresenceEvent]] = [:]
+    private var delegatedTaskReturnProcessingTask: Task<Void, Never>?
+    private var delegatedTaskReturnProcessingToken: UUID?
+    private var activeDelegatedTaskReturnID: UUID?
+    private let delegatedReturnQuietInterval: TimeInterval = 3
+    private var agentRuntimeRestartTask: Task<Void, Never>?
+    private var agentRuntimeRestartAttempts: [Date] = []
+    private var agentRuntimeReadyWatchdogTask: Task<Void, Never>?
+    private var agentRuntimeReadyWatchdogToken: UUID?
 
     /// Base URL for the local 奕枢 proxy. All voice API requests route through
     /// this so keys never ship in the app binary. Lifecycle is owned by
     /// `YishuVoiceProxySupervisor`.
     private static let workerBaseURL = "http://127.0.0.1:8787"
 
-    private lazy var claudeAPI: ClaudeAPI = {
-        let fallbackModel = selectedModelProvider == YishuConversationModelCatalog.localProvider
-            ? selectedModel
-            : Self.defaultChatModel
-        return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: fallbackModel)
-    }()
-
     private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
         return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
     }()
-
-    /// Conversation history so Claude remembers prior exchanges within a session.
-    /// Each entry is the user's transcript and Claude's response.
-    private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
+    private var activeSentenceSpeechPipeline: YishuSentenceSpeechPipeline?
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
@@ -262,6 +276,7 @@ final class CompanionManager: ObservableObject {
     /// must not replay the same click in `presentVoiceResponse`.
     private var activeTurnConsumedComputerAction = false
     private var activeTurnLastComputerActionResult: YishuComputerActionResult?
+    private var activeTurnLastComputerActionName: String?
     private var directClickPrewarmTask: Task<Void, Never>?
     private var directClickPrewarmCache: DirectClickPrewarmCache?
     private var directClickPrewarmTraceID: String?
@@ -373,7 +388,6 @@ final class CompanionManager: ObservableObject {
             sessionScopeNotice = "当前会话仍在执行，暂时不能切换。"
             return
         }
-        conversationHistory.removeAll(keepingCapacity: false)
         clearMemorySourceNotice()
         resetDelegatedTaskProjectionForConversationChange()
         sessionScope = nextScope
@@ -498,16 +512,6 @@ final class CompanionManager: ObservableObject {
                     self.historyNotice = "当前会话仍在执行，暂时不能切换。"
                     return
                 }
-                // Restore only visible user/assistant pairs — no events/screenshots.
-                self.conversationHistory = opened.turns.compactMap { turn in
-                    let user = turn.userInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let assistant = turn.assistantOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !user.isEmpty || !assistant.isEmpty else { return nil }
-                    return (userTranscript: user, assistantResponse: assistant)
-                }
-                if self.conversationHistory.count > 10 {
-                    self.conversationHistory = Array(self.conversationHistory.suffix(10))
-                }
                 // Continuing another conversation must not inherit the prior
                 // turn's memory source line (Codex PROOF-1b residual).
                 self.clearMemorySourceNotice()
@@ -530,7 +534,6 @@ final class CompanionManager: ObservableObject {
             historyNotice = "当前会话仍在执行，暂时不能新建。"
             return
         }
-        conversationHistory.removeAll(keepingCapacity: false)
         clearMemorySourceNotice()
         resetDelegatedTaskProjectionForConversationChange()
         sessionScope = .personal
@@ -605,7 +608,6 @@ final class CompanionManager: ObservableObject {
                         self.historyNotice = "已删除，但当前会话仍在执行，稍后请手动新建。"
                         return
                     }
-                    self.conversationHistory.removeAll(keepingCapacity: false)
                     self.clearMemorySourceNotice()
                     self.resetDelegatedTaskProjectionForConversationChange()
                     self.sessionScope = .personal
@@ -752,9 +754,6 @@ final class CompanionManager: ObservableObject {
         UserDefaults.standard.set(option.provider, forKey: Self.selectedModelProviderDefaultsKey)
         UserDefaults.standard.set(option.model, forKey: Self.selectedModelDefaultsKey)
         UserDefaults.standard.set(true, forKey: "clicky.chatModel.userPicked.v1")
-        if option.provider == YishuConversationModelCatalog.localProvider {
-            claudeAPI.model = option.model
-        }
         print("🧠 奕枢 model → \(option.provider)/\(option.model)")
     }
 
@@ -817,6 +816,7 @@ final class CompanionManager: ObservableObject {
     func stopSpeechPlayback() {
         speechSpeedPreviewTask?.cancel()
         speechSpeedPreviewTask = nil
+        cancelActiveSentenceSpeechPipeline()
         elevenLabsTTSClient.stopPlayback()
     }
 
@@ -871,10 +871,16 @@ final class CompanionManager: ObservableObject {
         }
         agentPresenceWindowManager.onPresentResult = { [weak self] task in
             guard let self else { return }
+            self.interruptDelegatedTaskReturnForForegroundTurn()
+            self.suppressDelegatedTaskReturn(task.id)
             self.responseOverlayManager.showStaticMessage(
                 task.summary ?? task.statusLabel,
                 autoHideAfter: 12
             )
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 12_000_000_000)
+                self?.scheduleDelegatedTaskReturnProcessing()
+            }
         }
         agentPresenceWindowManager.onRetryFromBeginning = { [weak self] task in
             self?.retryDelegatedTaskFromBeginning(task)
@@ -884,15 +890,23 @@ final class CompanionManager: ObservableObject {
         }
         yishuAgentRuntimeClient.onDelegatedTaskPresenceEvent = { [weak self] event in
             guard let self else { return }
+            let currentConversationID = self.yishuAgentRuntimeClient.currentConversationId
             self.agentPresenceWindowManager.apply(
                 event,
-                expectedConversationId: self.yishuAgentRuntimeClient.currentConversationId
+                expectedConversationId: currentConversationID
             )
+            guard event.mainConversationId == currentConversationID else { return }
+            if self.delegatedTaskReturnState.shouldEnqueueLive(event) {
+                self.enqueueDelegatedTaskReturn(event)
+            }
         }
         yishuAgentRuntimeClient.onLifecycleEvent = { [weak self] event in
             self?.updateRuntimeVisualPhase(for: event)
             switch event {
             case let .ready(mode):
+                self?.cancelAgentRuntimeReadyWatchdog()
+                self?.agentRuntimeRestartTask?.cancel()
+                self?.agentRuntimeRestartTask = nil
                 self?.agentRuntimeAvailability = .ready
                 print("🧠 奕枢 Runtime ready (\(mode))")
                 Task { @MainActor in
@@ -902,11 +916,13 @@ final class CompanionManager: ObservableObject {
                 }
                 self?.refreshDelegatedTaskSnapshot()
             case let .stopped(exitCode):
+                self?.cancelAgentRuntimeReadyWatchdog()
                 self?.agentRuntimeAvailability = .stopped
                 print("⚠️ 奕枢 Runtime stopped (\(exitCode))")
                 self?.taskSnapshotRefreshTask?.cancel()
                 self?.taskSnapshotRefreshTask = nil
                 self?.agentPresenceWindowManager.markRuntimeInterrupted()
+                self?.scheduleAgentRuntimeRestart()
             }
         }
         // Local voice proxy (8787) must be ready before the panel claims online.
@@ -917,18 +933,14 @@ final class CompanionManager: ObservableObject {
             runtimeVisualPhase = .connecting
             agentRuntimeAvailability = .starting
             try yishuAgentRuntimeClient.start()
+            armAgentRuntimeReadyWatchdog()
             startContextTrailSampling()
         } catch {
-            // A voice turn will retry once, then use the credential-isolated
-            // direct Grok fallback so push-to-talk never becomes silent.
             runtimeVisualPhase = .idle
             agentRuntimeAvailability = .stopped
-            print("⚠️ 奕枢 Runtime unavailable; voice fallback remains available")
+            print("⚠️ 奕枢 Runtime unavailable; scheduling bounded restart")
+            scheduleAgentRuntimeRestart()
         }
-        // Eagerly touch the Claude API so its TLS warmup handshake completes
-        // well before the onboarding demo fires at ~40s into the video.
-        _ = claudeAPI
-
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
@@ -953,16 +965,87 @@ final class CompanionManager: ObservableObject {
     /// Panel retry control for the Pi sidecar. Availability stays `starting`
     /// until a typed runtime.ready event arrives.
     func retryAgentRuntime() {
+        agentRuntimeRestartTask?.cancel()
+        agentRuntimeRestartTask = nil
+        agentRuntimeRestartAttempts.removeAll()
         guard !yishuAgentRuntimeClient.isRunning else { return }
         agentRuntimeAvailability = .starting
         runtimeVisualPhase = .connecting
         do {
             try yishuAgentRuntimeClient.start()
+            armAgentRuntimeReadyWatchdog()
             startContextTrailSampling()
         } catch {
             agentRuntimeAvailability = .stopped
             runtimeVisualPhase = .idle
         }
+    }
+
+    /// Restart a crashed sidecar without replaying any user turn. Three
+    /// launches per minute bound crash loops; a manual retry resets the budget.
+    private func scheduleAgentRuntimeRestart() {
+        guard agentRuntimeRestartTask == nil,
+              !yishuAgentRuntimeClient.isRunning else { return }
+        let now = Date()
+        agentRuntimeRestartAttempts.removeAll {
+            now.timeIntervalSince($0) >= 60
+        }
+        guard agentRuntimeRestartAttempts.count < 3 else { return }
+        let delay = min(pow(2, Double(agentRuntimeRestartAttempts.count)) * 0.4, 2)
+        agentRuntimeRestartAttempts.append(now)
+        agentRuntimeRestartTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(delay * 1_000_000_000)
+                )
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.agentRuntimeRestartTask = nil
+            guard !self.yishuAgentRuntimeClient.isRunning else { return }
+            self.agentRuntimeAvailability = .starting
+            self.runtimeVisualPhase = .connecting
+            do {
+                try self.yishuAgentRuntimeClient.start()
+                self.agentRuntimeRestartTask = nil
+                self.armAgentRuntimeReadyWatchdog()
+                self.startContextTrailSampling()
+            } catch {
+                self.agentRuntimeAvailability = .stopped
+                self.runtimeVisualPhase = .idle
+                self.scheduleAgentRuntimeRestart()
+            }
+        }
+    }
+
+    /// A live process is not yet a usable Runtime. If typed runtime.ready does
+    /// not arrive, terminate this generation so the normal bounded restart
+    /// path can recover instead of leaving the product stuck on “starting”.
+    private func armAgentRuntimeReadyWatchdog() {
+        cancelAgentRuntimeReadyWatchdog()
+        guard agentRuntimeAvailability == .starting else { return }
+        let token = UUID()
+        agentRuntimeReadyWatchdogToken = token
+        agentRuntimeReadyWatchdogTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 12_000_000_000)
+            } catch {
+                return
+            }
+            guard let self,
+                  self.agentRuntimeReadyWatchdogToken == token,
+                  self.agentRuntimeAvailability == .starting,
+                  self.yishuAgentRuntimeClient.isRunning else { return }
+            print("⚠️ 奕枢 Runtime ready timeout; restarting boundedly")
+            self.yishuAgentRuntimeClient.terminateForRecovery()
+        }
+    }
+
+    private func cancelAgentRuntimeReadyWatchdog() {
+        agentRuntimeReadyWatchdogTask?.cancel()
+        agentRuntimeReadyWatchdogTask = nil
+        agentRuntimeReadyWatchdogToken = nil
     }
 
     private func refreshDelegatedTaskSnapshot() {
@@ -980,6 +1063,9 @@ final class CompanionManager: ObservableObject {
                     return
                 }
                 self.agentPresenceWindowManager.mergeSnapshot(tasks)
+                for task in tasks where self.delegatedTaskReturnState.shouldEnqueueSnapshot(task) {
+                    self.enqueueDelegatedTaskReturn(task)
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -992,6 +1078,8 @@ final class CompanionManager: ObservableObject {
     private func resetDelegatedTaskProjectionForConversationChange() {
         taskSnapshotRefreshTask?.cancel()
         taskSnapshotRefreshTask = nil
+        cancelDelegatedTaskReturnProcessing(stopActiveAnnouncement: true)
+        delegatedTaskReturnQueues.removeAll()
         agentPresenceWindowManager.replaceWithSnapshot([])
         if agentRuntimeAvailability == .ready {
             refreshDelegatedTaskSnapshot()
@@ -999,6 +1087,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func retryDelegatedTaskFromBeginning(_ task: YishuDelegatedTaskPresenceEvent) {
+        suppressDelegatedTaskReturn(task.id)
         guard canChangeConversation else {
             ensureOverlayVisibleForVoiceFeedback()
             responseOverlayManager.showStaticMessage(
@@ -1014,6 +1103,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func promptForNewDirection(after task: YishuDelegatedTaskPresenceEvent) {
+        suppressDelegatedTaskReturn(task.id)
         agentPresenceWindowManager.acknowledge(task.id)
         ensureOverlayVisibleForVoiceFeedback()
         responseOverlayManager.showStaticMessage(
@@ -1037,6 +1127,133 @@ final class CompanionManager: ObservableObject {
             .sink { [weak self] _ in
                 self?.updateVisualState()
             }
+    }
+
+    private func enqueueDelegatedTaskReturn(_ task: YishuDelegatedTaskPresenceEvent) {
+        guard task.mainConversationId == yishuAgentRuntimeClient.currentConversationId,
+              task.returnAnnouncementText != nil,
+              task.id != activeDelegatedTaskReturnID else { return }
+        var queue = delegatedTaskReturnQueues[task.mainConversationId] ?? []
+        guard !queue.contains(where: { $0.id == task.id }) else { return }
+        queue.append(task)
+        delegatedTaskReturnQueues[task.mainConversationId] = queue
+        scheduleDelegatedTaskReturnProcessing()
+    }
+
+    private func suppressDelegatedTaskReturn(_ taskID: UUID) {
+        delegatedTaskReturnState.markAnnounced(taskID)
+        for conversationID in Array(delegatedTaskReturnQueues.keys) {
+            delegatedTaskReturnQueues[conversationID]?.removeAll { $0.id == taskID }
+        }
+        if activeDelegatedTaskReturnID == taskID {
+            cancelDelegatedTaskReturnProcessing(stopActiveAnnouncement: true)
+        }
+    }
+
+    private func scheduleDelegatedTaskReturnProcessing() {
+        guard delegatedTaskReturnProcessingTask == nil else { return }
+        let conversationID = yishuAgentRuntimeClient.currentConversationId
+        guard delegatedTaskReturnQueues[conversationID]?.isEmpty == false else { return }
+        let token = UUID()
+        delegatedTaskReturnProcessingToken = token
+        delegatedTaskReturnProcessingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.delegatedTaskReturnProcessingToken == token {
+                    self.delegatedTaskReturnProcessingTask = nil
+                    self.delegatedTaskReturnProcessingToken = nil
+                    self.activeDelegatedTaskReturnID = nil
+                }
+            }
+            while !Task.isCancelled,
+                  self.yishuAgentRuntimeClient.currentConversationId == conversationID,
+                  let task = self.delegatedTaskReturnQueues[conversationID]?.first {
+                guard await self.waitForDelegatedReturnQuietWindow(
+                    conversationID: conversationID
+                ) else { return }
+                guard !Task.isCancelled,
+                      self.yishuAgentRuntimeClient.currentConversationId == conversationID,
+                      self.delegatedTaskReturnQueues[conversationID]?.first?.id == task.id,
+                      let text = task.returnAnnouncementText else { continue }
+
+                self.activeDelegatedTaskReturnID = task.id
+                self.ensureOverlayVisibleForVoiceFeedback()
+                self.responseOverlayManager.showStaticMessage(text, autoHideAfter: 12)
+                do {
+                    try await self.elevenLabsTTSClient.speakText(
+                        text,
+                        speed: self.speechSpeed
+                    )
+                    while self.elevenLabsTTSClient.isPlaying && !Task.isCancelled {
+                        try await Task.sleep(nanoseconds: 200_000_000)
+                    }
+                } catch is CancellationError {
+                    // PTT/cancel is not delivery. Keep the head item durable and
+                    // queued so it can return after the foreground turn ends.
+                    return
+                } catch {
+                    // The overlay was rendered even though voice failed. Treat
+                    // that visible delivery as complete and avoid a restart flood.
+                    print("⚠️ 奕枢后台任务回访 TTS 失败")
+                }
+                guard !Task.isCancelled,
+                      self.delegatedTaskReturnQueues[conversationID]?.first?.id == task.id else {
+                    return
+                }
+                self.delegatedTaskReturnQueues[conversationID]?.removeFirst()
+                self.delegatedTaskReturnState.markAnnounced(task.id)
+                self.activeDelegatedTaskReturnID = nil
+                self.scheduleTransientHideIfNeeded()
+            }
+        }
+    }
+
+    private func waitForDelegatedReturnQuietWindow(conversationID: UUID) async -> Bool {
+        while !Task.isCancelled {
+            guard yishuAgentRuntimeClient.currentConversationId == conversationID else {
+                return false
+            }
+            let foregroundBusy = voiceState != .idle
+                || currentResponseTask != nil
+                || activeRuntimeRequestId != nil
+                || yishuAgentRuntimeClient.hasActiveTurn
+                || isPushToTalkKeyHeld
+                || elevenLabsTTSClient.isPlaying
+            let secondsSinceLastUserInput = CGEventSource.secondsSinceLastEventType(
+                .hidSystemState,
+                eventType: CGEventType(rawValue: UInt32.max)!
+            )
+            if YishuDelegatedTaskReturnState.canPresent(
+                foregroundBusy: foregroundBusy,
+                secondsSinceLastUserInput: secondsSinceLastUserInput,
+                quietInterval: delegatedReturnQuietInterval
+            ) {
+                return true
+            }
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return false
+            }
+        }
+        return false
+    }
+
+    private func cancelDelegatedTaskReturnProcessing(stopActiveAnnouncement: Bool) {
+        delegatedTaskReturnProcessingTask?.cancel()
+        delegatedTaskReturnProcessingTask = nil
+        delegatedTaskReturnProcessingToken = nil
+        if stopActiveAnnouncement, activeDelegatedTaskReturnID != nil {
+            responseOverlayManager.hideOverlay()
+            elevenLabsTTSClient.stopPlayback()
+        }
+        activeDelegatedTaskReturnID = nil
+    }
+
+    private func interruptDelegatedTaskReturnForForegroundTurn() {
+        // Waiting items remain queued. Once this foreground turn finishes and
+        // the user is quiet again, the pump resumes with the same conversation.
+        cancelDelegatedTaskReturnProcessing(stopActiveAnnouncement: true)
     }
 
     private func updateRuntimeVisualPhase(for event: YishuRuntimeLifecycleEvent) {
@@ -1197,6 +1414,11 @@ final class CompanionManager: ObservableObject {
         trailSampleTask = nil
         taskSnapshotRefreshTask?.cancel()
         taskSnapshotRefreshTask = nil
+        agentRuntimeRestartTask?.cancel()
+        agentRuntimeRestartTask = nil
+        cancelAgentRuntimeReadyWatchdog()
+        cancelDelegatedTaskReturnProcessing(stopActiveAnnouncement: true)
+        delegatedTaskReturnQueues.removeAll()
 
         pendingVoiceTurnOrigin = nil
         currentResponseTask?.cancel()
@@ -1402,6 +1624,10 @@ final class CompanionManager: ObservableObject {
             guard !buddyDictationManager.isDictationInProgress else { return }
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
+
+            // The user takes the floor immediately. Stop only the item already
+            // speaking; waiting returns stay queued for the next quiet window.
+            interruptDelegatedTaskReturnForForegroundTurn()
 
             // A new press starts a new trace. Any origin left by an interrupted
             // or silent session must not be attached to this transcript.
@@ -1625,6 +1851,7 @@ final class CompanionManager: ObservableObject {
         origin: VoiceTurnOrigin?
     ) {
         currentResponseTask?.cancel()
+        cancelActiveSentenceSpeechPipeline()
         cancelActiveRuntimeTurn(reason: "superseded")
         elevenLabsTTSClient.stopPlayback()
 
@@ -1632,6 +1859,7 @@ final class CompanionManager: ObservableObject {
         activeVoiceTurnToken = turnToken
         activeTurnConsumedComputerAction = false
         activeTurnLastComputerActionResult = nil
+        activeTurnLastComputerActionName = nil
         currentResponseTask = Task { [weak self] in
             guard let self else { return }
             let timing = VoiceTurnTiming(origin: origin)
@@ -1706,10 +1934,11 @@ final class CompanionManager: ObservableObject {
                 )
                 try Task.checkCancellation()
                 try await presentVoiceResponse(
-                    response,
+                    response.text,
                     transcript: transcript,
                     screenCaptures: capturedContext.screenCaptures,
-                    timing: timing
+                    timing: timing,
+                    speechAlreadyPresented: response.speechAlreadyPresented
                 )
             } catch is CancellationError {
                 clearMemorySourceNotice()
@@ -1717,9 +1946,11 @@ final class CompanionManager: ObservableObject {
             } catch {
                 clearMemorySourceNotice()
                 guard !Task.isCancelled else { return }
-                var fallbackScreenCaptures = capturedContext.screenCaptures
                 let actionResult = activeVoiceTurnToken == turnToken
                     ? activeTurnLastComputerActionResult
+                    : nil
+                let actionName = activeVoiceTurnToken == turnToken
+                    ? activeTurnLastComputerActionName
                     : nil
                 switch Self.runtimeFailureRecoveryRoute(
                     actionResult: actionResult,
@@ -1733,7 +1964,10 @@ final class CompanionManager: ObservableObject {
                     responseOverlayManager.showOverlayAndBeginStreaming()
                     do {
                         try await presentVoiceResponse(
-                            Self.directClickConfirmation(for: actionResult),
+                            Self.directActionConfirmation(
+                                for: actionResult,
+                                action: actionName
+                            ),
                             transcript: transcript,
                             screenCaptures: capturedContext.screenCaptures,
                             timing: timing
@@ -1754,10 +1988,6 @@ final class CompanionManager: ObservableObject {
                     timing.mark("runtime_restart", reason: "sidecar_not_running")
                     do {
                         let retryContext = await yishuContextFrameCollector.capture()
-                        fallbackScreenCaptures = Self.continuityProxyScreenCaptures(
-                            initial: fallbackScreenCaptures,
-                            retry: retryContext.screenCaptures
-                        )
                         timing.mark(
                             "context_capture",
                             reason: "runtime_restart",
@@ -1772,10 +2002,11 @@ final class CompanionManager: ObservableObject {
                         try Task.checkCancellation()
                         timing.mark("runtime_restart_complete", reason: "ok")
                         try await presentVoiceResponse(
-                            response,
+                            response.text,
                             transcript: transcript,
                             screenCaptures: retryContext.screenCaptures,
-                            timing: timing
+                            timing: timing,
+                            speechAlreadyPresented: response.speechAlreadyPresented
                         )
                         return
                     } catch is CancellationError {
@@ -1787,24 +2018,10 @@ final class CompanionManager: ObservableObject {
                         responseOverlayManager.hideOverlay()
                         timing.mark("runtime_restart_complete", reason: "failed")
                     }
-                case .legacyProxy:
+                case .surfaceFailure:
                     break
                 }
-                responseOverlayManager.hideOverlay()
-                print("⚠️ Unified Runtime recovery failed; using continuity proxy")
-                do {
-                    try await respondLocally(
-                        transcript: transcript,
-                        screenCaptures: fallbackScreenCaptures,
-                        timing: timing
-                    )
-                } catch is CancellationError {
-                    responseOverlayManager.hideOverlay()
-                } catch {
-                    ClickyAnalytics.trackResponseError(error: error.localizedDescription)
-                    print("⚠️ 奕枢 voice response failed")
-                    speakCreditsErrorFallback()
-                }
+                await presentRuntimeFailure()
             }
 
         }
@@ -1952,15 +2169,6 @@ final class CompanionManager: ObservableObject {
         return cache
     }
 
-    /// Labels for toolbar/chrome navigation that OCR often cannot see (glyph-only).
-    /// Back (返回) and Up (上一级/上层文件夹) stay separate; never mix them.
-    static func accessibilityChromeNavigationLabels(for utterance: String) -> [String]? {
-        guard let target = YishuDirectClickResolver.targetPhrase(from: utterance) else {
-            return nil
-        }
-        return YishuComputerUseActuator.chromeNavigationLabels(forTargetPhrase: target)
-    }
-
     /// Pure basis check shared by the post-OCR prewarm guard and cache reuse.
     /// It intentionally requires a known frontmost owner and computes age from
     /// the instant the screen capture completed, not from OCR completion.
@@ -2080,67 +2288,6 @@ final class CompanionManager: ObservableObject {
             } else if Task.isCancelled {
                 timing.mark("ocr_resolve", reason: DirectClickFastPathMissReason.cancelled.rawValue, sourceDimensions: sourceDimensions)
                 return .miss(.cancelled)
-            } else if let chromeLabels = Self.accessibilityChromeNavigationLabels(for: transcript) {
-                // Finder toolbar "返回" is an AX description on a chevron control;
-                // OCR cannot see the glyphs. Press the live labeled control once.
-                timing.mark("ocr_resolve", reason: "ocr_no_match_chrome_ax", sourceDimensions: sourceDimensions)
-                let sourceDimensions = Self.telemetryDimensions(for: screenCaptures)
-                activeTurnConsumedComputerAction = true
-                timing.mark("action_dispatch", reason: "chrome_ax_label", sourceDimensions: sourceDimensions)
-                let result = await YishuComputerUseActuator.performFrontmostLabeledControl(
-                    matching: chromeLabels,
-                    screenCaptures: screenCaptures
-                )
-                activeTurnLastComputerActionResult = result
-                timing.mark(
-                    "actuator_readback",
-                    reason: result.code.rawValue,
-                    sourceDimensions: sourceDimensions,
-                    receiptID: result.receiptId
-                )
-                Self.logComputerActionTelemetry(
-                    route: "ocr_fast_path_chrome_ax",
-                    request: YishuComputerActionRequest(
-                        requestId: UUID(),
-                        traceId: UUID(),
-                        actionId: UUID(),
-                        action: "left_click",
-                        x: 0,
-                        y: 0,
-                        screen: 1,
-                        label: chromeLabels.joined(separator: "|"),
-                        intentId: UUID().uuidString,
-                        attemptId: result.attemptId,
-                        basisFrameId: UUID().uuidString,
-                        effectClass: "activate"
-                    ),
-                    result: result,
-                    sourceCapture: screenCaptures.first(where: \.isCursorScreen) ?? screenCaptures.first
-                )
-                let confirmation = Self.directClickConfirmation(for: result)
-                print(
-                    "🖱️ 奕枢 direct chrome-ax action handled "
-                        + "status=\(result.status.rawValue) "
-                        + "method=\(result.method.rawValue) "
-                        + "code=\(result.code.rawValue)"
-                )
-                responseOverlayManager.showOverlayAndBeginStreaming()
-                responseOverlayManager.updateStreamingText(confirmation)
-                responseOverlayManager.finishStreaming()
-                voiceState = .responding
-                do {
-                    try await presentVoiceResponse(
-                        confirmation,
-                        transcript: transcript,
-                        screenCaptures: screenCaptures,
-                        timing: timing
-                    )
-                } catch is CancellationError {
-                    responseOverlayManager.hideOverlay()
-                } catch {
-                    // Click already attempted; do not fall through to model replay.
-                }
-                return .handled(result)
             } else {
                 let reason: DirectClickFastPathMissReason = .ocrNoMatch
                 timing.mark("ocr_resolve", reason: reason.rawValue, sourceDimensions: sourceDimensions)
@@ -2175,6 +2322,7 @@ final class CompanionManager: ObservableObject {
             screenCaptures: screenCaptures
         )
         activeTurnLastComputerActionResult = result
+        activeTurnLastComputerActionName = request.action
         timing.mark(
             "actuator_readback",
             reason: result.code.rawValue,
@@ -2190,7 +2338,10 @@ final class CompanionManager: ObservableObject {
                 : nil
         )
 
-        let confirmation = Self.directClickConfirmation(for: result)
+        let confirmation = Self.directActionConfirmation(
+            for: result,
+            action: request.action
+        )
         print(
             "🖱️ 奕枢 direct action handled "
                 + "status=\(result.status.rawValue) "
@@ -2217,22 +2368,28 @@ final class CompanionManager: ObservableObject {
         return .handled(result)
     }
 
-    /// Sample app/window/AX into ContextTrail every ~15s without screenshots.
+    /// Sample app/window/AX into ContextTrail every ~5s without screenshots.
     private func startContextTrailSampling() {
         trailSampleTask?.cancel()
         trailSampleTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if self.yishuAgentRuntimeClient.isRunning {
-                    let sample = self.yishuContextFrameCollector.captureTrailSample()
-                    do {
-                        try self.yishuAgentRuntimeClient.observeTrail(contextFrame: sample)
-                    } catch {
-                        // Runtime may be restarting; next interval retries.
-                    }
-                }
+                self.observeContextTrailSampleIfAllowed()
                 try? await Task.sleep(nanoseconds: self.trailSampleIntervalNanoseconds)
             }
+        }
+    }
+
+    private func observeContextTrailSampleIfAllowed() {
+        // Private sessions must not collect the evidence locally and rely on a
+        // later Node filter. The trust boundary sits before Swift collection.
+        guard sessionScope.kind != .privateSession,
+              yishuAgentRuntimeClient.isRunning else { return }
+        let sample = yishuContextFrameCollector.captureTrailSample()
+        do {
+            try yishuAgentRuntimeClient.observeTrail(contextFrame: sample)
+        } catch {
+            // Runtime may be restarting; next interval retries.
         }
     }
 
@@ -2241,13 +2398,14 @@ final class CompanionManager: ObservableObject {
         contextFrame: YishuContextFrame,
         screenCaptures: [CompanionScreenCapture],
         timing: VoiceTurnTiming? = nil
-    ) async throws -> String {
+    ) async throws -> YishuRuntimeVoiceResponse {
         try contextFrame.validate()
         if !yishuAgentRuntimeClient.isRunning {
             runtimeVisualPhase = .connecting
             agentRuntimeAvailability = .starting
             do {
                 try yishuAgentRuntimeClient.start()
+                armAgentRuntimeReadyWatchdog()
             } catch {
                 // A synchronous launch failure is not an active connection
                 // attempt. The outer recovery path may retry with fresh evidence.
@@ -2277,6 +2435,35 @@ final class CompanionManager: ObservableObject {
         var completedText: String?
         var usedMemories: [YishuMemoryUsedItem] = []
         let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
+        var didStartStreamingSpeech = false
+        let sentenceSpeechPipeline: YishuSentenceSpeechPipeline? = {
+            guard YishuSentenceSpeechPolicy.allowsStreaming(for: transcript) else {
+                return nil
+            }
+            let pipeline = YishuSentenceSpeechPipeline(
+                speaker: { [weak self] sentence in
+                    guard let self else { throw CancellationError() }
+                    let ttsText = Self.speechText(from: sentence)
+                    guard !ttsText.isEmpty else { throw CancellationError() }
+                    try await self.elevenLabsTTSClient.speakText(
+                        ttsText,
+                        speed: self.speechSpeed
+                    )
+                },
+                stopPlayback: { [weak self] in
+                    self?.elevenLabsTTSClient.stopPlayback()
+                }
+            )
+            activeSentenceSpeechPipeline = pipeline
+            return pipeline
+        }()
+        defer {
+            if let sentenceSpeechPipeline,
+               activeSentenceSpeechPipeline === sentenceSpeechPipeline {
+                sentenceSpeechPipeline.cancel()
+                activeSentenceSpeechPipeline = nil
+            }
+        }
         // Clear prior turn's memory source so unrelated answers cannot inherit it.
         clearMemorySourceNotice()
         try await withTaskCancellationHandler {
@@ -2296,6 +2483,14 @@ final class CompanionManager: ObservableObject {
                     guard activeRuntimeRequestId == turn.requestId,
                           !Task.isCancelled else {
                         continue
+                    }
+                    // Once a desktop effect enters the turn, stop speculative
+                    // speech and wait for the verified final confirmation.
+                    if let sentenceSpeechPipeline {
+                        sentenceSpeechPipeline.cancel()
+                        if activeSentenceSpeechPipeline === sentenceSpeechPipeline {
+                            activeSentenceSpeechPipeline = nil
+                        }
                     }
                     // Consume the runtime action before awaiting the actuator;
                     // the final model text must not replay it via a POINT tag.
@@ -2317,6 +2512,7 @@ final class CompanionManager: ObservableObject {
                     )
                     if activeRuntimeRequestId == turn.requestId {
                         activeTurnLastComputerActionResult = result
+                        activeTurnLastComputerActionName = request.action
                     }
                     timing?.mark(
                         "actuator_readback",
@@ -2342,6 +2538,15 @@ final class CompanionManager: ObservableObject {
                             Self.scrubToolMarkup(from: accumulatedText)
                         )
                     }
+                    if let sentenceSpeechPipeline,
+                       activeSentenceSpeechPipeline === sentenceSpeechPipeline,
+                       !activeTurnConsumedComputerAction,
+                       sentenceSpeechPipeline.consume(delta) > 0,
+                       !didStartStreamingSpeech {
+                        didStartStreamingSpeech = true
+                        voiceState = .responding
+                        timing?.mark("tts_start", reason: "streaming_sentence")
+                    }
                 case let .completed(text, _):
                     updateTurnVisualPhase(for: event)
                     completedText = text
@@ -2352,7 +2557,13 @@ final class CompanionManager: ObservableObject {
             }
         } onCancel: { [weak self] in
             Task { @MainActor in
-                guard let self, self.activeRuntimeRequestId == turn.requestId else { return }
+                guard let self else { return }
+                if let sentenceSpeechPipeline,
+                   self.activeSentenceSpeechPipeline === sentenceSpeechPipeline {
+                    sentenceSpeechPipeline.cancel()
+                    self.activeSentenceSpeechPipeline = nil
+                }
+                guard self.activeRuntimeRequestId == turn.requestId else { return }
                 try? self.yishuAgentRuntimeClient.cancelTurn(
                     requestId: turn.requestId,
                     reason: "task-cancelled"
@@ -2380,7 +2591,29 @@ final class CompanionManager: ObservableObject {
         }
         responseOverlayManager.finishStreaming()
         turnVisualPhase = .shapingOutput
-        return finalText
+        var speechAlreadyPresented = false
+        if let sentenceSpeechPipeline,
+           activeSentenceSpeechPipeline === sentenceSpeechPipeline,
+           !activeTurnConsumedComputerAction {
+            if !didStartStreamingSpeech {
+                voiceState = .responding
+                timing?.mark("tts_start", reason: "final_sentence")
+            }
+            speechAlreadyPresented = await sentenceSpeechPipeline.finish(
+                authoritativeText: finalText
+            )
+            if activeSentenceSpeechPipeline === sentenceSpeechPipeline {
+                activeSentenceSpeechPipeline = nil
+            }
+            timing?.mark(
+                "tts_complete",
+                reason: speechAlreadyPresented ? "streaming_ok" : "streaming_skipped"
+            )
+        }
+        return YishuRuntimeVoiceResponse(
+            text: finalText,
+            speechAlreadyPresented: speechAlreadyPresented
+        )
     }
 
     /// Drop panel + bubble source together. Call on every context boundary.
@@ -2404,60 +2637,27 @@ final class CompanionManager: ObservableObject {
         YishuMemorySourcePolicy.formatNotice(items)
     }
 
-    /// Credential-isolated continuity path. Pi remains the primary brain; this
-    /// path calls the same 8787 proxy only when the sidecar cannot complete.
-    private func respondLocally(
-        transcript: String,
-        screenCaptures: [CompanionScreenCapture],
-        timing: VoiceTurnTiming? = nil
-    ) async throws {
-        // Build image labels with the actual screenshot pixel dimensions
-        // so the local model's coordinate space matches the image it sees.
-        let labeledImages = screenCaptures.map { capture in
-            let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-            return (data: capture.imageData, label: capture.label + dimensionInfo)
-        }
-
-        let historyForAPI = conversationHistory.map { entry in
-            (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
-        }
-
-        responseOverlayManager.showOverlayAndBeginStreaming()
-        turnVisualPhase = .composingResponse
-        let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
-        let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-            images: labeledImages,
-            systemPrompt: Self.companionVoiceResponseSystemPrompt,
-            conversationHistory: historyForAPI,
-            userPrompt: transcript,
-            onTextChunk: { [weak self] accumulatedText in
-                guard let self, !isDirectClickTurn else { return }
-                self.responseOverlayManager.updateStreamingText(
-                    Self.scrubToolMarkup(from: accumulatedText)
-                )
-            }
-        )
-
-        try Task.checkCancellation()
-        let safeResponseText = Self.scrubToolMarkup(from: fullResponseText)
-        if !isDirectClickTurn {
-            responseOverlayManager.updateStreamingText(safeResponseText)
-        }
-        responseOverlayManager.finishStreaming()
+    /// Pi is the only product brain. A failed Runtime turn is surfaced
+    /// honestly instead of silently forking the conversation through a second model loop.
+    private func presentRuntimeFailure() async {
+        let message = "这轮没有完成。我保留了已有记录，你可以直接重试。"
         turnVisualPhase = .shapingOutput
-        try await presentVoiceResponse(
-            safeResponseText,
-            transcript: transcript,
-            screenCaptures: screenCaptures,
-            timing: timing
-        )
+        voiceState = .responding
+        ensureOverlayVisibleForVoiceFeedback()
+        responseOverlayManager.showStaticMessage(message, autoHideAfter: 10)
+        do {
+            try await elevenLabsTTSClient.speakText(message, speed: speechSpeed)
+        } catch {
+            print("⚠️ 奕枢 Runtime failure notice TTS unavailable")
+        }
     }
 
     private func presentVoiceResponse(
         _ fullResponseText: String,
         transcript: String,
         screenCaptures: [CompanionScreenCapture],
-        timing: VoiceTurnTiming? = nil
+        timing: VoiceTurnTiming? = nil,
+        speechAlreadyPresented: Bool = false
     ) async throws {
         try Task.checkCancellation()
 
@@ -2523,6 +2723,7 @@ final class CompanionManager: ObservableObject {
             )
             turnVisualPhase = .confirmingToolResult
             activeTurnLastComputerActionResult = result
+            activeTurnLastComputerActionName = request.action
             timing?.mark(
                 "actuator_readback",
                 reason: result.code.rawValue,
@@ -2535,7 +2736,10 @@ final class CompanionManager: ObservableObject {
                 result: result,
                 sourceCapture: Self.sourceCapture(for: request, in: screenCaptures)
             )
-            spokenText = Self.directClickConfirmation(for: result)
+            spokenText = Self.directActionConfirmation(
+                for: result,
+                action: request.action
+            )
             detectedElementScreenLocation = nil
             detectedElementDisplayFrame = nil
             voiceState = .responding
@@ -2568,19 +2772,13 @@ final class CompanionManager: ObservableObject {
             sourceDimensions: Self.telemetryDimensions(for: screenCaptures)
         )
 
-        conversationHistory.append((
-            userTranscript: transcript,
-            assistantResponse: spokenText
-        ))
-        if conversationHistory.count > 10 {
-            conversationHistory.removeFirst(conversationHistory.count - 10)
-        }
-
-        print("🧠 奕枢 conversation: \(conversationHistory.count) exchanges")
         ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
         let ttsText = Self.speechText(from: spokenText)
-        if !ttsText.isEmpty {
+        if speechAlreadyPresented {
+            // `response.completed` reconciled and drained the sentence queue;
+            // replaying this final text would speak every sentence twice.
+        } else if !ttsText.isEmpty {
             timing?.mark("tts_start", reason: "speech")
             do {
                 try await elevenLabsTTSClient.speakText(
@@ -2938,38 +3136,60 @@ final class CompanionManager: ObservableObject {
         if actionResult != nil {
             return .useActionReceipt
         }
-        return runtimeIsRunning ? .legacyProxy : .restartRuntime
+        return runtimeIsRunning ? .surfaceFailure : .restartRuntime
     }
 
-    static func continuityProxyScreenCaptures(
-        initial: [CompanionScreenCapture],
-        retry: [CompanionScreenCapture]
-    ) -> [CompanionScreenCapture] {
-        // If the Runtime restart still fails, the continuity proxy must answer
-        // from the evidence gathered for that retry instead of stale pre-crash
-        // screenshots. Empty capture sets are still terminal evidence of the
-        // freshest observation attempt.
-        retry
-    }
-
-    private static func directClickConfirmation(for result: YishuComputerActionResult) -> String {
+    private static func directActionConfirmation(
+        for result: YishuComputerActionResult,
+        action: String?
+    ) -> String {
+        let wording: (verified: String, delivered: String, unverified: String, failed: String)
+        switch action {
+        case "set_text":
+            wording = (
+                "填好了。",
+                "输入已送达，但内容还没确认。",
+                "填入结果不确定，我没有重复操作。",
+                "这次没填进去，我没有重复操作。"
+            )
+        case "finder_history_back":
+            wording = (
+                "已经返回。",
+                "返回操作已送达，但界面还没确认。",
+                "返回结果不确定，我没有重复操作。",
+                "这次没能返回，我没有重复操作。"
+            )
+        default:
+            wording = (
+                "点好了。",
+                "点击已送达，但界面结果还没确认。",
+                "点击结果不确定，我没有重复操作。",
+                "这次没点成功，我没有重复操作。"
+            )
+        }
         switch result.status {
         case .verified:
-            return "点好了。"
+            return wording.verified
         case .delivered:
-            return "点击已送达，但界面结果还没确认。"
+            return wording.delivered
         case .unverified:
-            return "点击结果不确定，我没有重复操作。"
+            return wording.unverified
         case .failed:
-            return "这次没点成功，我没有重复操作。"
+            return wording.failed
         }
     }
 
     private func cancelActiveRuntimeTurn(reason: String) {
+        cancelActiveSentenceSpeechPipeline()
         guard let requestId = activeRuntimeRequestId else { return }
         activeRuntimeRequestId = nil
         turnVisualPhase = .idle
         try? yishuAgentRuntimeClient.cancelTurn(requestId: requestId, reason: reason)
+    }
+
+    private func cancelActiveSentenceSpeechPipeline() {
+        activeSentenceSpeechPipeline?.cancel()
+        activeSentenceSpeechPipeline = nil
     }
 
     private static func globalAppKitPoint(
@@ -3218,52 +3438,30 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Onboarding Demo Interaction
 
-    private static let onboardingDemoSystemPrompt = """
-    你是「奕枢」，屏幕上的蓝色小光标伙伴。现在在做首次展示：看用户屏幕，找一个具体、可指认的东西来指。选有明确名字的对象：某个 App 图标、可读的文字、文件名、按钮文案、标签页标题。不要选「某个窗口」「一些文字」这种模糊目标。
-
-    用 3 到 6 个中文词做一句俏皮、好奇的观察，证明你真的看到了那个东西。不要 emoji。不要复读屏幕原文，只做反应。最多 6 个词。
-
-    坐标硬规则：只能选屏幕中心区域。x 在宽度 20% 到 80%，y 在高度 20% 到 80%。不要菜单栏、Dock、侧栏或边缘。
-
-    只输出：短评 + 坐标标签。不要其他内容。
-
-    格式：短评 [POINT:x,y:标签]
-
-    截图带有像素尺寸。原点左上，x 向右，y 向下。
-    """
-
-    /// Captures a screenshot and asks Claude to find something interesting to
-    /// point at, then triggers the buddy's flight animation. Used during
-    /// onboarding to demo the pointing feature while the intro video plays.
+    /// Locally recognizes one reliable, central text target and points at it.
+    /// Screenshot bytes never leave the app during onboarding.
     func performOnboardingDemoInteraction() {
-        // Don't interrupt an active voice response
-        guard voiceState == .idle || voiceState == .responding else { return }
+        // Don't interrupt a voice turn or another pointing animation.
+        guard voiceState == .idle, detectedElementScreenLocation == nil else { return }
 
         Task {
             do {
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
 
-                // Only send the cursor screen so Claude can't pick something
-                // on a different monitor that we can't point at.
                 guard let cursorScreenCapture = screenCaptures.first(where: { $0.isCursorScreen }) else {
                     print("🎯 Onboarding demo: no cursor screen found")
                     return
                 }
 
-                let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
-                let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
-
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.onboardingDemoSystemPrompt,
-                    userPrompt: "看看我的屏幕，找一个有意思的东西指给我看",
-                    onTextChunk: { _ in }
+                let screen = YishuDirectClickScreen(
+                    imageData: cursorScreenCapture.imageData,
+                    screenshotWidthInPixels: cursorScreenCapture.screenshotWidthInPixels,
+                    screenshotHeightInPixels: cursorScreenCapture.screenshotHeightInPixels,
+                    screenNumber: 1
                 )
-
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
-
-                guard let pointCoordinate = parseResult.coordinate else {
-                    print("🎯 Onboarding demo: no element to point at")
+                guard let match = await YishuDirectClickResolver.resolveOnboardingTarget(screen: screen),
+                      let bubbleText = Self.onboardingObservationBubble(for: match.label) else {
+                    print("🎯 Onboarding demo: no reliable central text found")
                     return
                 }
 
@@ -3273,8 +3471,8 @@ final class CompanionManager: ObservableObject {
                 let displayHeight = CGFloat(cursorScreenCapture.displayHeightInPoints)
                 let displayFrame = cursorScreenCapture.displayFrame
 
-                let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
+                let clampedX = max(0, min(CGFloat(match.x), screenshotWidth))
+                let clampedY = max(0, min(CGFloat(match.y), screenshotHeight))
                 let displayLocalX = clampedX * (displayWidth / screenshotWidth)
                 let displayLocalY = clampedY * (displayHeight / screenshotHeight)
                 let appKitY = displayHeight - displayLocalY
@@ -3283,16 +3481,23 @@ final class CompanionManager: ObservableObject {
                     y: appKitY + displayFrame.origin.y
                 )
 
-                // Set custom bubble text so the pointing animation uses Claude's
-                // comment instead of a random phrase
-                detectedElementBubbleText = parseResult.spokenText
+                detectedElementBubbleText = bubbleText
                 detectedElementScreenLocation = globalLocation
                 detectedElementDisplayFrame = displayFrame
-                print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
+                print("🎯 Onboarding demo: local text target selected")
             } catch {
                 print("⚠️ Onboarding demo error: \(error)")
             }
         }
+    }
+
+    private static func onboardingObservationBubble(for label: String) -> String? {
+        let normalized = label
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        return "我看见「\(String(normalized.prefix(20)))」了。"
     }
 }
 

@@ -174,6 +174,7 @@ build() {
     CODE_SIGN_STYLE=Manual \
     CODE_SIGN_IDENTITY="$IDENTITY" \
     DEVELOPMENT_TEAM= \
+    ENABLE_DEBUG_DYLIB=NO \
     OTHER_CODE_SIGN_FLAGS="--timestamp=none" \
     build
   bundle_yishu_runtime

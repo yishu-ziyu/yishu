@@ -10,6 +10,10 @@ import type {
   ConversationListOptions,
   ConversationTurn,
   ConversationTurnInput,
+  ContextWatch,
+  ContextWatchCreateInput,
+  ContextWatchCreateResult,
+  ContextWatchTransitionInput,
   DelegatedResultInput,
   DelegatedResultListOptions,
   DelegatedResultRecord,
@@ -65,6 +69,7 @@ import {
   assertPersistableEventType,
   assertPersistableLearningFields,
   assertPersistableMemoryFields,
+  assertPersistableSafeText,
   assertPersistableSkillFields,
   cloneEventPayload,
   sanitizeEventPayload,
@@ -85,6 +90,14 @@ import {
   restoreSeedMindState,
   writeMindSectionState,
 } from "./mind-store.js"
+import {
+  buildContextWatchCreation,
+  cloneContextWatch,
+  CONTEXT_WATCH_FIRE_ACTION,
+  contextWatchObservationIsNew,
+  isActiveContextWatch,
+  normalizeContextWatchRecord,
+} from "./context-watch.js"
 
 
 function nowIso(): string {
@@ -219,6 +232,7 @@ function emptySnapshot(): YishuStoreSnapshot {
     verifiedSkills: [],
     mandates: [],
     tasks: [],
+    contextWatches: [],
     delegatedResults: [],
     conversations: [],
     turns: [],
@@ -283,6 +297,7 @@ function cloneSnapshot(data: YishuStoreSnapshot): YishuStoreSnapshot {
       if (t.contract !== undefined) copy.contract = { ...t.contract }
       return copy
     }),
+    contextWatches: data.contextWatches.map(cloneContextWatch),
     delegatedResults: data.delegatedResults.map(cloneDelegatedResult),
     conversations: data.conversations.map((conversation) => ({
       ...conversation,
@@ -314,6 +329,7 @@ function parseSnapshot(raw: unknown): YishuStoreSnapshot {
     verifiedSkills: parseVerifiedSkills(raw.verifiedSkills),
     mandates: Array.isArray(raw.mandates) ? (raw.mandates as Mandate[]) : [],
     tasks: parseTasks(raw.tasks),
+    contextWatches: parseContextWatches(raw.contextWatches),
     delegatedResults: parseDelegatedResults(raw.delegatedResults),
     conversations: parseConversations(raw.conversations),
     turns: parseConversationTurns(raw.turns),
@@ -321,6 +337,12 @@ function parseSnapshot(raw: unknown): YishuStoreSnapshot {
     mind: parseMindState(raw.mind),
     suggestions: parseSuggestions(raw.suggestions),
   }
+}
+
+function parseContextWatches(raw: unknown): ContextWatch[] {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw)) throw new Error("yishu-store: invalid context watches")
+  return raw.map(normalizeContextWatchRecord)
 }
 
 function parseTasks(raw: unknown): TaskTruth[] {
@@ -900,6 +922,18 @@ export interface YishuStorePort {
   revokeMandate(id: string): Promise<boolean>
   upsertTask(input: TaskInput): Promise<TaskTruth>
   listTasks(options?: TaskSearchOptions): Promise<TaskTruth[]>
+  /** Atomically create the authorization, task truth, and one-shot watch. */
+  createContextWatch(input: ContextWatchCreateInput): Promise<ContextWatchCreateResult>
+  /** Active watches are always queried inside one exact durable scope. */
+  listActiveContextWatches(sessionScope: SessionScope): Promise<ContextWatch[]>
+  /** Exact-scope compare-and-swap for waiting -> armed -> fired. */
+  transitionContextWatch(input: ContextWatchTransitionInput): Promise<ContextWatch | null>
+  /** Cancel one active watch and its task/mandate in the same durable mutation. */
+  cancelContextWatch(
+    id: string,
+    sessionScope: SessionScope,
+    cancelledAt?: string,
+  ): Promise<ContextWatch | null>
   putDelegatedResult(input: DelegatedResultInput): Promise<DelegatedResultRecord>
   /** Atomically persist the canonical TaskTruth transition and its result payload. */
   upsertTaskWithDelegatedResult(
@@ -1417,6 +1451,168 @@ class YishuStoreCore {
       if (t.contract !== undefined) copy.contract = { ...t.contract }
       return copy
     })
+  }
+
+  createContextWatchSync(input: ContextWatchCreateInput): ContextWatchCreateResult {
+    this.ensureData()
+    const before = cloneSnapshot(this.data)
+    try {
+      const creation = buildContextWatchCreation(input)
+      if (
+        this.data.contextWatches.some((watch) => watch.id === creation.watch.id)
+        || this.data.tasks.some((task) => task.id === creation.task.id)
+        || this.data.mandates.some((mandate) => mandate.id === creation.mandate.id)
+      ) {
+        throw new Error("context_watch_id_conflict")
+      }
+      this.data.mandates.push({ ...creation.mandate })
+      this.data.tasks.push({
+        ...creation.task,
+        evidence: [...creation.task.evidence],
+        sessionScope: cloneSessionScope(creation.task.sessionScope),
+        ...(creation.task.contract === undefined
+          ? {}
+          : { contract: { ...creation.task.contract } }),
+      })
+      this.data.contextWatches.push(cloneContextWatch(creation.watch))
+      return {
+        watch: cloneContextWatch(creation.watch),
+        task: {
+          ...creation.task,
+          evidence: [...creation.task.evidence],
+          sessionScope: cloneSessionScope(creation.task.sessionScope),
+          ...(creation.task.contract === undefined
+            ? {}
+            : { contract: { ...creation.task.contract } }),
+        },
+        mandate: { ...creation.mandate },
+      }
+    } catch (error) {
+      this.data = before
+      throw error
+    }
+  }
+
+  listActiveContextWatchesSync(sessionScope: SessionScope): ContextWatch[] {
+    this.ensureData()
+    const requestedScope = normalizeSessionScope(sessionScope)
+    assertDurableSessionScope(requestedScope)
+    return this.data.contextWatches
+      .filter((watch) =>
+        isActiveContextWatch(watch)
+        && sessionScopesEqual(watch.sessionScope, requestedScope)
+      )
+      .map(cloneContextWatch)
+  }
+
+  transitionContextWatchSync(input: ContextWatchTransitionInput): ContextWatch | null {
+    this.ensureData()
+    const requestedScope = normalizeSessionScope(input.sessionScope)
+    assertDurableSessionScope(requestedScope)
+    if (
+      !(
+        input.expectedState === "waiting_for_departure"
+        && input.nextState === "armed"
+      )
+      && !(input.expectedState === "armed" && input.nextState === "fired")
+    ) {
+      throw new Error("context_watch_invalid_transition")
+    }
+    const occurredAt = input.occurredAt ?? nowIso()
+    if (!validIsoTimestamp(occurredAt)) throw new Error("context_watch_invalid_occurred_at")
+    assertPersistableSafeText(input.observationFrameId, "context watch observation frame id")
+    if (input.observationFrameId.trim().length === 0 || input.observationFrameId.length > 160) {
+      throw new Error("context_watch_invalid_observation_frame_id")
+    }
+    const watch = this.data.contextWatches.find((candidate) => candidate.id === input.id)
+    if (
+      !watch
+      || !sessionScopesEqual(watch.sessionScope, requestedScope)
+      || watch.state !== input.expectedState
+      || !contextWatchObservationIsNew(watch, input.nextState, occurredAt)
+    ) {
+      return null
+    }
+
+    const before = cloneSnapshot(this.data)
+    try {
+      const task = this.data.tasks.find((candidate) => candidate.id === watch.taskId)
+      const mandate = this.data.mandates.find((candidate) => candidate.id === watch.mandateId)
+      if (
+        !task
+        || task.status !== "running"
+        || !sessionScopesEqual(task.sessionScope, requestedScope)
+        || !mandate
+        || mandate.actionName !== CONTEXT_WATCH_FIRE_ACTION
+        || mandate.scope !== CONTEXT_WATCH_FIRE_ACTION
+      ) {
+        throw new Error("context_watch_truth_invariant_broken")
+      }
+      watch.state = input.nextState
+      if (input.nextState === "armed") {
+        watch.armedAt = occurredAt
+      } else {
+        watch.firedAt = occurredAt
+      }
+      task.updatedAt = occurredAt
+      task.evidence.push(
+        `context_watch:${input.nextState}:${input.observationFrameId}`,
+      )
+      if (input.nextState === "fired") {
+        task.status = "done"
+        this.putDelegatedResultSync({
+          taskId: watch.taskId,
+          parentId: watch.mandateId,
+          mainConversationId: watch.mainConversationId,
+          resultKind: "completed",
+          summary: `提醒：${watch.reminder}`,
+          completedAt: occurredAt,
+          sequence: [],
+        })
+        this.data.mandates = this.data.mandates.filter(
+          (candidate) => candidate.id !== watch.mandateId,
+        )
+      }
+      return cloneContextWatch(watch)
+    } catch (error) {
+      this.data = before
+      throw error
+    }
+  }
+
+  cancelContextWatchSync(
+    id: string,
+    sessionScope: SessionScope,
+    cancelledAt?: string,
+  ): ContextWatch | null {
+    this.ensureData()
+    const requestedScope = normalizeSessionScope(sessionScope)
+    assertDurableSessionScope(requestedScope)
+    const watch = this.data.contextWatches.find((candidate) => candidate.id === id)
+    if (!watch || !sessionScopesEqual(watch.sessionScope, requestedScope)) return null
+    if (watch.state === "cancelled") return cloneContextWatch(watch)
+    if (watch.state === "fired") return null
+    const stamp = cancelledAt ?? nowIso()
+    if (!validIsoTimestamp(stamp)) throw new Error("context_watch_invalid_cancelled_at")
+
+    const before = cloneSnapshot(this.data)
+    try {
+      const task = this.data.tasks.find((candidate) => candidate.id === watch.taskId)
+      if (!task || !sessionScopesEqual(task.sessionScope, requestedScope)) {
+        throw new Error("context_watch_truth_invariant_broken")
+      }
+      watch.state = "cancelled"
+      task.status = "cancelled"
+      task.updatedAt = stamp
+      task.evidence.push(`context_watch:cancelled:${watch.id}`)
+      this.data.mandates = this.data.mandates.filter(
+        (candidate) => candidate.id !== watch.mandateId,
+      )
+      return cloneContextWatch(watch)
+    } catch (error) {
+      this.data = before
+      throw error
+    }
   }
 
   putDelegatedResultSync(input: DelegatedResultInput): DelegatedResultRecord {
@@ -2228,6 +2424,66 @@ export class YishuStore extends YishuStoreCore implements YishuStorePort {
     })
   }
 
+  async createContextWatch(input: ContextWatchCreateInput): Promise<ContextWatchCreateResult> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const before = cloneSnapshot(this.data)
+      try {
+        const result = this.createContextWatchSync(input)
+        await this.saveUnsafe()
+        return result
+      } catch (error) {
+        this.data = before
+        await this.writeSnapshotUnsafe(before).catch(() => undefined)
+        throw error
+      }
+    })
+  }
+
+  async listActiveContextWatches(sessionScope: SessionScope): Promise<ContextWatch[]> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      return this.listActiveContextWatchesSync(sessionScope)
+    })
+  }
+
+  async transitionContextWatch(input: ContextWatchTransitionInput): Promise<ContextWatch | null> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const before = cloneSnapshot(this.data)
+      try {
+        const result = this.transitionContextWatchSync(input)
+        if (result) await this.saveUnsafe()
+        return result
+      } catch (error) {
+        this.data = before
+        await this.writeSnapshotUnsafe(before).catch(() => undefined)
+        throw error
+      }
+    })
+  }
+
+  async cancelContextWatch(
+    id: string,
+    sessionScope: SessionScope,
+    cancelledAt?: string,
+  ): Promise<ContextWatch | null> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const before = cloneSnapshot(this.data)
+      try {
+        const previous = this.data.contextWatches.find((watch) => watch.id === id)?.state
+        const result = this.cancelContextWatchSync(id, sessionScope, cancelledAt)
+        if (result && previous !== "cancelled") await this.saveUnsafe()
+        return result
+      } catch (error) {
+        this.data = before
+        await this.writeSnapshotUnsafe(before).catch(() => undefined)
+        throw error
+      }
+    })
+  }
+
   async putDelegatedResult(input: DelegatedResultInput): Promise<DelegatedResultRecord> {
     return this.enqueue(async () => {
       await this.ensureLoadedUnsafe()
@@ -2652,6 +2908,26 @@ export class InMemoryYishuStore extends YishuStoreCore implements YishuStorePort
 
   async listTasks(options?: TaskSearchOptions): Promise<TaskTruth[]> {
     return this.listTasksSync(options)
+  }
+
+  async createContextWatch(input: ContextWatchCreateInput): Promise<ContextWatchCreateResult> {
+    return this.createContextWatchSync(input)
+  }
+
+  async listActiveContextWatches(sessionScope: SessionScope): Promise<ContextWatch[]> {
+    return this.listActiveContextWatchesSync(sessionScope)
+  }
+
+  async transitionContextWatch(input: ContextWatchTransitionInput): Promise<ContextWatch | null> {
+    return this.transitionContextWatchSync(input)
+  }
+
+  async cancelContextWatch(
+    id: string,
+    sessionScope: SessionScope,
+    cancelledAt?: string,
+  ): Promise<ContextWatch | null> {
+    return this.cancelContextWatchSync(id, sessionScope, cancelledAt)
   }
 
   async putDelegatedResult(input: DelegatedResultInput): Promise<DelegatedResultRecord> {

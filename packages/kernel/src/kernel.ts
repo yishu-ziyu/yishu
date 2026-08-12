@@ -16,6 +16,7 @@ import {
   createRunSkillAction,
   createSettleSuggestionAction,
   createShareContextAction,
+  createWatchAppReturnAction,
 } from "./actions/index.js";
 import {
   InMemoryYishuStore,
@@ -96,6 +97,7 @@ export function createYishuKernel(
     createLearnMindFromPatternAction(store),
     createRunSkillAction({ store, trail }),
     createFinderHistoryBackAction(),
+    createWatchAppReturnAction(store),
     createDelegateAction({ taskTruth }),
   ];
 

@@ -59,8 +59,10 @@ Runtime adapters
 ## Migration order
 
 1. **锁定边界**：统一文档、根命令、依赖守卫和验证入口，停止增加新旁路。
-2. **消除主链旁路**：将 `/chat` fallback 移入 Runtime，停止使用 Clicky 独立模型历史，
-   named-click 以预热 observation 接入 Kernel Action。
+2. **消除主链旁路**：已删除 Clicky 对话 `/chat` fallback 与独立
+   `conversationHistory`；Runtime 失败仅有界重启并诚实失败。Named-click 仍是 Swift
+   内的延迟快路，但执行已共用类型化、重验证、可回读的 actuator；将决策收回
+   Kernel Action 仍是后续边界收窄。
 3. **集中产品真相**：Result Inbox 已作为 TaskTruth 关联的 Kernel 持久化记录落地；
    以 Kernel service facade 取代 Runtime 对 raw store 的直接调用仍是后续迁移。
 4. **开放能力扩展**：语音、桌面、委派、主动性和未来能力只通过稳定 capability ports 扩展。
@@ -77,10 +79,16 @@ Clicky 和 Runtime 后任务真相及已生成结果仍可恢复（中途 runnin
 
 2026-08-12 的自动化实现已覆盖 Result Inbox 的 durable claim/ack/release、孤立子任务 fail-closed recovery、子 session 精确释放、Clicky task snapshot / cancel ack / SystemSequence，以及“从头重试”作为新 request。真实 Clicky 中的重启、交互和只交付一次仍需真人验收；这不得被包级测试或构建代替。
 
+2026-08-12 的持续伴侣纵切又补齐了：冷 Pi session 从同 scope / conversation
+的 Kernel 可见历史回填，五秒元数据 ContextTrail 与 Learning 进入后续 turn，后台
+结果在静默窗口主动回访但不消费 Result Inbox，以及 verified click / Finder Back /
+focused `set_text` 的类型化桌面闭环。安装 App 的真实 PTT、TTS、TCC 与主动回访仍是
+人类验收门。
+
 ## Consequences
 
 - 近期优先级从横向增加能力改为收敛主干。
-- `CompanionManager` 的 fallback、对话缓存和 direct-click 决策是迁移对象，不再被视为长期架构。
+- `CompanionManager` 的对话 fallback 与独立对话缓存已退役；direct-click 决策仍是迁移对象，不被视为长期产品边界。
 - AgentCore 可以继续实验，但不得在正式产品说明中与 Kernel 并列为第二个核心。
 - Runtime/Kernel 的公开面会收窄；Result Inbox 已归 Kernel store，raw-store facade 与其他执行器内部类型仍需退出产品调用面。
 - 一项能力只有通过正式 Clicky、版本化协议和最终可见结果验收后，才算产品完成。

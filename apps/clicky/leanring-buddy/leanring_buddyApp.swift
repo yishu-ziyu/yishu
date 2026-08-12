@@ -7,6 +7,7 @@
 //  opens a floating panel with companion voice controls.
 //
 
+import Darwin
 import ServiceManagement
 import SwiftUI
 
@@ -30,8 +31,21 @@ struct leanring_buddyApp: App {
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
     private let companionManager = CompanionManager()
+    private let singleInstance = YishuSingleInstanceLock()
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard singleInstance.acquire() else {
+            let bundleID = Bundle.main.bundleIdentifier ?? "com.clicky-app.leanring-buddy"
+            NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier })?
+                .activate(options: [.activateIgnoringOtherApps])
+            NSApp.terminate(nil)
+            return
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard singleInstance.isAcquired else { return }
         print("🎯 奕枢: Starting...")
         print("🎯 奕枢: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
@@ -59,13 +73,75 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     /// General > Login Items, letting the user toggle it off if they want.
     private func registerAsLoginItemIfNeeded() {
         let loginItemService = SMAppService.mainApp
-        if loginItemService.status != .enabled {
+        let defaults = UserDefaults.standard
+        let requestMarker = "YishuDidRequestLoginItemRegistration"
+        switch loginItemService.status {
+        case .enabled, .requiresApproval:
+            // The request reached macOS. Persist that fact so a later user
+            // disable remains authoritative instead of being silently undone.
+            defaults.set(true, forKey: requestMarker)
+            return
+        case .notRegistered:
+            guard defaults.bool(forKey: requestMarker) == false else { return }
             do {
                 try loginItemService.register()
+                // Mark only a successful request. A failure stays retryable.
+                defaults.set(true, forKey: requestMarker)
                 print("🎯 奕枢: Registered as login item")
             } catch {
                 print("⚠️ 奕枢: Failed to register as login item: \(error)")
             }
+        case .notFound:
+            return
+        @unknown default:
+            return
+        }
+    }
+}
+
+private final class YishuSingleInstanceLock {
+    private var descriptor: Int32 = -1
+
+    var isAcquired: Bool { descriptor >= 0 }
+
+    func acquire() -> Bool {
+        if isAcquired { return true }
+        let fileManager = FileManager.default
+        let support = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let directory = support.appendingPathComponent("Yishu", isDirectory: true)
+        do {
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            return false
+        }
+        try? fileManager.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
+        )
+        let lockURL = directory.appendingPathComponent("clicky-instance.lock")
+        let fd = lockURL.path.withCString {
+            Darwin.open($0, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        }
+        guard fd >= 0 else { return false }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            Darwin.close(fd)
+            return false
+        }
+        descriptor = fd
+        return true
+    }
+
+    deinit {
+        if descriptor >= 0 {
+            _ = flock(descriptor, LOCK_UN)
+            Darwin.close(descriptor)
         }
     }
 }

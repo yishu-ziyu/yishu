@@ -12,6 +12,13 @@ export interface AssistantOutputProjection {
 }
 
 const computerControlBlockPattern = /<computer_control\b[^>]*>([\s\S]*?)<\/computer_control\s*>/gi;
+const functionComputerControlBlockPattern = /<\s*function\s*=\s*["']?computer[ _-]?control["']?[^>]*>[\s\S]*?<\/\s*function\s*>/gi;
+const functionBlockPattern = /<\s*function(?:\s*=|\b)[^>]*>[\s\S]*?<\/\s*function\s*>/gi;
+const toolWrapperBlockPattern = /<\s*(?:computer[ _-]?action|tool[ _-]?call|function[ _-]?call|tool)\b[^>]*>[\s\S]*?<\/\s*(?:computer[ _-]?action|tool[ _-]?call|function[ _-]?call|tool)\s*>/gi;
+const selfClosingToolTagPattern = /<\s*(?:computer[ _-]?action|tool[ _-]?call|function[ _-]?call|tool)\b[^>]*\/\s*>/gi;
+const namedParameterBlockPattern = /<\s*parameter\b(?=[^>]*\bname\s*=)[^>]*>[\s\S]*?<\/\s*parameter\s*>/gi;
+const orphanToolTagPattern = /<\/?\s*(?:computer[ _-]?control|computer[ _-]?action|tool[ _-]?call|function[ _-]?call|tool|function)(?:\s*=|\b)[^>]*>/gi;
+const bracketToolDirectivePattern = /\[\s*(?:tool[ _-]?call|computer[ _-]?control|function[ _-]?call)\b[^\]]*\][\s\S]*$/gi;
 const fencedBlockPattern = /```[^\n]*\n?[\s\S]*?```/g;
 const pointDirectivePattern = /\[POINT:\s*(?:none|(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$/gi;
 const directActionTriggerPattern = /(?:点击|点开|点选|点一下|点(?:这个|那个)|按一下|按下|选中|\b(?:click|press|tap)\b)/gi;
@@ -68,7 +75,15 @@ function parsePointAction(match: RegExpMatchArray): LegacyComputerAction | undef
 
 function cleanVisibleText(rawText: string): string {
   const withoutFences = rawText.replace(fencedBlockPattern, "");
-  const withoutComputerControl = withoutFences.replace(computerControlBlockPattern, "");
+  const withoutComputerControl = withoutFences
+    .replace(functionComputerControlBlockPattern, "")
+    .replace(functionBlockPattern, "")
+    .replace(toolWrapperBlockPattern, "")
+    .replace(selfClosingToolTagPattern, "")
+    .replace(namedParameterBlockPattern, "")
+    .replace(computerControlBlockPattern, "")
+    .replace(bracketToolDirectivePattern, "")
+    .replace(orphanToolTagPattern, "");
   const withoutPointDirective = withoutComputerControl.replace(pointDirectivePattern, "");
   return withoutPointDirective
     .replace(/\n{3,}/g, "\n\n")
@@ -85,12 +100,58 @@ function incompleteHiddenBlockStart(rawText: string): number | undefined {
   const fenceCount = rawText.match(/```/g)?.length ?? 0;
   if (fenceCount % 2 === 1) candidates.push(rawText.lastIndexOf("```"));
 
-  const computerControlToken = "<computer_control";
+  // Never publish a partial XML-looking token. Once the closing `>` arrives,
+  // ordinary markup can flow; known tool wrappers remain buffered below until
+  // their matching close tag arrives and the projector can remove them.
   const lastAngleBracket = lowercased.lastIndexOf("<");
-  if (lastAngleBracket >= 0) {
-    const suffix = lowercased.slice(lastAngleBracket);
-    if (computerControlToken.startsWith(suffix)) candidates.push(lastAngleBracket);
+  if (lastAngleBracket > lowercased.lastIndexOf(">")) {
+    candidates.push(lastAngleBracket);
   }
+
+  const lastSquareBracket = lowercased.lastIndexOf("[");
+  if (lastSquareBracket > lowercased.lastIndexOf("]")) {
+    candidates.push(lastSquareBracket);
+  }
+
+  const pointStart = lowercased.lastIndexOf("[point:");
+  if (pointStart >= 0) candidates.push(pointStart);
+  for (const marker of ["[tool_call", "[tool-call", "[computer_control", "[function_call"]) {
+    const markerStart = lowercased.lastIndexOf(marker);
+    if (markerStart >= 0) candidates.push(markerStart);
+  }
+
+  const openToolBlock = (
+    openingPattern: RegExp,
+    closingPattern: RegExp,
+  ): void => {
+    const openings = [...lowercased.matchAll(openingPattern)];
+    const closings = [...lowercased.matchAll(closingPattern)];
+    const opening = openings.at(-1);
+    const closing = closings.at(-1);
+    const selfClosing = opening?.[0] !== undefined && /\/\s*>$/u.test(opening[0]);
+    if (!selfClosing && opening?.index !== undefined && opening.index > (closing?.index ?? -1)) {
+      candidates.push(opening.index);
+    }
+  };
+  openToolBlock(/<\s*computer_control\b/g, /<\/\s*computer_control\s*>/g);
+  openToolBlock(
+    /<\s*function\s*=\s*["']?computer[ _-]?control["']?[^>]*>/g,
+    /<\/\s*function\s*>/g,
+  );
+  openToolBlock(
+    /<\s*function(?:\s*=|\b)[^>]*>/g,
+    /<\/\s*function\s*>/g,
+  );
+  for (const tag of ["computer[ _-]?action", "tool[ _-]?call", "function[ _-]?call", "tool"]) {
+    openToolBlock(
+      new RegExp(`<\\s*${tag}\\b[^>]*>`, "g"),
+      new RegExp(`<\\/\\s*${tag}\\s*>`, "g"),
+    );
+  }
+  openToolBlock(
+    /<\s*parameter\b(?=[^>]*\bname\s*=)[^>]*>/g,
+    /<\/\s*parameter\s*>/g,
+  );
 
   let trailingBackticks = 0;
   for (let index = rawText.length - 1; index >= 0 && rawText[index] === "`"; index -= 1) {
@@ -114,8 +175,12 @@ export function projectAssistantOutput(rawText: string): AssistantOutputProjecti
     if (action) computerActions.push(action);
   }
 
+  const hiddenSuffixStart = incompleteHiddenBlockStart(rawText);
+  const presentationRawText = hiddenSuffixStart === undefined
+    ? rawText
+    : rawText.slice(0, hiddenSuffixStart);
   return {
-    visibleText: cleanVisibleText(rawText),
+    visibleText: cleanVisibleText(presentationRawText),
     computerActions,
   };
 }
@@ -161,7 +226,23 @@ export class AssistantOutputStreamProjector {
 
 export function isDirectComputerActionUtterance(utterance: string): boolean {
   const normalized = utterance.trim().toLowerCase();
-  if (explanationOrQuestionPattern.test(normalized)) return false;
+  if (/^(?:(?:请|麻烦|帮我|请帮我)\s*)?(?:不要|别(?:再)?|无需|不(?:要|用|必)|禁止|do\s+not|don't|dont|never)/iu.test(normalized)) {
+    return false;
+  }
+  if (/^(?:他说|她说|它说|有人说|the\s+text\s+says|they\s+said|he\s+said|she\s+said)/iu.test(normalized)) {
+    return false;
+  }
+  if (explanationOrQuestionPattern.test(normalized)
+    || /[?？]/u.test(normalized)
+    || /(?:如果|假如|是否|能否|可否|是不是|要不要|该不该|好不好|对吗|会不会|是什么|可以.*吗|会怎样|会发生什么|我刚才|我之前|我想知道|(?:吗|呢|么)\s*$)/u.test(normalized)) {
+    return false;
+  }
+
+  // Tool authority is narrower than merely mentioning an action. Require an
+  // anchored imperative form; presentation buffering may be conservative, but
+  // only this explicit user command can authorize a physical click.
+  const imperative = /^(?:(?:请|麻烦|帮我|请帮我|去|给我)\s*)?(?:先\s*)?(?:点击|点开|点选|点一下|点(?:这个|那个)|按一下|按下|选中|点那个)(?:\s*\S|$)|^(?:please\s+)?(?:click|press|tap)\b/iu;
+  if (!imperative.test(normalized)) return false;
 
   const actionTriggerCount = [...normalized.matchAll(directActionTriggerPattern)].length;
   if (actionTriggerCount !== 1) return false;

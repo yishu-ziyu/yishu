@@ -73,6 +73,10 @@ export interface DelegatedTaskPresenceUpdate {
   taskId: string;
   parentId: string;
   mainConversationId: string;
+  /** Additive discriminator; omitted by older producers/consumers. */
+  taskKind?: "delegated" | "context_reminder";
+  /** Context-reminder lifecycle; absent for delegated work and old clients. */
+  watchState?: "waiting_for_departure" | "armed" | "fired" | "cancelled";
   title: string;
   status: TaskTruth["status"];
   createdAt: string;
@@ -86,11 +90,24 @@ export interface DelegatedTaskPresenceUpdate {
 
 const MAX_RESULT_SUMMARY = 500;
 const MAX_CHILD_PROMPT_CONTEXT = 4000;
+const CHILD_CANCELLATION_TIMEOUT_MS = 2_000;
 const OMITTED_RESULT_NOTICE = "[result summary omitted: unsafe or exceeds the delivery limit]";
 const MISSING_RESULT_NOTICE = "[delegated result unavailable: child did not provide a final deliverable]";
 const DELEGATED_RESULT_OPEN = "<delegated_result>";
 const DELEGATED_RESULT_CLOSE = "</delegated_result>";
 const STATUS_ONLY_RESULT = /^(?:任务|研究|后台任务|工作)?\s*(?:已(?:经)?|正在)?\s*(?:开始|完成|结束|进行中|处理(?:中|完毕)?)[。！!?？:：\s]*$/u;
+
+async function waitAtMost(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  await Promise.race([
+    promise.then(() => undefined, () => undefined),
+    timeout,
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+}
 
 /** TaskTruth kind -> inbox delivery metadata. */
 type DelegatedTerminalKind = "verified" | "completed" | "unverified" | "failed" | "cancelled";
@@ -279,16 +296,16 @@ export class DelegationCoordinator {
     if (child.cancellationRequested) return true;
     child.cancellationRequested = true;
 
+    await this.settleChild(child.input, "cancelled", "用户已停止这项任务。");
     if (!child.executionStarted || !child.requestId || !child.traceId) return true;
-    await this.cancelTurn({
+    await waitAtMost(this.cancelTurn({
       schemaVersion: PROTOCOL_VERSION,
       type: "turn.cancel",
       requestId: child.requestId,
       traceId: child.traceId,
       sentAt: this.now().toISOString(),
       payload: { reason: command.payload.reason ?? "user_cancelled_delegation" },
-    }, () => undefined);
-    await this.settleChild(child.input, "cancelled", "用户已停止这项任务。");
+    }, () => undefined), CHILD_CANCELLATION_TIMEOUT_MS);
     return true;
   }
 
@@ -315,10 +332,32 @@ export class DelegationCoordinator {
 
   async dispose(): Promise<void> {
     this.beginDispose();
-    await Promise.allSettled([...this.runningChildren]);
+    const cancellationOperations = [...this.runningChildrenByTaskId.values()].map(
+      async (child) => {
+        if (child.settled) return;
+        child.cancellationRequested = true;
+        await this.settleChild(
+          child.input,
+          "cancelled",
+          "runtime disposed while the task was running",
+        );
+        if (!child.executionStarted || !child.requestId || !child.traceId) return;
+        await waitAtMost(this.cancelTurn({
+          schemaVersion: PROTOCOL_VERSION,
+          type: "turn.cancel",
+          requestId: child.requestId,
+          traceId: child.traceId,
+          sentAt: this.now().toISOString(),
+          payload: { reason: "runtime_disposed" },
+        }, () => undefined), CHILD_CANCELLATION_TIMEOUT_MS);
+      },
+    );
+    await waitAtMost(
+      Promise.allSettled([...cancellationOperations, ...this.runningChildren]),
+      CHILD_CANCELLATION_TIMEOUT_MS,
+    );
     this.mainTurns.clear();
     this.childConversations.clear();
-    this.runningChildrenByTaskId.clear();
     this.presenceSink = undefined;
   }
 
@@ -403,6 +442,7 @@ export class DelegationCoordinator {
     // Never the full conversation history (RFC v2 §3.9).
     const capsule = buildContextCapsule({
       trail: this.kernel.trail,
+      sessionScope: input.mainTurn.sessionScope,
       frame: contextFrameToTrailSource(input.mainTurn.contextFrame),
       userIntent: input.title,
       recentMinutes: 5,
@@ -523,6 +563,9 @@ export class DelegationCoordinator {
         }
         let observed: { kind: DelegatedTerminalKind; summary: string } | undefined;
         await this.executeTurn(command, (event) => {
+          if (runningChild?.settled || runningChild?.cancellationRequested || this.disposing) {
+            return;
+          }
           const step = sequenceStepFor(event);
           if (step && runningChild) {
             runningChild.sequence.push(step);
@@ -592,6 +635,8 @@ export class DelegationCoordinator {
   ): Promise<void> {
     const runningChild = this.runningChildrenByTaskId.get(input.taskId);
     if (runningChild?.settled) return;
+    if (runningChild?.cancellationRequested && kind !== "cancelled") return;
+    if (runningChild?.pendingTerminal?.kind === "cancelled" && kind !== "cancelled") return;
     if (runningChild) runningChild.pendingTerminal = { kind, summary: rawSummary };
 
     const observedAt = this.now().toISOString();
@@ -715,6 +760,7 @@ export class DelegationCoordinator {
       taskId: task.id,
       parentId: task.parentId ?? input.parentId,
       mainConversationId: input.mainConversationId,
+      taskKind: "delegated",
       title: task.title,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,

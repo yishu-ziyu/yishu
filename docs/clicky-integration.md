@@ -61,7 +61,7 @@ Pi `AgentRuntime` is the only task event source. Clicky's existing overlay may r
 
 ## Current port boundary
 
-- `CompanionManager.runVoiceTurnTask` coordinates final transcript, one ContextFrame capture, Pi streaming, fallback, history, pointing, and MiniMax output.
+- `CompanionManager.runVoiceTurnTask` coordinates final transcript, one ContextFrame capture, Pi streaming, pointing, and MiniMax output. Conversation failures remain on the Pi/Kernel spine: one bounded sidecar restart is allowed, then Clicky reports the failure rather than invoking a second provider conversation.
 - Before that general path, `YishuDirectClickResolver` handles an explicit click on a visually named control locally: position hints constrain Vision OCR, the actuator performs one verified click, and the result becomes a short spoken confirmation. It prefers AXPress, then uses a guarded pointer-preserving Quartz click for self-drawn controls such as Codex's sidebar. A miss falls through to the normal ContextFrame and Pi path.
 - `YishuContextFrameCollector` adapts `apps/clicky`'s production ScreenCaptureKit output and adds pointer trail, frontmost application/window, accessibility element, source, capture time, confidence, expiry, and warnings.
 - `YishuAgentRuntimeClient` starts the bundled Node/Pi sidecar, sends the captured frame once, and maps typed runtime events back to the existing response overlay.
@@ -70,12 +70,13 @@ Pi `AgentRuntime` is the only task event source. Clicky's existing overlay may r
   original trace ID. Starting a new conversation rotates the ID only when no
   turn is active.
 - `ProductKernelRuntime` writes the turn into Kernel's durable conversation
-  ledger before invoking the execution harness. Pi session history and
-  Clicky's bounded `conversationHistory` remain temporary caches, not product
-  truth.
+  ledger before invoking the execution harness. Pi session history is a
+  temporary cache; a newly created Pi session receives an exact-scope bounded
+  window of completed visible turns from Kernel. Clicky no longer owns a
+  parallel conversation-history cache.
 - Clicky explicitly selects `personal`, a stable named `project`, or `private`
   before starting a conversation. A scope change rotates `conversationId` and
-  clears fallback history; the Pi session cache is also keyed by conversation.
+  the Pi session cache is keyed by conversation and scope.
 - Kernel rejects cross-scope reuse of a conversation, turn, or task. Fact and
   learning writes use `personal` or `project:<UUID>` namespaces. Private turns
   run live but skip memory, ledger, ContextTrail, and TaskTruth persistence, and
@@ -84,18 +85,20 @@ Pi `AgentRuntime` is the only task event source. Clicky's existing overlay may r
   leaves no durable side effect; after commit it records the action and a
   stable failed-turn reconciliation code, while suppressing success text and
   TTS.
-- `computer.action.requested` and `computer.action.result` keep Pi tool use separate from visible assistant text. Clicky executes a left click through Accessibility and returns visible-state evidence without moving the physical cursor.
+- `computer.action.requested` and `computer.action.result` keep Pi tool use separate from visible assistant text. Clicky executes verified left-click, Finder history-back, and focused writable-field text actions through Accessibility; every effect revalidates its live target, and text receipts omit the entered value.
 - The runtime quarantines fenced code and legacy `<computer_control>` blocks. A direct click request stays visually buffered until the action result is known, then resolves to a short success, unverified, or failure message.
 - Legacy `[POINT]` responses remain useful for guidance. When the user's original intent is a direct click, Clicky upgrades the coordinate to the same verified action path and replaces the model wording, so neither `[POINT]` nor “请自己点” reaches the overlay or TTS.
 - Model selection is explicit runtime input. The selected Clicky model resolves to Pi's fixed `yishu-local-grok` provider backed by loopback port 8787 and the existing 8317 OpenAI-compatible upstream.
-- The direct Grok path is invoked only when Pi cannot start or complete a voice turn. Kairos is not a fallback.
+- The local `/chat` helper is limited to the onboarding pointing demo. It is not a conversation fallback; Kairos is not a fallback either.
+- Clicky samples screenshot-free recent context metadata about every five seconds. Exact SessionScope is mandatory end to end, and private mode stops collection before the Swift collector runs.
+- Terminal delegated work returns once after a three-second quiet window through the existing overlay and TTS. The durable Result Inbox remains untouched until an ordinary Main turn consumes it, so a natural follow-up still sees the result.
 
 ## Implemented first slice
 
 The seam now sits after StepFun returns the final transcript and before response presentation:
 
 1. One typed ContextFrame is captured for the turn and reused by the controlled fallback.
-2. Pi deltas stream into Clicky's existing cursor-adjacent response overlay; only final text is sent to MiniMax.
+2. Pi deltas stream into Clicky's existing cursor-adjacent response overlay. 普通纯对话按安全句界串行送入 MiniMax，首句不再等待完整回答；可能产生桌面副作用的意图与实际 action 都保持 final-only，PTT/cancel 会立即清空待播队列。
 3. A second push-to-talk press cancels the active runtime request, response overlay, and TTS.
 4. The nine `apps/clicky` Grok choices map to a strict runtime allowlist with no caller-supplied URL or headers.
 5. The installed bundle contains its own Node executable and deployed Pi runtime; ordinary installation preserves existing TCC grants and does not request administrator access.
@@ -119,10 +122,14 @@ Local acceptance covers the signed installed app, live bundled sidecar, a real G
 8. **Done, Scope:** add explicit personal/project/private session boundaries,
    stable project identity, scoped fact/learning/task truth, and live-only
    private turns before automatic memory extraction is enabled.
-9. **Next, Make It Usable:** restore and browse conversations from Kernel,
-   remove the bounded Clicky history's remaining fallback role, and assemble
-   reviewed scoped memory before new turns.
+9. **Done, Continue:** restore and browse conversations from Kernel; rehydrate
+   cold Pi sessions from bounded exact-scope visible history; remove Clicky's
+   fallback conversation cache; inject bounded recent context and explicit
+   same-scope Learning before ordinary turns.
 10. **Done, One App:** retire the duplicate macOS development shell and keep shared `YishuContext` as a protocol-only root Swift package.
+11. **Done, Return:** restore delegated task truth after restart and return a
+    terminal result once when the user is quiet, without manufacturing a turn
+    or losing follow-up grounding.
 11. **Later, Retire:** remove any dormant Kairos references from Yishu and the direct-model fallback only after audible parity and recovery checks.
 
 The current production deployment remains one Clicky instance managing one

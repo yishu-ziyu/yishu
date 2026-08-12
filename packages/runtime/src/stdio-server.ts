@@ -15,7 +15,46 @@ import type { AgentRuntime } from "./runtime-port.js";
 
 const runtimeMode = selectedRuntimeMode();
 const authWatchdogTimeoutMs = resolveAuthWatchdogTimeoutMs();
+const RUNTIME_INITIALIZATION_TIMEOUT_MS = 10_000;
+const RUNTIME_DISPOSE_TIMEOUT_MS = 2_250;
+const STDOUT_DRAIN_TIMEOUT_MS = 250;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+type BoundedOutcome =
+  | { status: "completed" }
+  | { status: "failed"; error: unknown }
+  | { status: "timed_out" };
+
+async function settleAtMost(
+  operation: Promise<unknown>,
+  timeoutMs: number,
+): Promise<BoundedOutcome> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation.then(
+        (): BoundedOutcome => ({ status: "completed" }),
+        (error: unknown): BoundedOutcome => ({ status: "failed", error }),
+      ),
+      new Promise<BoundedOutcome>((resolve) => {
+        timer = setTimeout(() => resolve({ status: "timed_out" }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function drainStdoutAtMost(): Promise<void> {
+  const flush = new Promise<void>((resolve) => {
+    try {
+      process.stdout.write("", () => resolve());
+    } catch {
+      resolve();
+    }
+  });
+  await settleAtMost(flush, STDOUT_DRAIN_TIMEOUT_MS);
+}
 
 function reuseValidUuid(value: unknown): string {
   return typeof value === "string" && UUID_PATTERN.test(value) ? value : randomUUID();
@@ -30,7 +69,31 @@ const runtime = createAgentRuntime(runtimeMode, { computerUse: computerUsePort }
 const authService = (runtime as AgentRuntime & { authService?: YishuAuthService }).authService;
 
 if (runtime instanceof ProductKernelRuntime) {
-  runtime.delegation.setPresenceSink((update) => {
+  // Recovery owns durable task/result reconciliation. Do not accept commands
+  // or claim readiness while that state is still ambiguous. A blocked store
+  // must not leave an immortal process that never becomes ready.
+  const initialization = await settleAtMost(
+    runtime.initialize(),
+    RUNTIME_INITIALIZATION_TIMEOUT_MS,
+  );
+  if (initialization.status !== "completed") {
+    const timedOut = initialization.status === "timed_out";
+    const error = initialization.status === "failed" ? initialization.error : undefined;
+    emit(runtimeEvent("runtime.error", randomUUID(), randomUUID(), {
+      code: timedOut ? "initialization_timeout" : "initialization_failed",
+      message: timedOut
+        ? "Runtime initialization timed out."
+        : safeRuntimeErrorMessage(error, "Runtime initialization failed."),
+    }));
+    computerUsePort.dispose();
+    await settleAtMost(runtime.dispose(), RUNTIME_DISPOSE_TIMEOUT_MS);
+    await drainStdoutAtMost();
+    process.exit(1);
+  }
+}
+
+if (runtime instanceof ProductKernelRuntime) {
+  runtime.setTaskPresenceSink((update) => {
     emit(runtimeEvent(
       "task.presence.updated",
       reuseValidUuid(update.parentId),
@@ -229,17 +292,18 @@ lineReader.on("line", (line) => {
   if (command.type === "runtime.ping") {
     emit(runtimeEvent("runtime.pong", command.requestId, command.traceId, {
       mode: runtimeMode,
-      trailSize:
-        runtime instanceof ProductKernelRuntime
-          ? runtime.kernel.trail.size()
-          : 0,
     }));
     return;
   }
 
   if (command.type === "trail.observe") {
     if (runtime instanceof ProductKernelRuntime) {
-      runtime.observeTrail(command, emit);
+      void runtime.observeTrail(command, emit).catch((error) => {
+        emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
+          code: "context_watch_evaluation_failed",
+          message: safeRuntimeErrorMessage(error, "Unable to evaluate context reminders."),
+        }));
+      });
     } else {
       emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
         code: "product_kernel_disabled",
@@ -352,11 +416,11 @@ lineReader.on("line", (line) => {
       }));
       return;
     }
-    void runtime.cancelDelegatedTask(command).then((accepted) => {
+    void runtime.cancelTask(command).then((accepted) => {
       if (!accepted) {
         emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
-          code: "delegated_task_not_running",
-          message: "The delegated task is no longer running in this conversation.",
+          code: "task_not_running",
+          message: "The background task is no longer running in this conversation.",
         }));
       } else {
         emit(runtimeEvent("task.cancel.accepted", command.requestId, command.traceId, {
@@ -366,8 +430,8 @@ lineReader.on("line", (line) => {
       }
     }).catch((error) => {
       emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
-        code: "delegated_task_cancel_failed",
-        message: safeRuntimeErrorMessage(error, "Unable to stop the delegated task."),
+        code: "task_cancel_failed",
+        message: safeRuntimeErrorMessage(error, "Unable to stop the background task."),
       }));
     });
     return;
@@ -381,13 +445,13 @@ lineReader.on("line", (line) => {
       }));
       return;
     }
-    void runtime.listDelegatedTasks(command.payload.mainConversationId).then((tasks) => {
+    void runtime.listTasks(command.payload.mainConversationId).then((tasks) => {
       emit(runtimeEvent("task.listed", command.requestId, command.traceId, { tasks },
         command.payload.mainConversationId));
     }).catch((error) => {
       emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
-        code: "delegated_task_list_failed",
-        message: safeRuntimeErrorMessage(error, "Unable to restore delegated tasks."),
+        code: "task_list_failed",
+        message: safeRuntimeErrorMessage(error, "Unable to restore background tasks."),
       }));
     });
     return;
@@ -407,12 +471,27 @@ lineReader.on("line", (line) => {
   });
 });
 
+let shutdownStarted = false;
+
 async function shutdown(): Promise<void> {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   lineReader.close();
   computerUsePort.dispose();
-  await runtime.dispose();
-  process.exit(0);
+  const disposal = await settleAtMost(runtime.dispose(), RUNTIME_DISPOSE_TIMEOUT_MS);
+  if (disposal.status !== "completed") {
+    process.exitCode = 1;
+  }
+  // Terminal events are emitted after durable settlement. Give those complete
+  // lines a small bounded flush window before force-exit so shutdown itself
+  // does not turn a committed outcome into a silent UI loss.
+  await drainStdoutAtMost();
+  // The durable runtime has finished its bounded shutdown. Force this sidecar
+  // process to stop so a provider timer or broken test double cannot keep an
+  // orphan alive or publish a late completion after SIGTERM/stdin EOF.
+  process.exit(process.exitCode ?? 0);
 }
 
+lineReader.once("close", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 process.on("SIGTERM", () => void shutdown());

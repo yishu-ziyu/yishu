@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
@@ -11,6 +11,10 @@ import type {
   ConversationListOptions,
   ConversationTurn,
   ConversationTurnInput,
+  ContextWatch,
+  ContextWatchCreateInput,
+  ContextWatchCreateResult,
+  ContextWatchTransitionInput,
   DelegatedResultInput,
   DelegatedResultListOptions,
   DelegatedResultRecord,
@@ -61,6 +65,7 @@ import {
   assertPersistableEventType,
   assertPersistableLearningFields,
   assertPersistableMemoryFields,
+  assertPersistableSafeText,
   assertPersistableSkillFields,
   SENSITIVE_CONTENT_REJECTED,
   sameEventPayload,
@@ -77,6 +82,13 @@ import {
   restoreSeedMindState,
   writeMindSectionState,
 } from "./mind-store.js";
+import {
+  buildContextWatchCreation,
+  cloneContextWatch,
+  CONTEXT_WATCH_FIRE_ACTION,
+  contextWatchObservationIsNew,
+  normalizeContextWatchRecord,
+} from "./context-watch.js";
 import type { YishuStorePort } from "./yishu-store.js";
 import {
   assertStoreOperationNotAborted,
@@ -97,10 +109,15 @@ export class SqliteYishuStore implements YishuStorePort {
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
-    mkdirSync(path.dirname(dbPath), { recursive: true });
+    const storeDirectory = path.dirname(dbPath);
+    mkdirSync(storeDirectory, { recursive: true, mode: 0o700 });
+    chmodSync(storeDirectory, 0o700);
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.migrate();
+    for (const file of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      if (existsSync(file)) chmodSync(file, 0o600);
+    }
   }
 
   get path(): string {
@@ -703,6 +720,228 @@ export class SqliteYishuStore implements YishuStorePort {
     if (options?.sessionScope === undefined) return tasks;
     const requestedScope = normalizeSessionScope(options.sessionScope);
     return tasks.filter((task) => sessionScopesEqual(task.sessionScope, requestedScope));
+  }
+
+  async createContextWatch(input: ContextWatchCreateInput): Promise<ContextWatchCreateResult> {
+    const creation = buildContextWatchCreation(input);
+    const scope = sessionScopeColumns(creation.watch.sessionScope);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const watchConflict = this.db
+        .prepare(`SELECT id FROM context_watches WHERE id = ? OR task_id = ? OR mandate_id = ?`)
+        .get(creation.watch.id, creation.task.id, creation.mandate.id);
+      const taskConflict = this.db.prepare(`SELECT id FROM tasks WHERE id = ?`).get(creation.task.id);
+      const mandateConflict = this.db.prepare(`SELECT id FROM mandates WHERE id = ?`).get(creation.mandate.id);
+      if (watchConflict || taskConflict || mandateConflict) {
+        throw new Error("context_watch_id_conflict");
+      }
+      this.db
+        .prepare(
+          `INSERT INTO mandates (id, action_name, scope, granted_at, expires_at, note)
+           VALUES (?, ?, ?, ?, NULL, NULL)`,
+        )
+        .run(
+          creation.mandate.id,
+          creation.mandate.actionName,
+          creation.mandate.scope,
+          creation.mandate.grantedAt,
+        );
+      const task = this.upsertTaskRow(creation.task);
+      this.db
+        .prepare(
+          `INSERT INTO context_watches (
+             id, task_id, mandate_id, main_conversation_id,
+             scope_kind, project_id, project_label,
+             target_bundle_id, reminder, state, created_at, armed_at, fired_at,
+             source_frame_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          creation.watch.id,
+          creation.watch.taskId,
+          creation.watch.mandateId,
+          creation.watch.mainConversationId,
+          scope.kind,
+          scope.projectId,
+          scope.projectLabel,
+          creation.watch.targetBundleId,
+          creation.watch.reminder,
+          creation.watch.state,
+          creation.watch.createdAt,
+          creation.watch.sourceFrameId,
+        );
+      this.db.exec("COMMIT");
+      return {
+        watch: cloneContextWatch(creation.watch),
+        task,
+        mandate: { ...creation.mandate },
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async listActiveContextWatches(sessionScope: SessionScope): Promise<ContextWatch[]> {
+    const requestedScope = normalizeSessionScope(sessionScope);
+    assertDurableSessionScope(requestedScope);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM context_watches
+         WHERE state IN ('waiting_for_departure', 'armed')
+         ORDER BY created_at ASC, id ASC`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    return rows
+      .map(rowToContextWatch)
+      .filter((watch) => sessionScopesEqual(watch.sessionScope, requestedScope));
+  }
+
+  async transitionContextWatch(input: ContextWatchTransitionInput): Promise<ContextWatch | null> {
+    const requestedScope = normalizeSessionScope(input.sessionScope);
+    assertDurableSessionScope(requestedScope);
+    if (
+      !(
+        input.expectedState === "waiting_for_departure"
+        && input.nextState === "armed"
+      )
+      && !(input.expectedState === "armed" && input.nextState === "fired")
+    ) {
+      throw new Error("context_watch_invalid_transition");
+    }
+    const occurredAt = contextWatchTimestamp(
+      input.occurredAt ?? new Date().toISOString(),
+      "occurred_at",
+    );
+    assertContextWatchIdentifier(input.observationFrameId, "observation_frame_id");
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(`SELECT * FROM context_watches WHERE id = ?`)
+        .get(input.id) as Record<string, unknown> | undefined;
+      if (!row) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const watch = rowToContextWatch(row);
+      if (
+        !sessionScopesEqual(watch.sessionScope, requestedScope)
+        || watch.state !== input.expectedState
+        || !contextWatchObservationIsNew(watch, input.nextState, occurredAt)
+      ) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const taskRow = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(watch.taskId) as
+        | Record<string, unknown>
+        | undefined;
+      const mandateRow = this.db
+        .prepare(`SELECT * FROM mandates WHERE id = ?`)
+        .get(watch.mandateId) as Record<string, unknown> | undefined;
+      if (!taskRow || !mandateRow) throw new Error("context_watch_truth_invariant_broken");
+      const task = rowToTask(taskRow);
+      const mandate = rowToMandate(mandateRow);
+      if (
+        task.status !== "running"
+        || !sessionScopesEqual(task.sessionScope, requestedScope)
+        || mandate.actionName !== CONTEXT_WATCH_FIRE_ACTION
+        || mandate.scope !== CONTEXT_WATCH_FIRE_ACTION
+      ) {
+        throw new Error("context_watch_truth_invariant_broken");
+      }
+
+      if (input.nextState === "armed") {
+        this.db
+          .prepare(`UPDATE context_watches SET state = 'armed', armed_at = ? WHERE id = ?`)
+          .run(occurredAt, watch.id);
+      } else {
+        this.db
+          .prepare(`UPDATE context_watches SET state = 'fired', fired_at = ? WHERE id = ?`)
+          .run(occurredAt, watch.id);
+      }
+      this.upsertTaskRow({
+        ...task,
+        status: input.nextState === "fired" ? "done" : "running",
+        updatedAt: occurredAt,
+        evidence: [
+          ...task.evidence,
+          `context_watch:${input.nextState}:${input.observationFrameId}`,
+        ],
+      });
+      if (input.nextState === "fired") {
+        this.putDelegatedResultRow({
+          taskId: watch.taskId,
+          parentId: watch.mandateId,
+          mainConversationId: watch.mainConversationId,
+          resultKind: "completed",
+          summary: `提醒：${watch.reminder}`,
+          completedAt: occurredAt,
+          sequence: [],
+        });
+        this.db.prepare(`DELETE FROM mandates WHERE id = ?`).run(watch.mandateId);
+      }
+      const updated = this.db
+        .prepare(`SELECT * FROM context_watches WHERE id = ?`)
+        .get(watch.id) as Record<string, unknown>;
+      this.db.exec("COMMIT");
+      return rowToContextWatch(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async cancelContextWatch(
+    id: string,
+    sessionScope: SessionScope,
+    cancelledAt?: string,
+  ): Promise<ContextWatch | null> {
+    const requestedScope = normalizeSessionScope(sessionScope);
+    assertDurableSessionScope(requestedScope);
+    const stamp = contextWatchTimestamp(cancelledAt ?? new Date().toISOString(), "cancelled_at");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`SELECT * FROM context_watches WHERE id = ?`).get(id) as
+        | Record<string, unknown>
+        | undefined;
+      if (!row) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const watch = rowToContextWatch(row);
+      if (!sessionScopesEqual(watch.sessionScope, requestedScope) || watch.state === "fired") {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      if (watch.state === "cancelled") {
+        this.db.exec("COMMIT");
+        return watch;
+      }
+      const taskRow = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(watch.taskId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!taskRow) throw new Error("context_watch_truth_invariant_broken");
+      const task = rowToTask(taskRow);
+      if (!sessionScopesEqual(task.sessionScope, requestedScope)) {
+        throw new Error("context_watch_truth_invariant_broken");
+      }
+      this.db.prepare(`UPDATE context_watches SET state = 'cancelled' WHERE id = ?`).run(id);
+      this.upsertTaskRow({
+        ...task,
+        status: "cancelled",
+        updatedAt: stamp,
+        evidence: [...task.evidence, `context_watch:cancelled:${watch.id}`],
+      });
+      this.db.prepare(`DELETE FROM mandates WHERE id = ?`).run(watch.mandateId);
+      const updated = this.db.prepare(`SELECT * FROM context_watches WHERE id = ?`).get(id) as
+        Record<string, unknown>;
+      this.db.exec("COMMIT");
+      return rowToContextWatch(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async putDelegatedResult(input: DelegatedResultInput): Promise<DelegatedResultRecord> {
@@ -1363,6 +1602,10 @@ export class SqliteYishuStore implements YishuStorePort {
         .prepare(`SELECT * FROM tasks`)
         .all()
         .map((r) => rowToTask(r as Record<string, unknown>)),
+      contextWatches: this.db
+        .prepare(`SELECT * FROM context_watches ORDER BY created_at ASC, id ASC`)
+        .all()
+        .map((r) => rowToContextWatch(r as Record<string, unknown>)),
       delegatedResults: this.db
         .prepare(`SELECT * FROM delegated_results ORDER BY completed_at ASC, task_id ASC`)
         .all()
@@ -1434,6 +1677,9 @@ export class SqliteYishuStore implements YishuStorePort {
       .prepare("PRAGMA user_version")
       .get() as Record<string, unknown> | undefined;
     const currentVersion = Number(versionRow?.user_version ?? 0);
+    if (!Number.isInteger(currentVersion) || currentVersion < 0 || currentVersion > 6) {
+      throw new Error(`Unsupported Yishu SQLite schema version: ${currentVersion}`);
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS memories (
         id TEXT PRIMARY KEY,
@@ -1502,6 +1748,26 @@ export class SqliteYishuStore implements YishuStorePort {
         project_id TEXT,
         project_label TEXT
       );
+      CREATE TABLE IF NOT EXISTS context_watches (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL UNIQUE,
+        mandate_id TEXT NOT NULL UNIQUE,
+        main_conversation_id TEXT NOT NULL COLLATE NOCASE,
+        scope_kind TEXT NOT NULL,
+        project_id TEXT,
+        project_label TEXT,
+        target_bundle_id TEXT NOT NULL,
+        reminder TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (
+          state IN ('waiting_for_departure', 'armed', 'fired', 'cancelled')
+        ),
+        created_at TEXT NOT NULL,
+        armed_at TEXT,
+        fired_at TEXT,
+        source_frame_id TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_context_watches_active_scope
+        ON context_watches (state, scope_kind, project_id, created_at);
       CREATE TABLE IF NOT EXISTS delegated_results (
         task_id TEXT PRIMARY KEY,
         parent_id TEXT NOT NULL,
@@ -1624,8 +1890,14 @@ export class SqliteYishuStore implements YishuStorePort {
          ON CONFLICT(id) DO NOTHING`,
       )
       .run();
-    if (currentVersion < 5) {
-      this.db.exec("PRAGMA user_version = 5;");
+    if (currentVersion < 6) {
+      this.db.exec("PRAGMA user_version = 6;");
+    }
+    const integrity = this.db.prepare("PRAGMA quick_check").get() as
+      | Record<string, unknown>
+      | undefined;
+    if (integrity?.quick_check !== "ok") {
+      throw new Error("Yishu SQLite quick_check failed");
     }
   }
 }
@@ -2005,6 +2277,38 @@ function rowToTask(row: Record<string, unknown>): TaskTruth {
   const contract = taskContractFromRow(row);
   if (contract !== undefined) task.contract = contract;
   return task;
+}
+
+function rowToContextWatch(row: Record<string, unknown>): ContextWatch {
+  const raw: Record<string, unknown> = {
+    id: row.id,
+    taskId: row.task_id,
+    mandateId: row.mandate_id,
+    mainConversationId: row.main_conversation_id,
+    sessionScope: sessionScopeFromRow(row),
+    targetBundleId: row.target_bundle_id,
+    reminder: row.reminder,
+    state: row.state,
+    createdAt: row.created_at,
+    sourceFrameId: row.source_frame_id,
+  };
+  if (row.armed_at != null) raw.armedAt = row.armed_at;
+  if (row.fired_at != null) raw.firedAt = row.fired_at;
+  return normalizeContextWatchRecord(raw);
+}
+
+function contextWatchTimestamp(value: unknown, field: string): string {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw new Error(`context_watch_invalid_${field}`);
+  }
+  return value;
+}
+
+function assertContextWatchIdentifier(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 160) {
+    throw new Error(`context_watch_invalid_${field}`);
+  }
+  assertPersistableSafeText(value, `context watch ${field}`);
 }
 
 function normalizeSqliteTaskContract(raw: unknown, title: string): TaskExecutionContract {

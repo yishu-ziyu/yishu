@@ -35,7 +35,9 @@ final class YishuContextFrameCollector {
                 displayWidthPoints: capture.displayWidthInPoints,
                 displayHeightPoints: capture.displayHeightInPoints,
                 screenshotWidthPixels: capture.screenshotWidthInPixels,
-                screenshotHeightPixels: capture.screenshotHeightInPixels
+                screenshotHeightPixels: capture.screenshotHeightInPixels,
+                displayOriginXPoints: capture.displayFrame.origin.x,
+                displayOriginYPoints: capture.displayFrame.origin.y
             )
         }
 
@@ -100,14 +102,18 @@ final class YishuContextFrameCollector {
 
     private func captureMetadata(includePointerTrail: Bool) -> MetadataSnapshot {
         let capturedAt = Date()
-        let cursorLocation = YishuPointerTrailMonitor.currentGlobalPoint()
+        // Screenshot display frames use NSScreen/AppKit coordinates. Keep the
+        // cursor evidence in that same global bottom-left coordinate space;
+        // Accessibility still receives its native Quartz top-left point below.
+        let cursorLocation = NSEvent.mouseLocation
+        let accessibilityLocation = YishuPointerTrailMonitor.currentGlobalPoint()
         let cursor = YishuObservedValue(
             value: YishuScreenPoint(
                 x: cursorLocation.x,
                 y: cursorLocation.y,
-                coordinateSpace: .globalTopLeft
+                coordinateSpace: .appKitBottomLeft
             ),
-            source: "cg-event-location",
+            source: "ns-event-mouse-location",
             capturedAt: capturedAt,
             confidence: 1
         )
@@ -118,7 +124,7 @@ final class YishuContextFrameCollector {
             activeWindow(processIdentifier: $0.value.processIdentifier, capturedAt: capturedAt)
         }
         let accessibility = accessibilityElement(
-            at: cursorLocation,
+            at: accessibilityLocation,
             capturedAt: capturedAt,
             warnings: &warnings
         )

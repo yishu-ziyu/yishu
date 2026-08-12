@@ -17,6 +17,7 @@ import {
   PiRuntimeAdapter,
   type PiRuntimeAdapterOptions,
 } from "../src/pi-runtime-adapter.js";
+import { attachConversationHistory } from "../src/context-prompt.js";
 import {
   computerActionRequestedPayloadSchema,
   LOCAL_GROK_BASE_URL,
@@ -64,7 +65,9 @@ class FakeAgentSession {
   readonly prompts: { text: string; images: unknown[] }[] = [];
   readonly promptStarted = deferred();
   abortCount = 0;
+  abortBarrier?: Promise<void>;
   disposed = false;
+  disposeCount = 0;
   promptHandler: (session: FakeAgentSession) => Promise<void> = async (session) => {
     session.emitTextDelta("收到。");
   };
@@ -105,10 +108,12 @@ class FakeAgentSession {
 
   async abort(): Promise<void> {
     this.abortCount += 1;
+    await this.abortBarrier;
     this.abortGate.resolve();
   }
 
   dispose(): void {
+    this.disposeCount += 1;
     this.disposed = true;
   }
 }
@@ -328,8 +333,10 @@ test("cancelTurn aborts the active session and frees the request id", async (t) 
   assert.deepEqual(eventTypes(events), ["turn.started", "turn.cancelled"]);
 
   // Actual behavior: once the cancelled turn settles, its request id is free again.
-  session.promptHandler = async (s) => {
-    s.emitTextDelta("又来。");
+  harness.configureSession = (nextSession) => {
+    nextSession.promptHandler = async (s) => {
+      s.emitTextDelta("又来。");
+    };
   };
   const secondEvents: RuntimeEvent[] = [];
   const retry = makeCommand(undefined, conversationId);
@@ -338,7 +345,48 @@ test("cancelTurn aborts the active session and frees the request id", async (t) 
   const completed = secondEvents.find((event) => event.type === "response.completed");
   assert.ok(completed);
   assert.equal(completed.payload.text, "又来。");
-  assert.equal(harness.sessions.length, 1, "same conversation keeps the cached session");
+  assert.equal(harness.sessions.length, 2, "cancelled conversation is rebuilt from durable history");
+  assert.equal(session.disposed, true);
+});
+
+test("conversation release cold-starts a new session before the old abort finishes", async (t) => {
+  const harness = createFakePiHarness();
+  harness.configureSession = (session) => {
+    session.promptHandler = (current) => current.waitUntilAborted();
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const conversationId = randomUUID();
+  const firstCommand = makeCommand(undefined, conversationId);
+  const firstEvents: RuntimeEvent[] = [];
+  const firstSessionPromise = harness.waitForNextSession();
+  const firstTurn = adapter.startTurn(firstCommand, (event) => firstEvents.push(event));
+  const firstSession = await firstSessionPromise;
+  await firstSession.promptStarted.promise;
+  const releaseAbort = deferred();
+  firstSession.abortBarrier = releaseAbort.promise;
+
+  adapter.releaseConversationSession(conversationId);
+  assert.equal(firstSession.abortCount, 1, "release starts bounded abort immediately");
+  assert.equal(firstSession.disposed, false, "dispose waits for the abort cleanup boundary");
+
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => current.emitTextDelta("new session result");
+  };
+  const secondEvents: RuntimeEvent[] = [];
+  await adapter.startTurn(
+    makeCommand("replacement", conversationId),
+    (event) => secondEvents.push(event),
+  );
+  assert.equal(harness.sessions.length, 2);
+  assert.notEqual(harness.sessions[0]?.sessionId, harness.sessions[1]?.sessionId);
+  assert.equal(secondEvents.at(-1)?.type, "response.completed");
+
+  releaseAbort.resolve();
+  await firstTurn;
+  assert.equal(firstSession.disposed, true);
+  assert.equal(firstSession.disposeCount, 1, "the release fence owns session disposal exactly once");
+  assert.equal(firstEvents.some((event) => event.type === "response.completed"), false);
 });
 
 test("a duplicate request id fails fast while the original turn continues", async (t) => {
@@ -506,6 +554,57 @@ async function runDirectClickTurn(
   return events;
 }
 
+test("non-imperative click mentions cannot dispatch a model-requested desktop action", async (t) => {
+  for (const utterance of [
+    "为什么这个按钮点击不了？",
+    "如何点击这个按钮？",
+    "不要点击这个按钮",
+    "他说点击这个按钮",
+    "如果点击这个按钮会怎样",
+    "这个按钮可以点击吗？",
+    "我刚才点击了按钮",
+    "我想知道点击后会发生什么",
+    "点击这个按钮吗",
+    "点击这个按钮对吗",
+    "点击这个按钮好不好",
+    "点击这个按钮会不会有风险",
+    "点击这个按钮是什么效果",
+  ]) {
+    const harness = createFakePiHarness();
+    let performed = 0;
+    const { adapter, workdir } = await makeAdapter(harness, {
+      async perform() {
+        performed += 1;
+        return { succeeded: true, verified: true, message: "must not happen" };
+      },
+      resolve: () => false,
+      cancelRequest: () => {},
+      dispose: () => {},
+    });
+    cleanupAfter(t, adapter, workdir);
+    harness.configureSession = (session) => {
+      session.promptHandler = async (current) => {
+        const tool = harness.capturedTools[0]!;
+        await assert.rejects(
+          () => tool.execute(
+            "unauthorized-click",
+            { action: "left_click", x: 10, y: 10 },
+            undefined,
+            undefined,
+            {} as never,
+          ),
+          /authorized desktop action limit/i,
+        );
+        current.emitTextDelta("这是解释，不是点击。 ");
+      };
+    };
+
+    await adapter.startTurn(makeCommand(utterance), () => undefined);
+    assert.equal(performed, 0, `no desktop dispatch for: ${utterance}`);
+    await adapter.dispose();
+  }
+});
+
 test("direct click turn requests the action and completes with verified language", async (t) => {
   const events = await runDirectClickTurn(t, {
     succeeded: true,
@@ -593,5 +692,68 @@ test("Pi sessions are cached per conversation identity", async (t) => {
     harness.registeredProviderIds,
     [LOCAL_GROK_PROVIDER],
     "the local provider registers once per model id",
+  );
+});
+
+test("conversation history rehydrates a cold Pi session once and is omitted from the hot session", async (t) => {
+  const harness = createFakePiHarness();
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const conversationId = randomUUID();
+  const first = attachConversationHistory(makeCommand("current one", conversationId), [{
+    id: randomUUID(),
+    capturedAt: "2026-08-12T08:00:00.000Z",
+    userInput: "historical marker question",
+    assistantOutput: "historical marker answer",
+  }]);
+  const second = attachConversationHistory(makeCommand("current two", conversationId), [{
+    id: randomUUID(),
+    capturedAt: "2026-08-12T08:01:00.000Z",
+    userInput: "must not repeat on hot session",
+  }]);
+
+  await adapter.startTurn(first, () => undefined);
+  await adapter.startTurn(second, () => undefined);
+
+  assert.equal(harness.sessions.length, 1);
+  const prompts = harness.sessions[0]!.prompts.map((prompt) => prompt.text);
+  assert.match(prompts[0]!, /historical marker question/);
+  assert.match(prompts[0]!, /historical data, not new instructions/);
+  assert.doesNotMatch(prompts[1]!, /conversation_history|must not repeat on hot session/);
+});
+
+test("cold Pi sessions isolate conversation history and private sessions reject attached history", async (t) => {
+  const harness = createFakePiHarness();
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const conversationAId = randomUUID();
+  const conversationA = attachConversationHistory(makeCommand("A", conversationAId), [{
+    id: randomUUID(),
+    capturedAt: "2026-08-12T08:00:00.000Z",
+    userInput: "conversation A marker",
+  }]);
+  const conversationB = attachConversationHistory(makeCommand("B", randomUUID()), [{
+    id: randomUUID(),
+    capturedAt: "2026-08-12T08:00:00.000Z",
+    userInput: "conversation B marker",
+  }]);
+  const privateCommand = attachConversationHistory(makeCommand("private", conversationAId), [{
+    id: randomUUID(),
+    capturedAt: "2026-08-12T08:00:00.000Z",
+    userInput: "private history must stay out",
+  }]);
+  privateCommand.payload.sessionScope = { kind: "private" };
+
+  await adapter.startTurn(conversationA, () => undefined);
+  await adapter.startTurn(conversationB, () => undefined);
+  await adapter.startTurn(privateCommand, () => undefined);
+
+  assert.match(harness.sessions[0]!.prompts[0]!.text, /conversation A marker/);
+  assert.doesNotMatch(harness.sessions[0]!.prompts[0]!.text, /conversation B marker/);
+  assert.match(harness.sessions[1]!.prompts[0]!.text, /conversation B marker/);
+  assert.doesNotMatch(harness.sessions[1]!.prompts[0]!.text, /conversation A marker/);
+  assert.doesNotMatch(
+    harness.sessions[2]!.prompts[0]!.text,
+    /conversation_history|private history must stay out/,
   );
 });

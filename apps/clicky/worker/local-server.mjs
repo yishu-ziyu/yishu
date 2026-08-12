@@ -11,6 +11,7 @@
  */
 
 import { createServer } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,30 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "127.0.0.1";
+const PROXY_AUTH_TOKEN = process.env.YISHU_VOICE_PROXY_TOKEN || "";
+
+if (PROXY_AUTH_TOKEN.length < 32) {
+  throw new Error("YISHU_VOICE_PROXY_TOKEN missing or too short");
+}
+
+const MAX_IN_FLIGHT_REQUESTS = 4;
+const MAX_BODY_BYTES = Object.freeze({
+  "/chat": 16 * 1024 * 1024,
+  "/v1/chat/completions": 16 * 1024 * 1024,
+  "/tts": 64 * 1024,
+  "/transcribe": 32 * 1024 * 1024,
+});
+const MAX_UPSTREAM_BYTES = Object.freeze({
+  chat: 16 * 1024 * 1024,
+  tts: 48 * 1024 * 1024,
+  transcribe: 2 * 1024 * 1024,
+});
+const UPSTREAM_TIMEOUT_MS = Object.freeze({
+  chat: 120_000,
+  tts: 60_000,
+  transcribe: 90_000,
+});
+let inFlightRequests = 0;
 
 const STEPFUN_ASR_URL =
   "https://api.stepfun.com/step_plan/v1/audio/asr/sse";
@@ -45,7 +70,9 @@ const YISHU_RUNTIME_MODELS = new Set([
 ]);
 
 function loadDevVars(path) {
-  const env = { ...process.env };
+  // Credentials have one canonical source. Do not silently turn every secret
+  // inherited by the desktop process into a capability of this HTTP server.
+  const env = {};
   if (!existsSync(path)) return env;
   const text = readFileSync(path, "utf8");
   for (const line of text.split("\n")) {
@@ -200,18 +227,104 @@ function json(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     "content-type": "application/json",
-    "access-control-allow-origin": "*",
+    "cache-control": "no-store",
   });
   res.end(body);
 }
 
-function readBody(req) {
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function requestIsAuthorized(req) {
+  if (!PROXY_AUTH_TOKEN) return false;
+  const raw = req.headers.authorization || "";
+  const prefix = "Bearer ";
+  if (!raw.startsWith(prefix)) return false;
+  const supplied = Buffer.from(raw.slice(prefix.length), "utf8");
+  const expected = Buffer.from(PROXY_AUTH_TOKEN, "utf8");
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function readBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
+    const declaredLength = Number(req.headers["content-length"] || 0);
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      reject(new HttpError(413, "Request body too large"));
+      req.resume();
+      return;
+    }
+
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
+    let total = 0;
+    let settled = false;
+    const onData = (chunk) => {
+      if (settled) return;
+      total += chunk.length;
+      if (total > maxBytes) {
+        settled = true;
+        req.removeListener("data", onData);
+        reject(new HttpError(413, "Request body too large"));
+        req.resume();
+        return;
+      }
+      chunks.push(chunk);
+    };
+    req.on("data", onData);
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+    req.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
   });
+}
+
+function upstreamRequest(req, res, url, init, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("upstream timeout")), timeoutMs);
+  const abort = () => controller.abort(new Error("client disconnected"));
+  const abortOnResponseClose = () => {
+    if (!res.writableEnded) abort();
+  };
+  req.once("aborted", abort);
+  res.once("close", abortOnResponseClose);
+  return {
+    response: fetch(url, { ...init, signal: controller.signal }),
+    cleanup() {
+      clearTimeout(timeout);
+      req.removeListener("aborted", abort);
+      res.removeListener("close", abortOnResponseClose);
+    },
+    abort: () => controller.abort(new Error("response limit exceeded")),
+  };
+}
+
+async function readTextLimited(response, maxBytes) {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new HttpError(502, "Upstream response too large");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  return text;
 }
 
 function parseStepFunAsrSse(sseText) {
@@ -336,7 +449,7 @@ function openAIChunkToAnthropicSSE(chunkText) {
 }
 
 async function handleChat(req, res) {
-  const raw = await readBody(req);
+  const raw = await readBody(req, MAX_BODY_BYTES["/chat"]);
   let body;
   try {
     body = JSON.parse(raw.toString("utf8"));
@@ -347,31 +460,29 @@ async function handleChat(req, res) {
   const { chatKey, chatBase, defaultModel, family } = resolveChatUpstream();
   const openAIBody = anthropicBodyToOpenAI(body, defaultModel);
 
-  const upstream = await fetch(`${chatBase}/chat/completions`, {
+  const pending = upstreamRequest(req, res, `${chatBase}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${chatKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify(openAIBody),
-  });
+  }, UPSTREAM_TIMEOUT_MS.chat);
+  try {
+  const upstream = await pending.response;
 
   if (!upstream.ok) {
-    const errorBody = await upstream.text();
+    await readTextLimited(upstream, MAX_UPSTREAM_BYTES.transcribe);
     console.error(
-      `[/chat] ${family} error ${upstream.status} model=${openAIBody.model}: ${errorBody}`
+      `[/chat] ${family} error ${upstream.status} model=${openAIBody.model}`
     );
-    res.writeHead(upstream.status, {
-      "content-type": "application/json",
-      "access-control-allow-origin": "*",
-    });
-    res.end(errorBody);
-    return;
+    return json(res, upstream.status, { error: "Chat upstream request failed" });
   }
 
   // Non-stream: rewrite OpenAI JSON into Anthropic-like content blocks for ClaudeAPI.analyzeImage
   if (!openAIBody.stream) {
-    const payload = await upstream.json();
+    const responseText = await readTextLimited(upstream, MAX_UPSTREAM_BYTES.chat);
+    const payload = JSON.parse(responseText);
     const message = payload?.choices?.[0]?.message || {};
     let text = typeof message.content === "string" ? message.content : "";
     if (!text.trim()) {
@@ -396,7 +507,6 @@ async function handleChat(req, res) {
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
-    "access-control-allow-origin": "*",
   });
 
   if (!upstream.body) {
@@ -407,10 +517,17 @@ async function handleChat(req, res) {
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let upstreamBytes = 0;
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+    upstreamBytes += value.byteLength;
+    if (upstreamBytes > MAX_UPSTREAM_BYTES.chat) {
+      pending.abort();
+      res.destroy(new Error("Chat upstream response too large"));
+      return;
+    }
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
     buffer = lines.pop() || "";
@@ -429,6 +546,9 @@ async function handleChat(req, res) {
   }
   res.write("data: [DONE]\n\n");
   res.end();
+  } finally {
+    pending.cleanup();
+  }
 }
 
 /**
@@ -439,7 +559,7 @@ async function handleChat(req, res) {
  * only when forwarding from 8787 to the configured chat base (8317 today).
  */
 async function handleRuntimeChatCompletions(req, res) {
-  const raw = await readBody(req);
+  const raw = await readBody(req, MAX_BODY_BYTES["/v1/chat/completions"]);
   let body;
   try {
     body = JSON.parse(raw.toString("utf8"));
@@ -453,19 +573,20 @@ async function handleRuntimeChatCompletions(req, res) {
   }
 
   const { chatKey, chatBase, family } = resolveChatUpstream();
-  const upstream = await fetch(`${chatBase}/chat/completions`, {
+  const pending = upstreamRequest(req, res, `${chatBase}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${chatKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
-  });
+  }, UPSTREAM_TIMEOUT_MS.chat);
+  try {
+  const upstream = await pending.response;
 
   const responseHeaders = {
     "content-type": upstream.headers.get("content-type") || "application/json",
     "cache-control": upstream.headers.get("cache-control") || "no-cache",
-    "access-control-allow-origin": "*",
   };
 
   if (!upstream.ok) {
@@ -473,9 +594,8 @@ async function handleRuntimeChatCompletions(req, res) {
     console.error(
       `[/v1/chat/completions] ${family} error ${upstream.status} model=${model}`
     );
-    res.writeHead(upstream.status, responseHeaders);
-    res.end(Buffer.from(await upstream.arrayBuffer()));
-    return;
+    await readTextLimited(upstream, MAX_UPSTREAM_BYTES.transcribe);
+    return json(res, upstream.status, { error: "Model upstream request failed" });
   }
 
   res.writeHead(upstream.status, responseHeaders);
@@ -485,16 +605,26 @@ async function handleRuntimeChatCompletions(req, res) {
   }
 
   const reader = upstream.body.getReader();
+  let upstreamBytes = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+    upstreamBytes += value.byteLength;
+    if (upstreamBytes > MAX_UPSTREAM_BYTES.chat) {
+      pending.abort();
+      res.destroy(new Error("Model upstream response too large"));
+      return;
+    }
     res.write(value);
   }
   res.end();
+  } finally {
+    pending.cleanup();
+  }
 }
 
 async function handleTTS(req, res) {
-  const raw = await readBody(req);
+  const raw = await readBody(req, MAX_BODY_BYTES["/tts"]);
   let incoming;
   try {
     incoming = JSON.parse(raw.toString("utf8"));
@@ -504,6 +634,9 @@ async function handleTTS(req, res) {
 
   const text = String(incoming.text || "").trim();
   if (!text) return json(res, 400, { error: "text is required" });
+  if (text.length > 4_000) {
+    return json(res, 413, { error: "text is too long" });
+  }
 
   const key = minimaxApiKey();
   if (!key) {
@@ -527,7 +660,7 @@ async function handleTTS(req, res) {
   );
   const volume = Number(env.MINIMAX_TTS_VOLUME || 1.0);
 
-  const upstream = await fetch(ttsURL, {
+  const pending = upstreamRequest(req, res, ttsURL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
@@ -552,17 +685,14 @@ async function handleTTS(req, res) {
         channel: 1,
       },
     }),
-  });
+  }, UPSTREAM_TIMEOUT_MS.tts);
+  try {
+  const upstream = await pending.response;
 
-  const responseText = await upstream.text();
+  const responseText = await readTextLimited(upstream, MAX_UPSTREAM_BYTES.tts);
   if (!upstream.ok) {
-    console.error(`[/tts] MiniMax TTS error ${upstream.status}: ${responseText}`);
-    res.writeHead(upstream.status, {
-      "content-type": "application/json",
-      "access-control-allow-origin": "*",
-    });
-    res.end(responseText);
-    return;
+    console.error(`[/tts] MiniMax TTS error ${upstream.status}`);
+    return json(res, upstream.status, { error: "TTS upstream request failed" });
   }
 
   let payload;
@@ -598,16 +728,22 @@ async function handleTTS(req, res) {
       error: err instanceof Error ? err.message : "hex decode failed",
     });
   }
+  if (audio.length > MAX_UPSTREAM_BYTES.tts / 2) {
+    return json(res, 502, { error: "TTS audio response too large" });
+  }
 
   res.writeHead(200, {
     "content-type": "audio/mpeg",
-    "access-control-allow-origin": "*",
+    "cache-control": "no-store",
   });
   res.end(audio);
+  } finally {
+    pending.cleanup();
+  }
 }
 
 async function handleTranscribe(req, res) {
-  const raw = await readBody(req);
+  const raw = await readBody(req, MAX_BODY_BYTES["/transcribe"]);
   let incoming;
   try {
     incoming = JSON.parse(raw.toString("utf8"));
@@ -645,7 +781,7 @@ async function handleTranscribe(req, res) {
       : "zh";
   const asrModel = env.STEPFUN_ASR_MODEL || "stepaudio-2.5-asr";
 
-  const upstream = await fetch(STEPFUN_ASR_URL, {
+  const pending = upstreamRequest(req, res, STEPFUN_ASR_URL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
@@ -662,70 +798,90 @@ async function handleTranscribe(req, res) {
         hotwords: hotwordsValidation.hotwords,
       })
     ),
-  });
+  }, UPSTREAM_TIMEOUT_MS.transcribe);
+  try {
+  const upstream = await pending.response;
 
-  const sseText = await upstream.text();
+  const sseText = await readTextLimited(upstream, MAX_UPSTREAM_BYTES.transcribe);
   if (!upstream.ok) {
-    res.writeHead(upstream.status, {
-      "content-type": "application/json",
-      "access-control-allow-origin": "*",
-    });
-    res.end(sseText);
-    return;
+    return json(res, upstream.status, { error: "Transcription upstream request failed" });
   }
 
   const transcript = parseStepFunAsrSse(sseText);
   return json(res, 200, { text: transcript });
+  } finally {
+    pending.cleanup();
+  }
 }
 
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${HOST}:${PORT}`);
 
+    // A web page must never be able to turn this loopback process into a local
+    // speech/model capability. Native URLSession/Node clients do not send Origin.
+    if (req.headers.origin) {
+      return json(res, 403, { error: "Browser origins are not allowed" });
+    }
+
     if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, HEAD, POST, OPTIONS",
-        "access-control-allow-headers": "content-type, authorization",
-      });
-      res.end();
-      return;
+      return json(res, 403, { error: "Browser preflight is not allowed" });
     }
 
     if (req.method === "GET" || req.method === "HEAD") {
-      if (
-        url.pathname === "/" ||
-        url.pathname === "/health" ||
-        url.pathname === "/config"
-      ) {
+      if (url.pathname === "/health") {
         return json(res, 200, publicConfigPayload());
       }
-      res.writeHead(200, { "access-control-allow-origin": "*" });
-      res.end("ok");
-      return;
+      if (url.pathname === "/config") {
+        if (!requestIsAuthorized(req)) {
+          return json(res, 401, { error: "Unauthorized" });
+        }
+        return json(res, 200, publicConfigPayload());
+      }
+      return json(res, 404, { error: "Not found" });
     }
 
     if (req.method !== "POST") {
       return json(res, 405, { error: "Method not allowed" });
     }
 
-    if (url.pathname === "/chat") return await handleChat(req, res);
-    if (url.pathname === "/v1/chat/completions") {
-      return await handleRuntimeChatCompletions(req, res);
+    if (!requestIsAuthorized(req)) {
+      return json(res, 401, { error: "Unauthorized" });
     }
-    if (url.pathname === "/tts") return await handleTTS(req, res);
-    if (url.pathname === "/transcribe") return await handleTranscribe(req, res);
-    if (url.pathname === "/transcribe-token") {
-      return json(res, 410, {
-        error:
-          "AssemblyAI token route removed. Use POST /transcribe with StepFun ASR.",
-      });
+    if (inFlightRequests >= MAX_IN_FLIGHT_REQUESTS) {
+      return json(res, 429, { error: "Voice service is busy" });
     }
 
-    return json(res, 404, { error: "Not found" });
+    inFlightRequests += 1;
+    try {
+      if (url.pathname === "/chat") return await handleChat(req, res);
+      if (url.pathname === "/v1/chat/completions") {
+        return await handleRuntimeChatCompletions(req, res);
+      }
+      if (url.pathname === "/tts") return await handleTTS(req, res);
+      if (url.pathname === "/transcribe") return await handleTranscribe(req, res);
+      if (url.pathname === "/transcribe-token") {
+        return json(res, 410, {
+          error:
+            "AssemblyAI token route removed. Use POST /transcribe with StepFun ASR.",
+        });
+      }
+
+      return json(res, 404, { error: "Not found" });
+    } finally {
+      inFlightRequests -= 1;
+    }
   } catch (error) {
-    console.error(error);
-    return json(res, 500, { error: String(error) });
+    const status = error instanceof HttpError ? error.status : 502;
+    if (!(error instanceof HttpError)) {
+      console.error(`[proxy] request failed: ${error instanceof Error ? error.name : "unknown"}`);
+    }
+    if (!res.headersSent) {
+      return json(res, status, {
+        error: error instanceof HttpError ? error.message : "Local proxy request failed",
+      });
+    }
+    res.destroy();
   }
 });
 

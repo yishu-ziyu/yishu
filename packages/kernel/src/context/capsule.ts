@@ -13,6 +13,12 @@ import {
   SENSITIVE_CONTENT_REJECTED,
   sanitizePortableText,
 } from "../store/ledger-safety.js";
+import {
+  cloneSessionScope,
+  normalizeSessionScope,
+  sessionScopesEqual,
+  type SessionScope,
+} from "../session-scope.js";
 
 export const CONTEXT_CAPSULE_SCHEMA_VERSION = 1 as const;
 
@@ -43,6 +49,7 @@ export interface ContextCapsule {
   capsuleId: string;
   createdAt: string;
   expiresAt: string;
+  sessionScope: SessionScope;
   userIntent?: string;
   frontmostApp?: CapsuleApp;
   window?: CapsuleWindow;
@@ -56,6 +63,8 @@ export interface ContextCapsule {
 export interface BuildContextCapsuleInput {
   frame?: TrailSourceFrame;
   trail: ContextTrail;
+  /** Exact product scope whose trail may enter this capsule. */
+  sessionScope: SessionScope;
   userIntent?: string;
   projectHint?: string;
   /** How many minutes of trail to include. Default 5. */
@@ -99,11 +108,14 @@ function safeCapsuleTrailEntry(entry: ContextTrailEntry): ContextTrailEntry {
  * Screenshot bytes are never included.
  */
 export function buildContextCapsule(input: BuildContextCapsuleInput): ContextCapsule {
+  if (input.sessionScope.kind === "private") {
+    throw new Error("ContextCapsule: private scope is not shareable");
+  }
   const now = input.now ?? new Date();
   const ttlMs = input.ttlMs ?? DEFAULT_TTL_MS;
   const recentMinutes = input.recentMinutes ?? DEFAULT_RECENT_MINUTES;
   const recentTrail = input.trail
-    .recentMinutes(recentMinutes, now)
+    .recentMinutes(recentMinutes, input.sessionScope, now)
     .map(safeCapsuleTrailEntry);
   const frame = input.frame;
 
@@ -112,6 +124,7 @@ export function buildContextCapsule(input: BuildContextCapsuleInput): ContextCap
     capsuleId: randomUUID(),
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
+    sessionScope: cloneSessionScope(input.sessionScope),
     recentTrail,
     provenance: {
       source: "yishu",
@@ -203,6 +216,13 @@ export function parseContextCapsule(json: string): ContextCapsule {
   if (typeof raw.expiresAt !== "string" || Number.isNaN(Date.parse(raw.expiresAt))) {
     throw new Error("ContextCapsule: expiresAt must be ISO datetime");
   }
+  if (raw.sessionScope === undefined) {
+    throw new Error("ContextCapsule: sessionScope required");
+  }
+  const sessionScope = normalizeSessionScope(raw.sessionScope);
+  if (sessionScope.kind === "private") {
+    throw new Error("ContextCapsule: private scope is not shareable");
+  }
   if (!Array.isArray(raw.recentTrail)) {
     throw new Error("ContextCapsule: recentTrail must be an array");
   }
@@ -246,7 +266,8 @@ export function parseContextCapsule(json: string): ContextCapsule {
     capsuleId: raw.capsuleId,
     createdAt: raw.createdAt,
     expiresAt: raw.expiresAt,
-    recentTrail: parseTrailEntries(raw.recentTrail),
+    sessionScope,
+    recentTrail: parseTrailEntries(raw.recentTrail, sessionScope),
     provenance,
   };
 
@@ -310,7 +331,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseTrailEntries(raw: unknown): ContextTrailEntry[] {
+function parseTrailEntries(raw: unknown, capsuleScope: SessionScope): ContextTrailEntry[] {
   if (!Array.isArray(raw)) {
     throw new Error(SENSITIVE_CONTENT_REJECTED);
   }
@@ -346,7 +367,15 @@ function parseTrailEntries(raw: unknown): ContextTrailEntry[] {
         ? cursorRegionValue
         : "unknown";
     const screenshotExpiresAt = text("screenshotExpiresAt", null);
+    if (value.sessionScope === undefined) {
+      throw new Error(SENSITIVE_CONTENT_REJECTED);
+    }
+    const sessionScope = normalizeSessionScope(value.sessionScope);
+    if (sessionScope.kind === "private" || !sessionScopesEqual(sessionScope, capsuleScope)) {
+      throw new Error(SENSITIVE_CONTENT_REJECTED);
+    }
     const entry: ContextTrailEntry = {
+      sessionScope,
       frameId: text("frameId", "unknown") ?? "unknown",
       capturedAt: text("capturedAt", "") ?? "",
       appName: text("appName", null),

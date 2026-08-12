@@ -72,7 +72,14 @@ export function createRememberHowAction(deps: {
     context: "trail",
     run: async (ctx): Promise<RememberHowResult> => {
       throwIfAborted(ctx.signal);
-      const entries = trail.recentMinutes(ctx.input.minutes, ctx.now);
+      if (ctx.sessionScope === undefined) {
+        throw new Error("remember_how requires an exact session scope");
+      }
+      const sessionScope = ctx.sessionScope;
+      if (sessionScope.kind === "private") {
+        throw new Error("Private sessions cannot read ContextTrail.");
+      }
+      const entries = trail.recentMinutes(ctx.input.minutes, sessionScope, ctx.now);
       if (entries.length === 0) {
         throw new Error(
           `No ContextTrail entries in the last ${ctx.input.minutes} minute(s)`,
@@ -143,7 +150,7 @@ export function createRememberHowAction(deps: {
       return {
         candidate,
         skill,
-        trailSummary: trail.summarize(ctx.input.minutes, ctx.now),
+        trailSummary: trail.summarize(ctx.input.minutes, sessionScope, ctx.now),
         entryCount: entries.length,
         verifyReport,
       };

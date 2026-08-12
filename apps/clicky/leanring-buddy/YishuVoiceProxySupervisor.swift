@@ -10,6 +10,7 @@
 import Combine
 import Darwin
 import Foundation
+import Security
 
 /// Public health snapshot used by the panel and transcription availability.
 enum YishuVoiceProxyAvailability: Equatable {
@@ -237,6 +238,25 @@ final class YishuVoiceProxySupervisor: ObservableObject {
     static let defaultPort = 8787
     static let healthURL = URL(string: "http://127.0.0.1:8787/health")!
 
+    /// Per-App-process loopback capability. It is passed only through child
+    /// environment and request headers; never persisted or logged.
+    nonisolated private static let proxyToken = {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = bytes.withUnsafeMutableBytes { buffer in
+            SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
+        }
+        precondition(status == errSecSuccess, "Unable to create voice proxy capability")
+        return Data(bytes).base64EncodedString()
+    }()
+
+    nonisolated static func authorize(_ request: inout URLRequest) {
+        request.setValue("Bearer \(proxyToken)", forHTTPHeaderField: "Authorization")
+    }
+
+    nonisolated static func authorizeChildEnvironment(_ environment: inout [String: String]) {
+        environment["YISHU_VOICE_PROXY_TOKEN"] = proxyToken
+    }
+
     /// Thread-safe snapshot for sync callers (e.g. `isConfigured`) off the main actor.
     nonisolated private static let readySnapshotLock = NSLock()
     nonisolated(unsafe) private static var _readySnapshot = false
@@ -282,6 +302,7 @@ final class YishuVoiceProxySupervisor: ObservableObject {
     /// Listener PID adopted when a preferred-path proxy was already healthy (no Process handle).
     private var adoptedListenerPID: Int32?
     private var isEnsuring = false
+    private var automaticRestartAttempts: [Date] = []
 
     private let fileManager: FileManager
     private let session: URLSession
@@ -427,9 +448,11 @@ final class YishuVoiceProxySupervisor: ObservableObject {
             try launchProcess()
         } catch let error as LaunchError {
             availability = error.availability
+            startHealthPollingIfNeeded()
             return
         } catch {
             availability = .launchFailed(summary: "无法启动进程")
+            startHealthPollingIfNeeded()
             return
         }
 
@@ -445,6 +468,7 @@ final class YishuVoiceProxySupervisor: ObservableObject {
             if !(process?.isRunning ?? false) {
                 availability = .launchFailed(summary: "进程立刻退出")
                 clearProcessHandles()
+                startHealthPollingIfNeeded()
                 return
             }
             try? await Task.sleep(nanoseconds: 200_000_000)
@@ -460,6 +484,7 @@ final class YishuVoiceProxySupervisor: ObservableObject {
 
     func retry() {
         Task { @MainActor in
+            automaticRestartAttempts.removeAll()
             stopOwnedProcess()
             // Brief pause so the port releases before relaunch.
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -490,6 +515,7 @@ final class YishuVoiceProxySupervisor: ObservableObject {
         lastCheckedAt = Date()
         var request = URLRequest(url: Self.healthURL)
         request.httpMethod = "GET"
+        Self.authorize(&request)
         request.timeoutInterval = 1.2
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
@@ -559,6 +585,10 @@ final class YishuVoiceProxySupervisor: ObservableObject {
             let hint = Self.preferredCredentialsURL(fileManager: fileManager).path
             throw LaunchError.missingCredentials(hint)
         }
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: credentials.path
+        )
 
         let process = Process()
         let stdout = Pipe()
@@ -568,8 +598,10 @@ final class YishuVoiceProxySupervisor: ObservableObject {
         process.arguments = [entry.path]
         process.currentDirectoryURL = entry.deletingLastPathComponent()
 
-        var environment = ProcessInfo.processInfo.environment
+        let parentEnvironment = ProcessInfo.processInfo.environment
+        var environment = Self.minimumChildEnvironment(from: parentEnvironment)
         environment["YISHU_WORKER_ENV_FILE"] = credentials.path
+        Self.authorizeChildEnvironment(&environment)
         environment["PORT"] = String(Self.defaultPort)
         environment["HOST"] = Self.defaultHost
         environment["NO_COLOR"] = "1"
@@ -609,6 +641,23 @@ final class YishuVoiceProxySupervisor: ObservableObject {
         self.outputPipe = stdout
         self.errorPipe = stderr
         self.ownsRunningProcess = true
+    }
+
+    /// Child processes receive only execution plumbing and explicit Yishu
+    /// configuration. Provider credentials stay in the canonical env file.
+    nonisolated static func minimumChildEnvironment(
+        from parent: [String: String]
+    ) -> [String: String] {
+        let allowed = [
+            "HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+        ]
+        var result: [String: String] = [:]
+        for key in allowed {
+            if let value = parent[key], !value.isEmpty {
+                result[key] = value
+            }
+        }
+        return result
     }
 
     private func resolveEntryURL() -> URL? {
@@ -1034,8 +1083,33 @@ final class YishuVoiceProxySupervisor: ObservableObject {
                         self.availability = .unhealthy(summary: "连接失败")
                     }
                 }
+                if !health.portOpen,
+                   !self.availability.isReady,
+                   await self.shouldAttemptAutomaticRestart()
+                {
+                    await self.ensureStarted()
+                    if !self.availability.isReady {
+                        self.startHealthPollingIfNeeded()
+                    }
+                    return
+                }
             }
         }
+    }
+
+    private func shouldAttemptAutomaticRestart() async -> Bool {
+        let now = Date()
+        automaticRestartAttempts.removeAll {
+            now.timeIntervalSince($0) > 60
+        }
+        guard automaticRestartAttempts.count < 3 else {
+            availability = .unhealthy(summary: "连续退出，请手动重试")
+            return false
+        }
+        let delay = min(pow(2, Double(automaticRestartAttempts.count)) * 0.4, 2.0)
+        automaticRestartAttempts.append(now)
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        return !Task.isCancelled
     }
 }
 

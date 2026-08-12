@@ -3,6 +3,26 @@ import XCTest
 @testable import YishuContext
 
 final class ContextFrameTests: XCTestCase {
+    func testLegacyScreenshotWithoutDisplayOriginStillDecodes() throws {
+        let data = Data(
+            #"""
+            {
+              "label": "legacy",
+              "mediaType": "image/jpeg",
+              "base64Data": "anBlZw==",
+              "displayWidthPoints": 1512,
+              "displayHeightPoints": 982,
+              "screenshotWidthPixels": 1280,
+              "screenshotHeightPixels": 831
+            }
+            """#.utf8
+        )
+
+        let screenshot = try JSONDecoder().decode(ScreenshotContext.self, from: data)
+        XCTAssertNil(screenshot.displayOriginXPoints)
+        XCTAssertNil(screenshot.displayOriginYPoints)
+    }
+
     func testContextFrameRoundTripsThroughVersionedJSON() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let point = ScreenPoint(x: 320, y: 240, coordinateSpace: .globalTopLeft)
@@ -26,7 +46,9 @@ final class ContextFrameTests: XCTestCase {
                     displayWidthPoints: 1512,
                     displayHeightPoints: 982,
                     screenshotWidthPixels: 1280,
-                    screenshotHeightPixels: 831
+                    screenshotHeightPixels: 831,
+                    displayOriginXPoints: -1512,
+                    displayOriginYPoints: 240
                 ),
             ],
             warnings: []
@@ -48,6 +70,8 @@ final class ContextFrameTests: XCTestCase {
         XCTAssertEqual(decoded.schemaVersion, yishuProtocolVersion)
         XCTAssertEqual(decoded.cursor.value, point)
         XCTAssertEqual(decoded.screenshots.first?.mediaType, "image/jpeg")
+        XCTAssertEqual(decoded.screenshots.first?.displayOriginXPoints, -1512)
+        XCTAssertEqual(decoded.screenshots.first?.displayOriginYPoints, 240)
     }
 
     func testExpiredFrameIsRejected() {

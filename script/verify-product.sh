@@ -25,6 +25,9 @@ if [[ "$MODE" == "full" ]]; then
     -project apps/clicky/leanring-buddy.xcodeproj \
     -scheme leanring-buddy \
     -destination 'platform=macOS' \
+    CODE_SIGNING_ALLOWED=NO \
+    ENABLE_HARDENED_RUNTIME=NO \
+    ENABLE_DEBUG_DYLIB=NO \
     test
   ./apps/clicky/scripts/run-local.sh self-test
 fi

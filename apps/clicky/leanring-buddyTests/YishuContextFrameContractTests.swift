@@ -33,7 +33,9 @@ final class YishuContextFrameContractTests: XCTestCase {
                     displayWidthPoints: 1512,
                     displayHeightPoints: 982,
                     screenshotWidthPixels: 1280,
-                    screenshotHeightPixels: 831
+                    screenshotHeightPixels: 831,
+                    displayOriginXPoints: -1512,
+                    displayOriginYPoints: 240
                 ),
             ],
             warnings: []
@@ -71,6 +73,8 @@ final class YishuContextFrameContractTests: XCTestCase {
         XCTAssertEqual(decoded.schemaVersion, yishuRuntimeProtocolVersion)
         XCTAssertEqual(decoded.cursor.value, point)
         XCTAssertEqual(decoded.screenshots.first?.mediaType, "image/jpeg")
+        XCTAssertEqual(decoded.screenshots.first?.displayOriginXPoints, -1512)
+        XCTAssertEqual(decoded.screenshots.first?.displayOriginYPoints, 240)
     }
 
     func testClickyAdapterUsesCanonicalValidationForOptionalObservations() {

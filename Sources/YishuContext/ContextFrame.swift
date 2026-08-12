@@ -125,6 +125,11 @@ public struct ScreenshotContext: Codable, Equatable, Sendable {
     public let displayHeightPoints: Int
     public let screenshotWidthPixels: Int
     public let screenshotHeightPixels: Int
+    /// Global display origin, in the same coordinate space as the frame cursor.
+    /// Optional so protocol-v1 frames produced before multi-display origins were
+    /// added remain decodable.
+    public let displayOriginXPoints: Double?
+    public let displayOriginYPoints: Double?
 
     public init(
         label: String,
@@ -133,7 +138,9 @@ public struct ScreenshotContext: Codable, Equatable, Sendable {
         displayWidthPoints: Int,
         displayHeightPoints: Int,
         screenshotWidthPixels: Int,
-        screenshotHeightPixels: Int
+        screenshotHeightPixels: Int,
+        displayOriginXPoints: Double? = nil,
+        displayOriginYPoints: Double? = nil
     ) {
         self.label = label
         self.mediaType = mediaType
@@ -142,6 +149,8 @@ public struct ScreenshotContext: Codable, Equatable, Sendable {
         self.displayHeightPoints = displayHeightPoints
         self.screenshotWidthPixels = screenshotWidthPixels
         self.screenshotHeightPixels = screenshotHeightPixels
+        self.displayOriginXPoints = displayOriginXPoints
+        self.displayOriginYPoints = displayOriginYPoints
     }
 }
 
@@ -203,13 +212,22 @@ public struct ContextFrame: Codable, Sendable {
         if let invalidConfidence = confidences.first(where: { !(0...1).contains($0) }) {
             throw ContextFrameValidationError.invalidConfidence(invalidConfidence)
         }
-        guard screenshots.allSatisfy({
-            $0.mediaType == "image/jpeg" &&
-                !$0.base64Data.isEmpty &&
-                $0.displayWidthPoints > 0 &&
-                $0.displayHeightPoints > 0 &&
-                $0.screenshotWidthPixels > 0 &&
-                $0.screenshotHeightPixels > 0
+        guard screenshots.allSatisfy({ screenshot in
+            let originIsValid: Bool = switch (
+                screenshot.displayOriginXPoints,
+                screenshot.displayOriginYPoints
+            ) {
+            case (nil, nil): true
+            case let (x?, y?): x.isFinite && y.isFinite
+            default: false
+            }
+            return screenshot.mediaType == "image/jpeg" &&
+                !screenshot.base64Data.isEmpty &&
+                screenshot.displayWidthPoints > 0 &&
+                screenshot.displayHeightPoints > 0 &&
+                screenshot.screenshotWidthPixels > 0 &&
+                screenshot.screenshotHeightPixels > 0 &&
+                originIsValid
         }) else {
             throw ContextFrameValidationError.invalidScreenshot
         }

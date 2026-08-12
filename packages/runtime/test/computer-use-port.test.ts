@@ -7,7 +7,10 @@ import {
   StdioComputerUsePort,
 } from "../src/computer-use-port.js";
 import {
+  authorizedTextForUtterance,
+  computerActionLimitForUtterance,
   computerActionCompletionText,
+  isExplicitTextInputUtterance,
   piSessionCacheKey,
   PiRuntimeAdapter,
   shouldRunCompatibilityComputerAction,
@@ -77,6 +80,51 @@ test("computer-use port round-trips a typed action and verification result", asy
     receiptId: "receipt-1",
     attemptId: payload.attemptId,
   });
+  port.dispose();
+});
+
+test("computer-use port carries runtime-owned set_text target and AX read-back receipt", async () => {
+  const events: RuntimeEvent[] = [];
+  const port = new StdioComputerUsePort((event) => events.push(event), 1_000);
+  const requestId = randomUUID();
+  const traceId = randomUUID();
+  const pendingResult = port.perform({
+    action: "set_text",
+    text: "hello",
+    targetBundleId: "com.apple.TextEdit",
+    targetPid: 321,
+  }, {
+    requestId,
+    traceId,
+    basisFrameId: randomUUID(),
+  });
+
+  const payload = computerActionRequestedPayloadSchema.parse(events[0]?.payload);
+  assert.equal(payload.action, "set_text");
+  if (payload.action !== "set_text") assert.fail("expected set_text");
+  assert.equal(payload.text, "hello");
+  assert.equal(payload.targetBundleId, "com.apple.TextEdit");
+  assert.equal(payload.targetPid, 321);
+
+  assert.equal(port.resolve({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "computer.action.result",
+    requestId,
+    traceId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      actionId: payload.actionId,
+      succeeded: true,
+      verified: true,
+      message: "AX read-back matched.",
+      evidence: "length=5;role=AXTextField;same=true",
+      status: "verified",
+      code: "verified_accessibility",
+      method: "ax_set_value",
+      attemptId: payload.attemptId,
+    },
+  }), true);
+  assert.equal((await pendingResult).verified, true);
   port.dispose();
 });
 
@@ -339,7 +387,167 @@ test("computer_control tool delegates to the product-owned port", async () => {
     y: 375,
     label: "目标任务",
   }]);
-  assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /visibly verified/i);
+  assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /read-back was verified/i);
+});
+
+test("computer_control exposes set_text without model-owned target identity", async () => {
+  const actions: unknown[] = [];
+  const tool = createComputerControlTool(async (action) => {
+    actions.push(action);
+    return {
+      succeeded: true,
+      verified: true,
+      status: "verified",
+      code: "verified_accessibility",
+      method: "ax_set_value",
+      message: "Read-back matched.",
+      evidence: "length=5;role=AXTextField;same=true",
+    };
+  });
+
+  const result = await tool.execute("tool-call", {
+    action: "set_text",
+    text: "hello",
+  }, undefined, undefined, {} as never);
+
+  assert.deepEqual(actions, [{ action: "set_text", text: "hello" }]);
+  const returned = result.content[0]?.type === "text" ? result.content[0].text : "";
+  assert.match(returned, /read-back was verified/i);
+  assert.doesNotMatch(returned, /targetPid|targetBundleId/);
+});
+
+test("runtime injects the observed frontmost target into set_text and overrides spoofed fields", async () => {
+  const requests: unknown[] = [];
+  const port: ComputerUsePort = {
+    async perform(action, context) {
+      requests.push({ action, context });
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: "ax_set_value",
+        message: "Read-back matched.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const adapter = new PiRuntimeAdapter(process.cwd(), port);
+  const internals = adapter as any;
+  const activeTurn: any = {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    intentId: randomUUID(),
+    basisFrameId: randomUUID(),
+    directComputerAction: false,
+    authorizedText: "hello",
+    allowedActionSequence: ["set_text"],
+    frontmostTarget: { targetBundleId: "com.apple.TextEdit", targetPid: 321 },
+    emit: () => {},
+    actionCount: 0,
+    allActionsVerified: true,
+  };
+
+  await internals.activeComputerTurn.run(activeTurn, async () => {
+    await internals.performComputerAction({
+      action: "set_text",
+      text: "hello",
+      targetBundleId: "evil.bundle",
+      targetPid: 999,
+    });
+  });
+
+  const dispatched = requests[0] as { action: Record<string, unknown> };
+  assert.deepEqual(dispatched.action, {
+    action: "set_text",
+    text: "hello",
+    targetBundleId: "com.apple.TextEdit",
+    targetPid: 321,
+  });
+  assert.equal(activeTurn.actionCount, 1);
+  await adapter.dispose();
+});
+
+test("text input binds exact user authority and the requested action sequence", async () => {
+  assert.equal(isExplicitTextInputUtterance("输入 hello，然后点发送"), true);
+  assert.equal(isExplicitTextInputUtterance("how do I type hello?"), false);
+  assert.equal(isExplicitTextInputUtterance("不要输入任何内容"), false);
+  assert.equal(isExplicitTextInputUtterance("他说输入密码是什么意思"), false);
+  assert.equal(authorizedTextForUtterance("输入 hello，然后点发送"), "hello");
+  assert.equal(authorizedTextForUtterance("输入「hello world」然后点击发送"), "hello world");
+  assert.equal(authorizedTextForUtterance("输入「不用谢？」"), "不用谢？");
+  assert.equal(authorizedTextForUtterance("输入「hello」这句话是什么意思？"), undefined);
+  assert.equal(authorizedTextForUtterance("输入「hello」然后点击发送是什么意思？"), undefined);
+  assert.equal(computerActionLimitForUtterance("点击发送"), 1);
+  assert.equal(computerActionLimitForUtterance("输入 hello，然后点发送"), 2);
+  assert.equal(computerActionLimitForUtterance("输入 hello"), 1);
+  assert.equal(computerActionLimitForUtterance("解释这个界面"), 1);
+
+  const requests: unknown[] = [];
+  const port: ComputerUsePort = {
+    async perform(action) {
+      requests.push(action);
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: action.action === "set_text" ? "ax_set_value" : "ax_press",
+        message: "Verified.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const adapter = new PiRuntimeAdapter(process.cwd(), port);
+  const internals = adapter as any;
+  const activeTurn: any = {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    intentId: randomUUID(),
+    basisFrameId: randomUUID(),
+    directComputerAction: false,
+    authorizedText: "hello",
+    allowedActionSequence: ["set_text", "left_click"],
+    frontmostTarget: { targetBundleId: "com.apple.TextEdit", targetPid: 321 },
+    emit: () => {},
+    actionCount: 0,
+    allActionsVerified: true,
+  };
+
+  await internals.activeComputerTurn.run(activeTurn, async () => {
+    await internals.performComputerAction({ action: "set_text", text: "hello" });
+    await internals.performComputerAction({ action: "left_click", x: 10, y: 20 });
+    await assert.rejects(
+      () => internals.performComputerAction({ action: "left_click", x: 30, y: 40 }),
+      (error: unknown) => {
+        assert.ok(error instanceof ComputerActionError);
+        assert.equal(error.code, "action_limit_reached");
+        return true;
+      },
+    );
+  });
+  assert.equal(requests.length, 2);
+  assert.equal(activeTurn.actionCount, 2);
+
+  const noAuthority = {
+    ...activeTurn,
+    actionCount: 0,
+    authorizedText: undefined,
+    allowedActionSequence: ["left_click"],
+  };
+  await internals.activeComputerTurn.run(noAuthority, async () => {
+    await assert.rejects(
+      () => internals.performComputerAction({ action: "set_text", text: "blocked" }),
+      /expected left_click|authorized text/i,
+    );
+  });
+  assert.equal(requests.length, 2, "blocked text must not reach the Swift port");
+  assert.equal(noAuthority.actionCount, 0, "admission failures are not product actions");
+  await adapter.dispose();
 });
 
 test("computer_control tool keeps delivered and unverified outcomes out of completion language", async () => {
@@ -414,6 +622,7 @@ async function assertDirectTurnSecondCallIsBlocked(firstResult: {
     intentId: randomUUID(),
     basisFrameId: randomUUID(),
     directComputerAction: true,
+    allowedActionSequence: ["left_click"],
     emit: () => {},
     actionCount: 0,
   };
@@ -465,7 +674,7 @@ test("direct-click delivered or unverified receipt still blocks a second compute
   });
 });
 
-test("complex turns keep multi-step computer actions available", async () => {
+test("an admitted input-then-click sequence cannot dispatch a third action", async () => {
   const requests: unknown[] = [];
   const port: ComputerUsePort = {
     async perform(action, context) {
@@ -490,14 +699,19 @@ test("complex turns keep multi-step computer actions available", async () => {
     intentId: randomUUID(),
     basisFrameId: randomUUID(),
     directComputerAction: false,
+    authorizedText: "hello",
+    allowedActionSequence: ["set_text", "left_click"],
+    frontmostTarget: { targetBundleId: "com.apple.TextEdit", targetPid: 321 },
     emit: () => {},
     actionCount: 0,
   };
-  const action = { action: "left_click" as const, x: 10, y: 20 };
-
   await internals.activeComputerTurn.run(activeTurn, async () => {
-    await internals.performComputerAction(action);
-    await internals.performComputerAction({ ...action, x: 30 });
+    await internals.performComputerAction({ action: "set_text", text: "hello" });
+    await internals.performComputerAction({ action: "left_click", x: 30, y: 20 });
+    await assert.rejects(
+      () => internals.performComputerAction({ action: "left_click", x: 40, y: 20 }),
+      /authorized desktop action limit/i,
+    );
   });
 
   assert.equal(requests.length, 2);

@@ -5,6 +5,7 @@ import { PI_CAPABILITY_PROFILES } from "../src/capability-profiles.js";
 import { buildGroundedPrompt } from "../src/context-prompt.js";
 import { MockAgentRuntime } from "../src/mock-runtime.js";
 import { YISHU_SYSTEM_PROMPT } from "../src/persona.js";
+import { contextFrameToTrailSource } from "../src/trail-source.js";
 import {
   COMPUTER_ACTION_METHODS,
   COMPUTER_ACTION_RESULT_CODES,
@@ -36,6 +37,18 @@ import { makeTurnStartCommand } from "./fixtures.js";
 test("turn command validates as the shared protocol", () => {
   const command = makeTurnStartCommand();
   assert.equal(clientCommandSchema.parse(command).type, "turn.start");
+});
+
+test("display origins survive protocol validation and trail projection", () => {
+  const parsed = clientCommandSchema.parse(makeTurnStartCommand());
+  if (parsed.type !== "turn.start") throw new Error("expected turn.start");
+  const screenshot = contextFrameToTrailSource(parsed.payload.contextFrame).screenshots?.[0];
+  assert.equal(screenshot?.displayOriginXPoints, 0);
+  assert.equal(screenshot?.displayOriginYPoints, 0);
+
+  const incomplete = makeTurnStartCommand();
+  delete incomplete.payload.contextFrame.screenshots[0]?.displayOriginYPoints;
+  assert.throws(() => clientCommandSchema.parse(incomplete));
 });
 
 test("conversation id is optional for old turns and carried without a second turn id", () => {

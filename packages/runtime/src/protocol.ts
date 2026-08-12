@@ -87,9 +87,22 @@ const finderHistoryBackComputerActionSchema = z.object({
   targetPid: z.number().int().positive(),
 });
 
+/**
+ * Text is supplied by the model only after an explicit user request. The
+ * target identity is attached by the runtime from the turn's Context Frame;
+ * it is never accepted from model tool parameters.
+ */
+const setTextComputerActionSchema = z.object({
+  action: z.literal("set_text"),
+  text: z.string().min(1).max(10_000),
+  targetBundleId: z.string().trim().min(1).max(255),
+  targetPid: z.number().int().positive(),
+});
+
 export const computerActionSchema = z.discriminatedUnion("action", [
   leftClickComputerActionSchema,
   finderHistoryBackComputerActionSchema,
+  setTextComputerActionSchema,
 ]);
 
 /**
@@ -111,6 +124,7 @@ export const computerActionStatusSchema = z.enum(COMPUTER_ACTION_STATUSES);
 
 export const COMPUTER_ACTION_METHODS = [
   "ax_press",
+  "ax_set_value",
   "quartz",
   "native_command",
   "shortcut",
@@ -130,6 +144,11 @@ export const COMPUTER_ACTION_RESULT_CODES = [
   "ax_press_unsupported",
   "ax_press_failed",
   "ax_press_unverified",
+  "focused_element_unavailable",
+  "secure_text_blocked",
+  "ax_set_value_unsupported",
+  "ax_set_value_failed",
+  "ax_set_value_unverified",
   "frontmost_mismatch",
   "target_stale",
   "quartz_event_creation_failed",
@@ -137,6 +156,7 @@ export const COMPUTER_ACTION_RESULT_CODES = [
   "verified_accessibility",
   "verified_screen",
   "direct_action_already_attempted",
+  "action_limit_reached",
   "cancelled",
   "timeout",
   "runtime_error",
@@ -162,6 +182,7 @@ const computerActionRequestMetadata = {
 export const computerActionRequestedPayloadSchema = z.discriminatedUnion("action", [
   leftClickComputerActionSchema.extend(computerActionRequestMetadata),
   finderHistoryBackComputerActionSchema.extend(computerActionRequestMetadata),
+  setTextComputerActionSchema.extend(computerActionRequestMetadata),
 ]);
 
 export const computerActionResultPayloadSchema = z.object({
@@ -226,7 +247,17 @@ export const screenshotSchema = z.object({
   displayHeightPoints: z.number().int().positive(),
   screenshotWidthPixels: z.number().int().positive(),
   screenshotHeightPixels: z.number().int().positive(),
-});
+  // Optional protocol-v1 extension. Clicky supplies both values from the
+  // NSScreen/AppKit display frame so negative and vertical display origins are
+  // preserved without breaking frames from older clients.
+  displayOriginXPoints: z.number().finite().optional(),
+  displayOriginYPoints: z.number().finite().optional(),
+}).refine(
+  (screenshot) =>
+    (screenshot.displayOriginXPoints === undefined) ===
+      (screenshot.displayOriginYPoints === undefined),
+  { message: "display origin requires both x and y" },
+);
 
 export const contextFrameSchema = z.object({
   schemaVersion: z.literal(PROTOCOL_VERSION),

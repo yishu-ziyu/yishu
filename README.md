@@ -69,14 +69,20 @@ Pi 身份验证保留在 Pi 自己的凭据存储中。奕枢不复制或打印�
 `packages/kernel`（`@yishu/kernel`）经 Runtime `ProductKernelRuntime` 默认启用：
 
 - 语音 ASR → 产品话术路由（`记住刚才…` / `交给 Codex` / `记住：…` / Learning）→ `YishuAction`，否则走 Pi
-- `turn.start` + 后台 `trail.observe`（约 15s 元数据采样）喂养 `ContextTrail`
+- `turn.start` + 后台 `trail.observe`（约 5s 元数据采样）喂养按 personal / project 严格隔离的 `ContextTrail`；private 在 Swift 采集前就被拒绝
 - 默认 SQLite store（Application Support `Yishu/Store`）
+- Runtime 冷启动会从 Kernel 回填同 scope、同 conversation 的有界可见历史；最近现场与用户明确纠正也会进入下一个普通 turn，不再因 sidecar / App 重启“失忆”
 - `remember_how` 用 trail-replay 验证后再晋升 Skill；`run_skill` / `share_context` 生成 Context Capsule
 - 每个 request 带一份不可变 `TaskExecutionContract`，只允许一次产品级 attempt；真人点击“从头重试”会创建新 request，不伪装续跑原任务
 - Pi 只有在真实工具或电脑动作开始后才创建 Kernel `TaskTruth`；只读任务交付非空结果即记 `completed`，外部改变只接受进程内可信执行器 receipt / fresh read-back 为 `verified`，其余留在 `blocked`
 - 后台任务结果以 SQLite（默认）或 JSON 持久化：Main turn 领取后，只在该 turn 终态落盘成功后确认交付，失败或取消会释放领取；Runtime 重启遇到孤立 running 子任务时 fail closed，不自动续跑
+- 后台任务终态在用户空闲 3 秒后主动显示并口播一次；不伪造新 turn、不提前消费 Result Inbox，所以“第二条为什么？”仍能沿同一结果继续
+- 明确的“下次切回这个应用时提醒我…”会持久化为一次性提醒；只有创建后的离开观测才能 armed，返回时原子完成并主动送达一次
+- 普通纯对话按句串行 TTS，首句无需等待模型终态；桌面动作与模糊动作话术一律 final-only，PTT 打断后从 fresh turn 开始
+- 桌面闭环除 verified click 外，已接通类型化 `finder_history_back` 和对当前前台 AX 可写控件的 `set_text`；执行前重验 target，receipt 不持久化输入原文
+- Clicky 只保留 Pi 一套对话大脑；Runtime 失败有界重启后会如实报失败，不再绕过 Kernel 切到独立 `/chat` 会话
 
-Pi 是唯一正式执行 harness；AgentCore 与 Runtime 完全解耦，Agent-Native 只作方法论。Desktop 执行已有进程内、无队列的独占 lease；分布式 / 多 Runtime exactly-once、真正 checkpoint resume、Cua 隔离执行面、完整 desktop skill 重放与主动性仍在边界外。
+Pi 是唯一正式执行 harness；AgentCore 与 Runtime 完全解耦，Agent-Native 只作方法论。Desktop 执行已有进程内、无队列的独占 lease。当前已是“看见 → 记住 → 行动 → 等条件 → 主动回来 → 继续追问”的最小持续伴侣闭环；分布式 / 多 Runtime exactly-once、真正 checkpoint resume、通用 initiative/scheduler、完整 browser/file/desktop skill 面与 generation-aware 同 turn 全双工语音仍是下一阶段边界。
 
 验收：
 

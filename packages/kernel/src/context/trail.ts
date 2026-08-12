@@ -11,6 +11,11 @@ import {
   type ContextTrailEntry,
   type TrailSourceFrame,
 } from "./sanitize.js";
+import {
+  cloneSessionScope,
+  sessionScopesEqual,
+  type SessionScope,
+} from "../session-scope.js";
 
 export interface ContextTrailOptions {
   /** Hard cap on retained entries. Default 500. */
@@ -22,6 +27,8 @@ export interface ContextTrailOptions {
 }
 
 export interface ContextTrailQuery {
+  /** Exact product scope to read. Cross-scope reads are never allowed. */
+  sessionScope: SessionScope;
   /** Look-back window in ms from "now". Default = retentionMs. */
   sinceMs?: number;
   /** Inclusive upper bound ISO timestamp. */
@@ -48,17 +55,26 @@ export class ContextTrail {
     this.screenshotTtlMs = options.screenshotTtlMs ?? DEFAULT_SCREENSHOT_TTL_MS;
   }
 
-  append(frame: TrailSourceFrame, now: Date = new Date()): ContextTrailEntry {
+  append(
+    frame: TrailSourceFrame,
+    sessionScope: SessionScope,
+    now: Date = new Date(),
+  ): ContextTrailEntry {
+    if (sessionScope.kind === "private") {
+      throw new Error("private_session_not_trailable");
+    }
     const entry = toTrailEntry(frame, {
+      sessionScope,
       now,
       screenshotTtlMs: this.screenshotTtlMs,
     });
     this.entries.push(entry);
     this.prune(now);
-    return entry;
+    return cloneTrailEntry(entry);
   }
 
-  query(options: ContextTrailQuery = {}, now: Date = new Date()): ContextTrailEntry[] {
+  query(options: ContextTrailQuery, now: Date = new Date()): ContextTrailEntry[] {
+    if (options.sessionScope.kind === "private") return [];
     this.prune(now);
 
     const sinceMs = options.sinceMs ?? this.retentionMs;
@@ -67,6 +83,7 @@ export class ContextTrail {
     const needle = options.query?.trim().toLowerCase() ?? "";
 
     let results = this.entries.filter((entry) => {
+      if (!sessionScopesEqual(entry.sessionScope, options.sessionScope)) return false;
       const ts = Date.parse(entry.capturedAt);
       if (!Number.isFinite(ts)) return false;
       if (ts < sinceTs) return false;
@@ -81,20 +98,28 @@ export class ContextTrail {
     }
 
     // Refresh screenshot metadata flags for the returned view without dropping rows.
-    return results.map((e) => expireScreenshotMetadata({ ...e }, now));
+    return results.map((entry) => expireScreenshotMetadata(cloneTrailEntry(entry), now));
   }
 
-  recentMinutes(minutes: number, now: Date = new Date()): ContextTrailEntry[] {
+  recentMinutes(
+    minutes: number,
+    sessionScope: SessionScope,
+    now: Date = new Date(),
+  ): ContextTrailEntry[] {
     const ms = Math.max(0, minutes) * 60_000;
-    return this.query({ sinceMs: ms }, now);
+    return this.query({ sessionScope, sinceMs: ms }, now);
   }
 
   /**
    * Human-readable bullet timeline for the last `minutes` (default 5).
    * Never includes image bytes.
    */
-  summarize(minutes = 5, now: Date = new Date()): string {
-    const rows = this.recentMinutes(minutes, now);
+  summarize(
+    minutes: number,
+    sessionScope: SessionScope,
+    now: Date = new Date(),
+  ): string {
+    const rows = this.recentMinutes(minutes, sessionScope, now);
     if (rows.length === 0) {
       return `(no trail entries in last ${minutes}m)`;
     }
@@ -143,17 +168,26 @@ export class ContextTrail {
     return before - this.entries.length;
   }
 
-  size(): number {
-    return this.entries.length;
+  size(sessionScope: SessionScope): number {
+    if (sessionScope.kind === "private") return 0;
+    return this.entries.filter((entry) => sessionScopesEqual(entry.sessionScope, sessionScope)).length;
   }
 
   clear(): void {
     this.entries = [];
   }
 
-  listAll(): ContextTrailEntry[] {
-    return this.entries.map((e) => ({ ...e }));
+  listAll(sessionScope: SessionScope): ContextTrailEntry[] {
+    return this.query({ sessionScope });
   }
+}
+
+function cloneTrailEntry(entry: ContextTrailEntry): ContextTrailEntry {
+  return {
+    ...entry,
+    sessionScope: cloneSessionScope(entry.sessionScope),
+    warnings: [...entry.warnings],
+  };
 }
 
 function matchesQuery(entry: ContextTrailEntry, needle: string): boolean {

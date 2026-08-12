@@ -365,7 +365,7 @@ describe("conversation ledger", () => {
     const versionRow = versionCheck
       .prepare("PRAGMA user_version")
       .get() as { user_version?: number }
-    assert.equal(Number(versionRow.user_version), 5)
+    assert.equal(Number(versionRow.user_version), 6)
     const tableNames = versionCheck
       .prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'conversation_%' ORDER BY name",

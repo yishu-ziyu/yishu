@@ -19,6 +19,13 @@ struct YishuDirectClickMatch: Equatable, Sendable {
 /// Resolves a small, explicit click request locally. This keeps simple actions
 /// off the vision-model path while leaving ambiguous and complex turns to Pi.
 enum YishuDirectClickResolver {
+    private static let onboardingRegionOfInterest = CGRect(
+        x: 0.2,
+        y: 0.2,
+        width: 0.6,
+        height: 0.6
+    )
+
     /// Maps Vision's normalized observation box to screenshot pixels.
     ///
     /// Vision returns text observations in the request's processed region of
@@ -201,6 +208,20 @@ enum YishuDirectClickResolver {
         }.value
     }
 
+    /// Picks a reliable, short text observation near the middle of one screen.
+    /// This is intentionally local-only: onboarding never needs a model turn
+    /// merely to prove that Yishu can see and point.
+    static func resolveOnboardingTarget(
+        screen: YishuDirectClickScreen
+    ) async -> YishuDirectClickMatch? {
+        await Task.detached(priority: .userInitiated) {
+            recognizeOnboardingTarget(
+                screen: screen,
+                regionOfInterest: onboardingRegionOfInterest
+            )
+        }.value
+    }
+
     private static func recognize(
         target: String,
         screen: YishuDirectClickScreen,
@@ -262,6 +283,70 @@ enum YishuDirectClickResolver {
                 if bestMatch == nil || score > bestMatch!.score {
                     bestMatch = (score, match)
                 }
+            }
+        }
+        return bestMatch?.match
+    }
+
+    private static func recognizeOnboardingTarget(
+        screen: YishuDirectClickScreen,
+        regionOfInterest: CGRect
+    ) -> YishuDirectClickMatch? {
+        guard let image = NSImage(data: screen.imageData),
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+        request.usesLanguageCorrection = true
+        request.minimumTextHeight = 0.012
+        request.regionOfInterest = regionOfInterest
+
+        do {
+            try VNImageRequestHandler(cgImage: cgImage).perform([request])
+        } catch {
+            return nil
+        }
+
+        var bestMatch: (score: Double, match: YishuDirectClickMatch)?
+        for observation in request.results ?? [] {
+            guard let candidate = observation.topCandidates(1).first,
+                  candidate.confidence >= 0.65 else {
+                continue
+            }
+            let label = candidate.string
+                .split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard (2...30).contains(label.count),
+                  normalizedText(label).count >= 2,
+                  let pixelPoint = pixelPoint(
+                      for: observation.boundingBox,
+                      screenshotWidth: screen.screenshotWidthInPixels,
+                      screenshotHeight: screen.screenshotHeightInPixels,
+                      regionOfInterest: regionOfInterest
+                  ) else {
+                continue
+            }
+
+            let centerDistance = hypot(
+                Double(observation.boundingBox.midX - 0.5),
+                Double(observation.boundingBox.midY - 0.5)
+            )
+            let lengthPenalty = Double(max(0, label.count - 18)) * 0.25
+            let score = Double(candidate.confidence) * 100
+                - centerDistance * 35
+                - lengthPenalty
+            let match = YishuDirectClickMatch(
+                x: Double(pixelPoint.x),
+                y: Double(pixelPoint.y),
+                screenNumber: screen.screenNumber,
+                label: label
+            )
+            if bestMatch == nil || score > bestMatch!.score {
+                bestMatch = (score, match)
             }
         }
         return bestMatch?.match
