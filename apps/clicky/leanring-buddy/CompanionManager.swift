@@ -229,11 +229,20 @@ final class CompanionManager: ObservableObject {
     private var currentResponseTask: Task<Void, Never>?
     private var activeVoiceTurnToken: UUID?
     private var activeRuntimeRequestId: UUID?
-    private var runtimeVisualPhase: YishuRuntimeVisualPhase = .idle {
-        didSet { updateVisualState() }
+    private var visualStateMachine = YishuVisualStateMachine()
+    private var runtimeVisualPhase: YishuRuntimeVisualPhase {
+        get { visualStateMachine.runtimePhase }
+        set {
+            visualStateMachine.setRuntimePhase(newValue)
+            updateVisualState()
+        }
     }
-    private var turnVisualPhase: YishuTurnVisualPhase = .idle {
-        didSet { updateVisualState() }
+    private var turnVisualPhase: YishuTurnVisualPhase {
+        get { visualStateMachine.turnPhase }
+        set {
+            visualStateMachine.setTurnPhase(newValue)
+            updateVisualState()
+        }
     }
     #if DEBUG
     private var visualStateDemoOverride: YishuVisualState?
@@ -290,14 +299,10 @@ final class CompanionManager: ObservableObject {
             return visualStateDemoOverride
         }
         #endif
-        return YishuVisualStateRouter.route(YishuVisualStateInputs(
+        return visualStateMachine.visualState(
             voiceState: voiceState,
-            runtimePhase: runtimeVisualPhase,
-            turnPhase: turnVisualPhase,
-            delegatedPresence: YishuVisualStateRouter.route(
-                delegatedTasks: agentPresenceViewModel.tasks
-            )
-        ))
+            delegatedTasks: agentPresenceViewModel.tasks
+        )
     }
 
     private func updateVisualState() {
@@ -924,7 +929,13 @@ final class CompanionManager: ObservableObject {
     }
 
     private func updateRuntimeVisualPhase(for event: YishuRuntimeLifecycleEvent) {
-        runtimeVisualPhase = YishuVisualStateRouter.route(runtimeEvent: event)
+        visualStateMachine.apply(runtimeEvent: event)
+        updateVisualState()
+    }
+
+    private func updateTurnVisualPhase(for event: YishuRuntimeTurnEvent) {
+        visualStateMachine.apply(turnEvent: event)
+        updateVisualState()
     }
 
     #if DEBUG
@@ -2117,7 +2128,15 @@ final class CompanionManager: ObservableObject {
     ) async throws -> String {
         try contextFrame.validate()
         if !yishuAgentRuntimeClient.isRunning {
-            try yishuAgentRuntimeClient.start()
+            runtimeVisualPhase = .connecting
+            do {
+                try yishuAgentRuntimeClient.start()
+            } catch {
+                // A synchronous launch failure is not an active connection
+                // attempt. The outer recovery path may retry with fresh evidence.
+                runtimeVisualPhase = .idle
+                throw error
+            }
             startContextTrailSampling()
         }
 
@@ -2146,13 +2165,13 @@ final class CompanionManager: ObservableObject {
             for try await event in turn.events {
                 switch event {
                 case .started:
-                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                    updateTurnVisualPhase(for: event)
                 case .toolStarted:
-                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                    updateTurnVisualPhase(for: event)
                 case .toolCompleted:
-                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                    updateTurnVisualPhase(for: event)
                 case let .memoryUsed(items):
-                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                    updateTurnVisualPhase(for: event)
                     usedMemories = items
                     applyMemorySourceNotice(Self.formatMemorySourceNotice(items))
                 case let .computerActionRequested(request):
@@ -2163,7 +2182,7 @@ final class CompanionManager: ObservableObject {
                     // Consume the runtime action before awaiting the actuator;
                     // the final model text must not replay it via a POINT tag.
                     activeTurnConsumedComputerAction = true
-                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                    updateTurnVisualPhase(for: event)
                     timing?.mark(
                         "pi_action_arrival",
                         reason: "computer_action",
@@ -2195,7 +2214,7 @@ final class CompanionManager: ObservableObject {
                     )
                     try yishuAgentRuntimeClient.completeComputerAction(request, result: result)
                 case let .responseDelta(delta):
-                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                    updateTurnVisualPhase(for: event)
                     accumulatedText += delta
                     // Direct-click turns stay buffered until the action/result
                     // decision is known; this prevents model tool markup from
@@ -2206,10 +2225,10 @@ final class CompanionManager: ObservableObject {
                         )
                     }
                 case let .completed(text, _):
-                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                    updateTurnVisualPhase(for: event)
                     completedText = text
                 case .cancelled:
-                    turnVisualPhase = YishuVisualStateRouter.route(turnEvent: event)
+                    updateTurnVisualPhase(for: event)
                     throw CancellationError()
                 }
             }
