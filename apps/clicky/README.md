@@ -13,7 +13,7 @@ The app keeps the existing Clicky interaction contract:
 - five-second, metadata-only recent context sampling with exact personal/project scope and a pre-capture private-mode gate;
 - bundled Pi/Yishu runtime with the explicit model allowlist;
 - MiniMax speech output and verified cursor pointing/clicking;
-- verified Finder history-back and focused writable-field text entry;
+- verified Finder history-back, focused writable-field text entry, and one-shot Apple Notes creation with exact read-back;
 - a typed delegated-task snapshot restored when Pi becomes ready, with
   acknowledged cancellation and event-backed `SystemSequence` steps;
 - one quiet-window return of a terminal background result beside the cursor,

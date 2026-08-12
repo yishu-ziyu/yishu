@@ -10,6 +10,7 @@ import {
   recallRelevantMemories,
   sanitizeVisibleText,
   selectRelevantMindLessons,
+  type CreateNoteExecutor,
   type FinderHistoryBackExecutor,
   type ConversationEvent,
   type ConversationTurn,
@@ -38,7 +39,7 @@ import type {
 } from "./protocol.js";
 import { runtimeEvent } from "./protocol.js";
 import type { AgentRuntime, RuntimeEventSink } from "./runtime-port.js";
-import type { ComputerUsePort } from "./computer-use-port.js";
+import { ComputerActionError, type ComputerUsePort } from "./computer-use-port.js";
 import type { YishuAuthService } from "./auth-service.js";
 import { RuntimeTaskProgressTracker } from "./task-progress.js";
 import { attachTaskExecutionContract } from "./task-contract.js";
@@ -1170,6 +1171,7 @@ export class ProductKernelRuntime implements AgentRuntime {
   ): Promise<void> {
     const { command } = state;
     const actionRoute = route.action === "finder_history_back"
+      || route.action === "create_note"
       ? {
           ...route,
           input: {
@@ -1198,13 +1200,16 @@ export class ProductKernelRuntime implements AgentRuntime {
     try {
       const actionDeps = actionRoute.action === "finder_history_back"
         ? { finderHistoryBack: this.finderHistoryBackExecutor(state) }
-        : undefined;
+        : actionRoute.action === "create_note"
+          ? { createNote: this.createNoteExecutor(state) }
+          : undefined;
       receipt = await this.kernel.registry.invoke(actionRoute.action, {
         caller: "voice",
         input: actionRoute.input,
         contextFrame: command.payload.contextFrame,
         sessionScope: state.sessionScope,
         signal: productActionAbortController.signal,
+        ...(actionRoute.action === "create_note" ? { approved: true } : {}),
       }, actionDeps);
     } catch {
       if (productActionAbortController.signal.aborted || state.terminalKind === "cancelled") {
@@ -1382,6 +1387,54 @@ export class ProductKernelRuntime implements AgentRuntime {
           basisFrameId: request.basisFrameId,
           effectClass: "navigation",
         }, signal);
+      },
+    };
+  }
+
+  /** Create exactly one note, then require the macOS side to read it back. */
+  private createNoteExecutor(state: TurnLedgerState): CreateNoteExecutor {
+    return {
+      perform: async (request, signal) => {
+        if (!this.computerUsePort) {
+          return {
+            succeeded: false,
+            verified: false,
+            status: "failed",
+            code: "runtime_error",
+            method: "unknown",
+            message: "The macOS Notes bridge is unavailable.",
+          };
+        }
+        try {
+          return await this.computerUsePort.perform({
+            action: "create_note",
+            x: 0,
+            y: 0,
+            content: request.content,
+            title: request.title,
+            targetBundleId: "com.apple.Notes",
+          }, {
+            requestId: state.command.requestId,
+            traceId: state.traceId,
+            intentId: request.intentId,
+            attemptId: request.attemptId,
+            basisFrameId: request.basisFrameId,
+            effectClass: "write",
+          });
+        } catch (error) {
+          if (error instanceof ComputerActionError && error.code === "timeout") {
+            return {
+              succeeded: true,
+              verified: false,
+              status: "unverified",
+              code: "timeout",
+              method: "unknown",
+              attemptId: request.attemptId,
+              message: "Note creation may have been submitted, but its result is unknown.",
+            };
+          }
+          throw error;
+        }
       },
     };
   }
@@ -2737,6 +2790,7 @@ const SAFE_PRODUCT_ACTIONS = new Set([
   "run_skill",
   "watch_app_return",
   "finder_history_back",
+  "create_note",
 ]);
 
 const SAFE_PRODUCT_STATUSES = new Set([
@@ -2966,6 +3020,7 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
   const action = payload.action === "left_click"
     || payload.action === "finder_history_back"
     || payload.action === "set_text"
+    || payload.action === "create_note"
     ? payload.action
     : undefined;
   if (actionId === undefined || action === undefined) {
@@ -2985,7 +3040,7 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     }
     result.targetBundleId = payload.targetBundleId;
     result.targetPid = payload.targetPid as number;
-  } else {
+  } else if (action === "set_text") {
     const text = typeof payload.text === "string" && payload.text.length > 0 && payload.text.length <= 10_000
       ? payload.text
       : undefined;
@@ -3001,6 +3056,27 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     result.text = text;
     result.targetBundleId = targetBundleId;
     result.targetPid = payload.targetPid as number;
+  } else {
+    const content = typeof payload.content === "string"
+      && payload.content.trim().length > 0
+      && payload.content.length <= 5_000
+      ? payload.content
+      : undefined;
+    const title = typeof payload.title === "string"
+      && payload.title.trim().length > 0
+      && payload.title.length <= 120
+      ? payload.title
+      : undefined;
+    if (
+      content === undefined
+      || title === undefined
+      || payload.targetBundleId !== "com.apple.Notes"
+    ) {
+      return undefined;
+    }
+    result.content = content;
+    result.title = title;
+    result.targetBundleId = "com.apple.Notes";
   }
   if (Number.isInteger(payload.screen) && (payload.screen as number) > 0) {
     result.screen = payload.screen as number;
@@ -3105,7 +3181,7 @@ function summarizeProductActionOutput(
     const retiredId = safeIdentifier(value.retiredId);
     return retiredId === undefined ? {} : { retiredId };
   }
-  if (actionName === "finder_history_back") {
+  if (actionName === "finder_history_back" || actionName === "create_note") {
     const result: ClientEventPayload = {};
     if (typeof value.succeeded === "boolean") result.succeeded = value.succeeded;
     if (typeof value.verified === "boolean") result.verified = value.verified;
@@ -3121,12 +3197,17 @@ function summarizeProductActionOutput(
       "ax_press_failed",
       "ax_press_unverified",
       "verified_accessibility",
+      "permission_denied",
+      "timeout",
       "runtime_error",
     ].includes(code)) {
       result.code = code;
     }
     const method = safeMetadata(value.method);
-    if (method && ["ax_press", "unknown"].includes(method)) result.method = method;
+    const safeMethods = actionName === "create_note"
+      ? ["native_command", "unknown"]
+      : ["ax_press", "unknown"];
+    if (method && safeMethods.includes(method)) result.method = method;
     return result;
   }
   return {};

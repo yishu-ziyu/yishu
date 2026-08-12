@@ -261,6 +261,25 @@ test("requested action metadata is optional for old clients but typed for new cl
     }).intentId,
     undefined,
   );
+
+  const createNote = computerActionRequestedPayloadSchema.parse({
+    actionId,
+    action: "create_note",
+    x: 0,
+    y: 0,
+    content: "周五演示只讲插话和主动回访",
+    title: "周五演示",
+    targetBundleId: "com.apple.Notes",
+    intentId,
+    attemptId,
+    basisFrameId,
+    effectClass: "write",
+  });
+  assert.equal(createNote.action, "create_note");
+  assert.throws(() => computerActionRequestedPayloadSchema.parse({
+    ...createNote,
+    targetBundleId: "com.evil.Notes",
+  }));
 });
 
 test("model preference round-trips only the local Grok route", () => {

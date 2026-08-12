@@ -8,6 +8,7 @@ import {
   createDelegateAction,
   createForgetAction,
   createFinderHistoryBackAction,
+  createNoteAction,
   createLearnMindFromPatternAction,
   createRecordLearningAction,
   createRecordSuggestionAction,
@@ -97,6 +98,7 @@ export function createYishuKernel(
     createLearnMindFromPatternAction(store),
     createRunSkillAction({ store, trail }),
     createFinderHistoryBackAction(),
+    createNoteAction(),
     createWatchAppReturnAction(store),
     createDelegateAction({ taskTruth }),
   ];

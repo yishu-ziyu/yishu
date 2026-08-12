@@ -3582,6 +3582,13 @@ final class CompanionManager: ObservableObject {
                 "返回结果不确定，我没有重复操作。",
                 "这次没能返回，我没有重复操作。"
             )
+        case "create_note":
+            wording = (
+                "已新建并确认一条备忘录。",
+                "备忘录可能已经新建，但我还没确认；我不会重复创建。",
+                "备忘录结果不确定，我不会重复创建。",
+                "这次没有新建备忘录。"
+            )
         default:
             wording = (
                 "点好了。",
@@ -3597,6 +3604,8 @@ final class CompanionManager: ObservableObject {
             return wording.delivered
         case .unverified:
             return wording.unverified
+        case .blocked:
+            return wording.failed
         case .failed:
             return wording.failed
         }

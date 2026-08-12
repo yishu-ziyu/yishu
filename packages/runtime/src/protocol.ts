@@ -99,10 +99,25 @@ const setTextComputerActionSchema = z.object({
   targetPid: z.number().int().positive(),
 });
 
+/**
+ * A product-owned, create-only Notes action. Content is carried only to the
+ * trusted macOS actuator; it must never be copied into audit summaries.
+ */
+const createNoteComputerActionSchema = z.object({
+  action: z.literal("create_note"),
+  // Keep the wire shape compatible with the existing computer-action reader.
+  x: z.literal(0),
+  y: z.literal(0),
+  content: z.string().trim().min(1).max(5_000),
+  title: z.string().trim().min(1).max(120),
+  targetBundleId: z.literal("com.apple.Notes"),
+});
+
 export const computerActionSchema = z.discriminatedUnion("action", [
   leftClickComputerActionSchema,
   finderHistoryBackComputerActionSchema,
   setTextComputerActionSchema,
+  createNoteComputerActionSchema,
 ]);
 
 /**
@@ -183,6 +198,7 @@ export const computerActionRequestedPayloadSchema = z.discriminatedUnion("action
   leftClickComputerActionSchema.extend(computerActionRequestMetadata),
   finderHistoryBackComputerActionSchema.extend(computerActionRequestMetadata),
   setTextComputerActionSchema.extend(computerActionRequestMetadata),
+  createNoteComputerActionSchema.extend(computerActionRequestMetadata),
 ]);
 
 export const computerActionResultPayloadSchema = z.object({
