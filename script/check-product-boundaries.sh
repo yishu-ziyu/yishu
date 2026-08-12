@@ -33,9 +33,14 @@ reject_source_pattern() {
   fi
 }
 
-# One shipping body and one deliberately separate development shell.
+# One macOS app source. Shared Swift contracts live outside apps/.
 require_literal "apps/clicky/leanring-buddy.xcodeproj/project.pbxproj" 'PRODUCT_BUNDLE_IDENTIFIER = "com.yishu.yishu-buddy"'
-require_literal "apps/macos/Resources/Info.plist" '<string>com.yishu.yishu-lab</string>'
+require_literal "Package.swift" 'path: "Sources/YishuContext"'
+if [[ -e "apps/macos" ]]; then
+  echo "Product boundary check failed: apps/macos must not recreate a second macOS app" >&2
+  exit 1
+fi
+reject_source_pattern 'executableTarget|com\.yishu\.yishu-lab' Package.swift apps
 
 # The canonical Clicky source always starts Pi behind the Product Kernel.
 require_literal "apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift" 'environment["YISHU_RUNTIME_MODE"] = "pi"'
@@ -50,9 +55,7 @@ reject_source_pattern 'KairosBridgeClient|RunProgressPresenter|forceKairosRoutin
 # standalone laboratory and must not be linked back into the Runtime package.
 reject_source_pattern '@yishu/agent-core|AgentCoreRuntime' packages/runtime/src packages/runtime/package.json
 
-# Neither the canonical Clicky bundle nor the development shell may build or
-# copy the standalone AgentCore laboratory into an app bundle.
-reject_source_pattern '@yishu/agent-core|packages/agent-core|AgentCoreRuntime' apps/clicky/scripts/run-local.sh script/build_and_run.sh
-reject_source_pattern '^pnpm --dir "\$ROOT_DIR" build$' script/build_and_run.sh
+# The canonical Clicky bundle may not copy the standalone AgentCore laboratory.
+reject_source_pattern '@yishu/agent-core|packages/agent-core|AgentCoreRuntime' apps/clicky/scripts/run-local.sh
 
 echo "Product boundary check passed: Clicky body -> Product Kernel -> Pi runtime"

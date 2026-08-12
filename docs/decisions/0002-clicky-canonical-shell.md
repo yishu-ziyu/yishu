@@ -1,13 +1,13 @@
 # ADR 0002: apps/clicky 是唯一正式外壳
 
 Type: decision
-Status: current
-Verified: 21629d6 2026-08-10
-Review: 该决策被重新讨论或推翻时（只能由新 ADR supersede）
+Status: superseded
+Superseded-by: docs/decisions/0012-single-macos-app-source.md
 
 ## Status
 
-Accepted
+Superseded 2026-08-12. 保留 Clicky bundle identity 与 TCC 连续性的结论不变；
+“另设 `apps/macos` 开发壳”的决定由 ADR 0012 撤销。
 
 ## Context
 

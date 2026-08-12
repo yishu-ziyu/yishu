@@ -26,7 +26,7 @@ if [[ "$MODE" == "full" ]]; then
     -scheme leanring-buddy \
     -destination 'platform=macOS' \
     test
-  ./script/build_and_run.sh --verify
+  ./apps/clicky/scripts/run-local.sh self-test
 fi
 
 echo "Yishu product verification passed ($MODE)"

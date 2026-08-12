@@ -20,7 +20,7 @@ pnpm product:verify
 ```
 
 `product:check` 包含产品边界守卫、Kernel/Runtime check + test 和 `swift test`。
-`product:verify` 额外运行正式 Clicky Xcode 测试与开发壳 headless 打包验证。
+`product:verify` 额外运行 Clicky Xcode 测试与正式构建脚本的无副作用 self-test。
 完整工作区（含 AgentCore 实验室）仍运行 `pnpm test && pnpm run check`。
 
 产品边界守卫同时确认：正式 Clicky 固定启动 Pi、Runtime 不依赖 `@yishu/agent-core`、
@@ -37,7 +37,7 @@ pnpm product:build:clicky
 
 - Workflow：`.github/workflows/ci.yml`，runner `macos-15`。
 - 顺序：install → `pnpm product:verify` → AgentCore laboratory check/test。
-- 正式产品由同一个公共入口覆盖边界守卫、Kernel/Runtime、Swift Package、Clicky Xcode 测试和开发壳打包。
+- 正式产品由同一个公共入口覆盖边界守卫、Kernel/Runtime、Swift Package、Clicky Xcode 测试和正式构建脚本 self-test。
 - AgentCore 被单独验收为实验室，失败不会被正式产品验证悄悄掩盖，也不会重新成为第二个产品核心。
 
 ## 用户可见变更的验收
