@@ -11,11 +11,15 @@ import Combine
 import SwiftUI
 
 enum YishuDelegatedTaskStatus: String, Equatable {
+    case pending
     case running
     case blocked
     case done
     case failed
     case cancelled
+    /// Presentation-only state derived from a typed sidecar-stopped event.
+    /// It is never accepted as TaskTruth on the wire.
+    case interrupted
 }
 
 enum YishuDelegatedResultKind: String, Equatable {
@@ -24,6 +28,74 @@ enum YishuDelegatedResultKind: String, Equatable {
     case unverified
     case failed
     case cancelled
+}
+
+enum YishuSystemSequenceStepStatus: String, Equatable {
+    case pending
+    case running
+    case passed
+    case failed
+}
+
+/// One runtime-authored system observation. A sequence step is displayable only
+/// when it carries the event id that produced it; Clicky never advances steps
+/// with timers or by translating its own visual phases.
+struct YishuSystemSequenceStep: Identifiable, Equatable {
+    let id: String
+    let label: String
+    let detail: String?
+    let status: YishuSystemSequenceStepStatus
+    let occurredAt: Date
+    let sourceEventId: UUID
+
+    static func decode(_ raw: [String: Any]) -> Self? {
+        guard let rawID = raw["id"] as? String,
+              let rawLabel = raw["label"] as? String,
+              let rawStatus = raw["status"] as? String,
+              let status = normalizedStatus(rawStatus),
+              let occurredAt = YishuDelegatedTaskPresenceEvent.parseISO8601(
+                raw["occurredAt"] as? String
+              ),
+              let sourceEventId = (raw["sourceEventId"] as? String)
+                .flatMap(UUID.init(uuidString:)) else {
+            return nil
+        }
+        let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...80).contains(id.count), (1...120).contains(label.count) else {
+            return nil
+        }
+        let detail = YishuDelegatedTaskPresenceEvent.boundedOptionalString(
+            raw["detail"],
+            maximum: 240
+        )
+        guard raw["detail"] == nil || detail != nil else { return nil }
+        return Self(
+            id: id,
+            label: label,
+            detail: detail,
+            status: status,
+            occurredAt: occurredAt,
+            sourceEventId: sourceEventId
+        )
+    }
+
+    private static func normalizedStatus(_ wireStatus: String) -> YishuSystemSequenceStepStatus? {
+        switch wireStatus {
+        case "pending": return .pending
+        case "running": return .running
+        case "passed", "completed": return .passed
+        case "failed", "cancelled": return .failed
+        default: return nil
+        }
+    }
+}
+
+enum YishuTaskCancelRequestState: Equatable {
+    case idle
+    case requesting
+    case accepted
+    case failed(String)
 }
 
 struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
@@ -38,31 +110,59 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
     let model: String?
     let resultKind: YishuDelegatedResultKind?
     let summary: String?
+    let sourceEventId: UUID
+    let sequence: [YishuSystemSequenceStep]
+
+    init(
+        id: UUID,
+        parentId: UUID,
+        mainConversationId: UUID,
+        title: String,
+        status: YishuDelegatedTaskStatus,
+        createdAt: Date,
+        updatedAt: Date,
+        provider: String?,
+        model: String?,
+        resultKind: YishuDelegatedResultKind?,
+        summary: String?,
+        sourceEventId: UUID,
+        sequence: [YishuSystemSequenceStep] = []
+    ) {
+        self.id = id
+        self.parentId = parentId
+        self.mainConversationId = mainConversationId
+        self.title = title
+        self.status = status
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.provider = provider
+        self.model = model
+        self.resultKind = resultKind
+        self.summary = summary
+        self.sourceEventId = sourceEventId
+        self.sequence = sequence
+    }
 
     var workerLabel: String {
-        guard let model else { return "Research" }
-        let name: String
-        switch model {
-        case "gpt-5.6-terra": name = "Terra"
-        case "gpt-5.6-luna": name = "Luna"
-        case "gpt-5.6-sol": name = "Sol"
-        case "grok-4.5": name = "Grok 4.5"
-        default:
-            name = model
-                .replacingOccurrences(of: "gpt-", with: "GPT ")
-                .replacingOccurrences(of: "-", with: " ")
-                .capitalized
-        }
-        return "Research · \(name)"
+        "后台任务"
     }
 
     var statusLabel: String {
         switch status {
+        case .pending: return "等待开始"
         case .running: return "正在研究"
         case .blocked: return "需要确认"
         case .done: return "结果已就绪"
-        case .failed: return "未完成"
-        case .cancelled: return "已停止"
+        case .failed, .cancelled, .interrupted: return "任务已中断"
+        }
+    }
+
+    var interruptionMessage: String? {
+        switch status {
+        case .failed, .cancelled, .interrupted:
+            return "任务已中断。可以从头重试，或开始一个新方向。"
+        default:
+            return nil
         }
     }
 
@@ -70,20 +170,54 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
     static func decode(_ raw: [String: Any]) -> Self? {
         guard raw["type"] as? String == "task.presence.updated",
               YishuAgentRuntimeClient.isValidSchemaVersionValue(raw["schemaVersion"]),
-              (raw["eventId"] as? String).flatMap(UUID.init(uuidString:)) != nil,
+              let sourceEventId = (raw["eventId"] as? String).flatMap(UUID.init(uuidString:)),
               (raw["requestId"] as? String).flatMap(UUID.init(uuidString:)) != nil,
               (raw["traceId"] as? String).flatMap(UUID.init(uuidString:)) != nil,
               let envelopeConversationId = (raw["conversationId"] as? String)
                 .flatMap(UUID.init(uuidString:)),
               let payload = raw["payload"] as? [String: Any],
-              let taskId = (payload["taskId"] as? String).flatMap(UUID.init(uuidString:)),
+              let mainConversationId = (payload["mainConversationId"] as? String)
+                .flatMap(UUID.init(uuidString:)),
+              mainConversationId == envelopeConversationId else {
+            return nil
+        }
+
+        return decodePayload(
+            payload,
+            expectedConversationId: mainConversationId,
+            sourceEventId: sourceEventId,
+            requiresTerminalResult: true
+        )
+    }
+
+    static func decodeSnapshotItem(
+        _ payload: [String: Any],
+        expectedConversationId: UUID,
+        sourceEventId: UUID
+    ) -> Self? {
+        decodePayload(
+            payload,
+            expectedConversationId: expectedConversationId,
+            sourceEventId: sourceEventId,
+            requiresTerminalResult: false
+        )
+    }
+
+    private static func decodePayload(
+        _ payload: [String: Any],
+        expectedConversationId: UUID,
+        sourceEventId: UUID,
+        requiresTerminalResult: Bool
+    ) -> Self? {
+        guard let taskId = (payload["taskId"] as? String).flatMap(UUID.init(uuidString:)),
               let parentId = (payload["parentId"] as? String).flatMap(UUID.init(uuidString:)),
               let mainConversationId = (payload["mainConversationId"] as? String)
                 .flatMap(UUID.init(uuidString:)),
-              mainConversationId == envelopeConversationId,
+              mainConversationId == expectedConversationId,
               let rawTitle = payload["title"] as? String,
               let statusRaw = payload["status"] as? String,
               let status = YishuDelegatedTaskStatus(rawValue: statusRaw),
+              status != .interrupted,
               let createdAt = parseISO8601(payload["createdAt"] as? String),
               let updatedAt = parseISO8601(payload["updatedAt"] as? String),
               updatedAt >= createdAt else {
@@ -103,11 +237,31 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
         let resultKind = (payload["resultKind"] as? String)
             .flatMap(YishuDelegatedResultKind.init(rawValue:))
         let summary = boundedOptionalString(payload["summary"], maximum: 500)
-        let isTerminal = status != .running
+        let isActive = status == .pending || status == .running
+        let hasCompleteResult = resultKind != nil && summary != nil
         guard (provider == nil) == (model == nil),
-              isTerminal == (resultKind != nil && summary != nil),
-              resultMatchesStatus(resultKind, status: status) else {
+              (payload["resultKind"] == nil || resultKind != nil),
+              (payload["summary"] == nil || summary != nil),
+              !(isActive && hasCompleteResult),
+              (!requiresTerminalResult || isActive || hasCompleteResult),
+              (resultKind == nil) == (summary == nil),
+              (!requiresTerminalResult && resultKind == nil
+                || resultMatchesStatus(resultKind, status: status)) else {
             return nil
+        }
+
+        let sequence: [YishuSystemSequenceStep]
+        if let rawSequence = payload["sequence"] {
+            guard let rows = rawSequence as? [[String: Any]], rows.count <= 64 else {
+                return nil
+            }
+            sequence = rows.compactMap(YishuSystemSequenceStep.decode)
+            guard sequence.count == rows.count,
+                  Set(sequence.map(\.id)).count == sequence.count else {
+                return nil
+            }
+        } else {
+            sequence = []
         }
 
         return Self(
@@ -121,11 +275,13 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
             provider: provider,
             model: model,
             resultKind: resultKind,
-            summary: summary
+            summary: summary,
+            sourceEventId: sourceEventId,
+            sequence: sequence
         )
     }
 
-    private static func boundedOptionalString(_ value: Any?, maximum: Int) -> String? {
+    static func boundedOptionalString(_ value: Any?, maximum: Int) -> String? {
         guard let value else { return nil }
         guard let string = value as? String else { return nil }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -133,7 +289,7 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
         return trimmed
     }
 
-    private static func parseISO8601(_ value: String?) -> Date? {
+    static func parseISO8601(_ value: String?) -> Date? {
         guard let value else { return nil }
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -148,37 +304,117 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
         status: YishuDelegatedTaskStatus
     ) -> Bool {
         switch status {
-        case .running: return result == nil
+        case .pending, .running, .interrupted: return result == nil
         case .done: return result == .succeeded || result == .completed
-        case .blocked: return result == .unverified
+        case .blocked: return result == nil || result == .unverified
         case .failed: return result == .failed
         case .cancelled: return result == .cancelled
         }
+    }
+
+    func interruptedByRuntimeStop() -> Self {
+        guard status == .pending || status == .running else { return self }
+        return Self(
+            id: id,
+            parentId: parentId,
+            mainConversationId: mainConversationId,
+            title: title,
+            status: .interrupted,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            provider: provider,
+            model: model,
+            resultKind: nil,
+            summary: nil,
+            sourceEventId: sourceEventId,
+            sequence: sequence
+        )
     }
 }
 
 @MainActor
 final class AgentPresenceViewModel: ObservableObject {
     @Published private(set) var tasks: [YishuDelegatedTaskPresenceEvent] = []
+    @Published private(set) var cancelRequestStates: [UUID: YishuTaskCancelRequestState] = [:]
 
     var hasTasks: Bool { !tasks.isEmpty }
 
-    func apply(_ event: YishuDelegatedTaskPresenceEvent) {
+    func apply(
+        _ event: YishuDelegatedTaskPresenceEvent,
+        expectedConversationId: UUID
+    ) {
+        guard event.mainConversationId == expectedConversationId else { return }
         if let index = tasks.firstIndex(where: { $0.id == event.id }) {
             guard event.updatedAt >= tasks[index].updatedAt else { return }
             tasks[index] = event
         } else {
             tasks.append(event)
         }
+        if event.status != .pending && event.status != .running {
+            cancelRequestStates.removeValue(forKey: event.id)
+        }
         tasks.sort { $0.createdAt > $1.createdAt }
+    }
+
+    func replaceWithSnapshot(_ snapshot: [YishuDelegatedTaskPresenceEvent]) {
+        tasks = snapshot.sorted { $0.createdAt > $1.createdAt }
+        let visibleIDs = Set(tasks.map(\.id))
+        cancelRequestStates = cancelRequestStates.filter { visibleIDs.contains($0.key) }
+    }
+
+    /// Merge a request-time snapshot without overwriting typed presence that
+    /// arrived while task.list was in flight. The latest runtime timestamp wins;
+    /// live-only rows stay because their omission can be a snapshot race.
+    func mergeSnapshot(_ snapshot: [YishuDelegatedTaskPresenceEvent]) {
+        var merged = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
+        for task in snapshot {
+            if let current = merged[task.id], current.updatedAt >= task.updatedAt {
+                continue
+            }
+            merged[task.id] = task
+        }
+        tasks = merged.values.sorted { $0.createdAt > $1.createdAt }
+        let visibleIDs = Set(tasks.map(\.id))
+        cancelRequestStates = cancelRequestStates.filter { visibleIDs.contains($0.key) }
+    }
+
+    func markRuntimeInterrupted() {
+        tasks = tasks.map { $0.interruptedByRuntimeStop() }
+        for task in tasks where task.status == .interrupted {
+            cancelRequestStates.removeValue(forKey: task.id)
+        }
+    }
+
+    func markCancelRequesting(_ taskId: UUID) {
+        cancelRequestStates[taskId] = .requesting
+    }
+
+    func markCancelAccepted(_ taskId: UUID) {
+        guard tasks.contains(where: {
+            $0.id == taskId && ($0.status == .pending || $0.status == .running)
+        }) else { return }
+        cancelRequestStates[taskId] = .accepted
+    }
+
+    func markCancelFailed(_ taskId: UUID, message: String) {
+        guard tasks.contains(where: {
+            $0.id == taskId && ($0.status == .pending || $0.status == .running)
+        }) else { return }
+        cancelRequestStates[taskId] = .failed(message)
+    }
+
+    func cancelRequestState(for taskId: UUID) -> YishuTaskCancelRequestState {
+        cancelRequestStates[taskId] ?? .idle
     }
 
     func acknowledge(_ taskId: UUID) {
         tasks.removeAll { $0.id == taskId }
+        cancelRequestStates.removeValue(forKey: taskId)
     }
 
     func reset() {
         tasks.removeAll()
+        cancelRequestStates.removeAll()
     }
 }
 
@@ -193,6 +429,8 @@ final class AgentPresenceWindowManager: NSObject {
 
     var onCancelTask: ((YishuDelegatedTaskPresenceEvent) -> Void)?
     var onPresentResult: ((YishuDelegatedTaskPresenceEvent) -> Void)?
+    var onRetryFromBeginning: ((YishuDelegatedTaskPresenceEvent) -> Void)?
+    var onStartNewDirection: ((YishuDelegatedTaskPresenceEvent) -> Void)?
 
     private var anchorPoint: NSPoint?
     private var anchorPanel: NSPanel?
@@ -216,8 +454,39 @@ final class AgentPresenceWindowManager: NSObject {
         if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
     }
 
-    func apply(_ event: YishuDelegatedTaskPresenceEvent) {
-        viewModel.apply(event)
+    func apply(
+        _ event: YishuDelegatedTaskPresenceEvent,
+        expectedConversationId: UUID
+    ) {
+        viewModel.apply(event, expectedConversationId: expectedConversationId)
+    }
+
+    func replaceWithSnapshot(_ tasks: [YishuDelegatedTaskPresenceEvent]) {
+        viewModel.replaceWithSnapshot(tasks)
+    }
+
+    func mergeSnapshot(_ tasks: [YishuDelegatedTaskPresenceEvent]) {
+        viewModel.mergeSnapshot(tasks)
+    }
+
+    func markRuntimeInterrupted() {
+        viewModel.markRuntimeInterrupted()
+    }
+
+    func markCancelRequesting(_ taskId: UUID) {
+        viewModel.markCancelRequesting(taskId)
+    }
+
+    func markCancelAccepted(_ taskId: UUID) {
+        viewModel.markCancelAccepted(taskId)
+    }
+
+    func markCancelFailed(_ taskId: UUID, message: String) {
+        viewModel.markCancelFailed(taskId, message: message)
+    }
+
+    func acknowledge(_ taskId: UUID) {
+        viewModel.acknowledge(taskId)
     }
 
     func stop() {
@@ -317,8 +586,8 @@ final class AgentPresenceWindowManager: NSObject {
     private func showPocket(selecting _: UUID? = nil) {
         guard let anchorPoint else { return }
         let tasks = viewModel.tasks
-        let width: CGFloat = 326
-        let height = min(CGFloat(66 + tasks.count * 92), 386)
+        let width: CGFloat = 344
+        let height = min(CGFloat(72 + tasks.count * 210), 520)
         let size = CGSize(width: width, height: max(height, 138))
         let panel = pocketPanel ?? makePanel(size: size)
         panel.contentView = hostingView(
@@ -330,6 +599,14 @@ final class AgentPresenceWindowManager: NSObject {
                     guard let self else { return }
                     self.onPresentResult?(task)
                     self.viewModel.acknowledge(task.id)
+                },
+                onRetryFromBeginning: { [weak self] task in
+                    self?.hidePocket()
+                    self?.onRetryFromBeginning?(task)
+                },
+                onStartNewDirection: { [weak self] task in
+                    self?.hidePocket()
+                    self?.onStartNewDirection?(task)
                 }
             ),
             size: size
@@ -585,18 +862,18 @@ private struct AgentPresenceSatelliteButton: View {
     private var pulseDuration: Double { task.status == .done ? 0.72 : 1.2 }
     private var glowColor: Color {
         switch task.status {
-        case .running, .done: return DS.Colors.overlayCursorBlue.opacity(0.82)
+        case .pending, .running, .done: return DS.Colors.overlayCursorBlue.opacity(0.82)
         case .blocked: return DS.Colors.overlaySpectralAmber.opacity(0.72)
-        case .failed: return Color.red.opacity(0.58)
-        case .cancelled: return Color.gray.opacity(0.35)
+        case .failed, .interrupted: return Color.red.opacity(0.58)
+        case .cancelled: return Color.gray.opacity(0.45)
         }
     }
     private var fillColor: Color {
         switch task.status {
-        case .running: return DS.Colors.overlayCursorBlue
+        case .pending, .running: return DS.Colors.overlayCursorBlue
         case .done: return Color.white
         case .blocked: return DS.Colors.overlaySpectralAmber
-        case .failed: return Color.red.opacity(0.86)
+        case .failed, .interrupted: return Color.red.opacity(0.86)
         case .cancelled: return Color.gray.opacity(0.68)
         }
     }
@@ -622,6 +899,8 @@ private struct AgentPresencePocketView: View {
     let onClose: () -> Void
     let onCancel: (YishuDelegatedTaskPresenceEvent) -> Void
     let onResult: (YishuDelegatedTaskPresenceEvent) -> Void
+    let onRetryFromBeginning: (YishuDelegatedTaskPresenceEvent) -> Void
+    let onStartNewDirection: (YishuDelegatedTaskPresenceEvent) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -652,7 +931,14 @@ private struct AgentPresencePocketView: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(viewModel.tasks) { task in
-                        AgentPresenceTaskRow(task: task, onCancel: onCancel, onResult: onResult)
+                        TaskStatusCard(
+                            task: task,
+                            cancelState: viewModel.cancelRequestState(for: task.id),
+                            onCancel: onCancel,
+                            onResult: onResult,
+                            onRetryFromBeginning: onRetryFromBeginning,
+                            onStartNewDirection: onStartNewDirection
+                        )
                     }
                 }
                 .padding(10)
@@ -680,10 +966,13 @@ private struct AgentPresencePocketView: View {
     }
 }
 
-private struct AgentPresenceTaskRow: View {
+struct TaskStatusCard: View {
     let task: YishuDelegatedTaskPresenceEvent
+    let cancelState: YishuTaskCancelRequestState
     let onCancel: (YishuDelegatedTaskPresenceEvent) -> Void
     let onResult: (YishuDelegatedTaskPresenceEvent) -> Void
+    let onRetryFromBeginning: (YishuDelegatedTaskPresenceEvent) -> Void
+    let onStartNewDirection: (YishuDelegatedTaskPresenceEvent) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -714,16 +1003,63 @@ private struct AgentPresenceTaskRow: View {
                     .font(.system(size: 10.5, weight: .medium, design: .rounded))
                     .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.62))
                 Spacer()
-                Button(action: { task.status == .running ? onCancel(task) : onResult(task) }) {
-                    Text(actionLabel)
-                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(buttonTint.opacity(0.10), in: Capsule())
-                        .overlay(Capsule().strokeBorder(buttonTint.opacity(0.24), lineWidth: 0.7))
+                if task.status == .pending || task.status == .running {
+                    Button(action: { onCancel(task) }) {
+                        Text(cancelActionLabel)
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Color.red.opacity(0.08), in: Capsule())
+                            .overlay(Capsule().strokeBorder(Color.red.opacity(0.18), lineWidth: 0.7))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.red.opacity(0.78))
+                    .disabled(cancelState == .requesting || cancelState == .accepted)
+                } else if task.status == .done || task.status == .blocked {
+                    Button(action: { onResult(task) }) {
+                        Text("查看结果")
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(DS.Colors.overlayCursorBlue.opacity(0.10), in: Capsule())
+                            .overlay(
+                                Capsule().strokeBorder(
+                                    DS.Colors.overlayCursorBlue.opacity(0.24),
+                                    lineWidth: 0.7
+                                )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(DS.Colors.overlayCursorBlue)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(buttonTint)
+            }
+
+            if let requestMessage = cancelRequestMessage {
+                Text(requestMessage)
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(cancelRequestColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("task-cancel-request-state")
+            }
+
+            if let message = task.interruptionMessage {
+                Text(message)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.72))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    actionButton("从头重试", tint: DS.Colors.overlayCursorBlue) {
+                        onRetryFromBeginning(task)
+                    }
+                    actionButton("开始新方向", tint: DS.Colors.overlaySpectralViolet) {
+                        onStartNewDirection(task)
+                    }
+                }
+            }
+
+            if !task.sequence.isEmpty {
+                SystemSequence(steps: task.sequence)
             }
         }
         .padding(11)
@@ -734,20 +1070,104 @@ private struct AgentPresenceTaskRow: View {
         )
     }
 
-    private var actionLabel: String {
-        switch task.status {
-        case .running: return "停止"
-        case .done, .blocked: return "查看结果"
-        case .failed, .cancelled: return "查看详情"
+    private var cancelActionLabel: String {
+        switch cancelState {
+        case .requesting: return "正在停止"
+        case .accepted: return "已请求停止"
+        case .idle, .failed: return "停止"
         }
     }
-    private var buttonTint: Color { task.status == .running ? .red.opacity(0.78) : DS.Colors.overlayCursorBlue }
+
+    private var cancelRequestMessage: String? {
+        switch cancelState {
+        case .idle: return nil
+        case .requesting: return "正在等待运行时确认停止请求…"
+        case .accepted: return "运行时已接收停止请求。"
+        case .failed(let message): return "停止失败：\(message)"
+        }
+    }
+
+    private var cancelRequestColor: Color {
+        if case .failed = cancelState { return .red.opacity(0.82) }
+        return DS.Colors.overlayResponseInk.opacity(0.58)
+    }
+
     private var statusColor: Color {
         switch task.status {
-        case .running, .done: return DS.Colors.overlayCursorBlue
+        case .pending, .running, .done: return DS.Colors.overlayCursorBlue
         case .blocked: return DS.Colors.overlaySpectralAmber
-        case .failed: return .red.opacity(0.78)
+        case .failed, .interrupted: return .red.opacity(0.78)
         case .cancelled: return .gray
+        }
+    }
+
+    private func actionButton(
+        _ label: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background(tint.opacity(0.09), in: Capsule())
+                .overlay(Capsule().strokeBorder(tint.opacity(0.22), lineWidth: 0.7))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(tint)
+    }
+}
+
+struct SystemSequence: View {
+    let steps: [YishuSystemSequenceStep]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("系统序列")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.48))
+
+            ForEach(steps) { step in
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: icon(for: step.status))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(color(for: step.status))
+                        .frame(width: 12, height: 12)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(step.label)
+                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                            .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.74))
+                        if let detail = step.detail {
+                            Text(detail)
+                                .font(.system(size: 9.5, design: .rounded))
+                                .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.48))
+                                .lineLimit(2)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .accessibilityIdentifier("system-sequence-\(step.sourceEventId.uuidString)")
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func icon(for status: YishuSystemSequenceStepStatus) -> String {
+        switch status {
+        case .pending: return "circle"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .passed: return "checkmark.circle.fill"
+        case .failed: return "xmark.circle.fill"
+        }
+    }
+
+    private func color(for status: YishuSystemSequenceStepStatus) -> Color {
+        switch status {
+        case .pending: return .gray
+        case .running: return DS.Colors.overlayCursorBlue
+        case .passed: return .green.opacity(0.78)
+        case .failed: return .red.opacity(0.78)
         }
     }
 }

@@ -643,6 +643,7 @@ struct leanring_buddyTests {
         let taskId = UUID()
         let parentId = UUID()
         let conversationId = UUID()
+        let sequenceSourceEventId = UUID()
         let timestamp = ISO8601DateFormatter().string(from: Date())
         var raw: [String: Any] = [
             "schemaVersion": 1,
@@ -661,13 +662,33 @@ struct leanring_buddyTests {
                 "updatedAt": timestamp,
                 "provider": "openai-codex",
                 "model": "gpt-5.6-terra",
+                "sequence": [[
+                    "id": "child-tool-completed",
+                    "label": "已完成工具调用",
+                    "status": "completed",
+                    "occurredAt": timestamp,
+                    "sourceEventId": sequenceSourceEventId.uuidString,
+                ]],
             ],
         ]
 
         let running = YishuDelegatedTaskPresenceEvent.decode(raw)
         #expect(running?.id == taskId)
         #expect(running?.status == .running)
-        #expect(running?.workerLabel == "Research · Terra")
+        #expect(running?.workerLabel == "后台任务")
+        #expect(running?.sequence.first?.status == .passed)
+        #expect(running?.sequence.first?.sourceEventId == sequenceSourceEventId)
+
+        var cancelledSequenceRaw = raw
+        var cancelledSequencePayload = raw["payload"] as! [String: Any]
+        var cancelledSequence = cancelledSequencePayload["sequence"] as! [[String: Any]]
+        cancelledSequence[0]["status"] = "cancelled"
+        cancelledSequencePayload["sequence"] = cancelledSequence
+        cancelledSequenceRaw["payload"] = cancelledSequencePayload
+        #expect(
+            YishuDelegatedTaskPresenceEvent.decode(cancelledSequenceRaw)?.sequence.first?.status
+                == .failed
+        )
 
         let client = YishuAgentRuntimeClient()
         var dispatched: YishuDelegatedTaskPresenceEvent?
@@ -676,7 +697,9 @@ struct leanring_buddyTests {
         #expect(dispatched?.id == taskId)
 
         let viewModel = AgentPresenceViewModel()
-        if let running { viewModel.apply(running) }
+        if let running {
+            viewModel.apply(running, expectedConversationId: conversationId)
+        }
         #expect(viewModel.tasks.count == 1)
         #expect(viewModel.tasks.first?.status == .running)
 
@@ -686,12 +709,241 @@ struct leanring_buddyTests {
         terminalPayload["summary"] = "找到三个可执行结论。"
         raw["payload"] = terminalPayload
         let completed = YishuDelegatedTaskPresenceEvent.decode(raw)
-        if let completed { viewModel.apply(completed) }
+        if let completed {
+            viewModel.apply(completed, expectedConversationId: conversationId)
+        }
         #expect(viewModel.tasks.first?.status == .done)
         #expect(viewModel.tasks.first?.summary == "找到三个可执行结论。")
 
         viewModel.acknowledge(taskId)
         #expect(viewModel.tasks.isEmpty)
+    }
+
+    @Test @MainActor func delegatedTaskProjectionRejectsAnotherConversationAndClearsOnRotation() {
+        let currentConversationId = UUID()
+        let otherConversationId = UUID()
+        let now = Date()
+        let otherTask = YishuDelegatedTaskPresenceEvent(
+            id: UUID(),
+            parentId: UUID(),
+            mainConversationId: otherConversationId,
+            title: "其他会话的任务",
+            status: .running,
+            createdAt: now,
+            updatedAt: now,
+            provider: nil,
+            model: nil,
+            resultKind: nil,
+            summary: nil,
+            sourceEventId: UUID()
+        )
+        let currentTask = YishuDelegatedTaskPresenceEvent(
+            id: UUID(),
+            parentId: UUID(),
+            mainConversationId: currentConversationId,
+            title: "当前会话的任务",
+            status: .running,
+            createdAt: now,
+            updatedAt: now,
+            provider: nil,
+            model: nil,
+            resultKind: nil,
+            summary: nil,
+            sourceEventId: UUID()
+        )
+        let viewModel = AgentPresenceViewModel()
+
+        viewModel.apply(otherTask, expectedConversationId: currentConversationId)
+        #expect(viewModel.tasks.isEmpty)
+        viewModel.apply(currentTask, expectedConversationId: currentConversationId)
+        #expect(viewModel.tasks.map(\.id) == [currentTask.id])
+
+        viewModel.replaceWithSnapshot([])
+        #expect(viewModel.tasks.isEmpty)
+    }
+
+    @Test @MainActor func taskSnapshotMergeCannotOverwriteNewerLiveTruthOrDropLiveOnlyTask() {
+        let conversationId = UUID()
+        let taskId = UUID()
+        let liveOnlyId = UUID()
+        let parentId = UUID()
+        let older = Date(timeIntervalSince1970: 1_700_000_000)
+        let newer = older.addingTimeInterval(30)
+        let viewModel = AgentPresenceViewModel()
+        let newerDone = YishuDelegatedTaskPresenceEvent(
+            id: taskId,
+            parentId: parentId,
+            mainConversationId: conversationId,
+            title: "已有更新完成事实",
+            status: .done,
+            createdAt: older,
+            updatedAt: newer,
+            provider: nil,
+            model: nil,
+            resultKind: .completed,
+            summary: "已完成",
+            sourceEventId: UUID()
+        )
+        let liveOnly = YishuDelegatedTaskPresenceEvent(
+            id: liveOnlyId,
+            parentId: parentId,
+            mainConversationId: conversationId,
+            title: "快照请求后刚创建",
+            status: .running,
+            createdAt: newer,
+            updatedAt: newer,
+            provider: nil,
+            model: nil,
+            resultKind: nil,
+            summary: nil,
+            sourceEventId: UUID()
+        )
+        let olderRunning = YishuDelegatedTaskPresenceEvent(
+            id: taskId,
+            parentId: parentId,
+            mainConversationId: conversationId,
+            title: "过期快照",
+            status: .running,
+            createdAt: older,
+            updatedAt: older,
+            provider: nil,
+            model: nil,
+            resultKind: nil,
+            summary: nil,
+            sourceEventId: UUID()
+        )
+
+        viewModel.apply(newerDone, expectedConversationId: conversationId)
+        viewModel.apply(liveOnly, expectedConversationId: conversationId)
+        viewModel.mergeSnapshot([olderRunning])
+
+        #expect(viewModel.tasks.first(where: { $0.id == taskId })?.status == .done)
+        #expect(viewModel.tasks.contains(where: { $0.id == liveOnlyId }))
+    }
+
+    @Test @MainActor func taskSnapshotRehydratesTypedTruthAndRuntimeStopBecomesHonestInterruption() {
+        let requestId = UUID()
+        let traceId = UUID()
+        let eventId = UUID()
+        let taskId = UUID()
+        let parentId = UUID()
+        let conversationId = UUID()
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let raw: [String: Any] = [
+            "schemaVersion": 1,
+            "type": "task.listed",
+            "eventId": eventId.uuidString,
+            "requestId": requestId.uuidString,
+            "traceId": traceId.uuidString,
+            "conversationId": conversationId.uuidString,
+            "payload": [
+                "tasks": [[
+                    "taskId": taskId.uuidString,
+                    "parentId": parentId.uuidString,
+                    "mainConversationId": conversationId.uuidString,
+                    "title": "重启前的后台任务",
+                    "status": "running",
+                    "createdAt": timestamp,
+                    "updatedAt": timestamp,
+                ]],
+            ],
+        ]
+
+        let snapshot = YishuAgentRuntimeClient.decodeDelegatedTaskSnapshot(
+            raw,
+            expectedRequestId: requestId,
+            expectedTraceId: traceId,
+            expectedConversationId: conversationId
+        )
+        #expect(snapshot?.count == 1)
+        #expect(snapshot?.first?.sourceEventId == eventId)
+
+        let viewModel = AgentPresenceViewModel()
+        viewModel.replaceWithSnapshot(snapshot ?? [])
+        viewModel.markRuntimeInterrupted()
+        #expect(viewModel.tasks.first?.status == .interrupted)
+        #expect(
+            viewModel.tasks.first?.interruptionMessage
+                == "任务已中断。可以从头重试，或开始一个新方向。"
+        )
+        #expect(viewModel.tasks.first?.sequence.isEmpty == true)
+    }
+
+    @Test @MainActor func taskCancelAcceptanceRequiresExactRequestTraceTaskAndConversation() {
+        let requestId = UUID()
+        let traceId = UUID()
+        let taskId = UUID()
+        let conversationId = UUID()
+        var raw: [String: Any] = [
+            "schemaVersion": 1,
+            "type": "task.cancel.accepted",
+            "eventId": UUID().uuidString,
+            "requestId": requestId.uuidString,
+            "traceId": traceId.uuidString,
+            "conversationId": conversationId.uuidString,
+            "payload": [
+                "taskId": taskId.uuidString,
+                "mainConversationId": conversationId.uuidString,
+                "accepted": true,
+            ],
+        ]
+
+        let accepted = YishuAgentRuntimeClient.decodeDelegatedTaskCancelAcceptance(
+            raw,
+            expectedRequestId: requestId,
+            expectedTraceId: traceId,
+            expectedTaskId: taskId,
+            expectedConversationId: conversationId
+        )
+        #expect(accepted?.taskId == taskId)
+
+        raw["traceId"] = UUID().uuidString
+        #expect(YishuAgentRuntimeClient.decodeDelegatedTaskCancelAcceptance(
+            raw,
+            expectedRequestId: requestId,
+            expectedTraceId: traceId,
+            expectedTaskId: taskId,
+            expectedConversationId: conversationId
+        ) == nil)
+
+        let viewModel = AgentPresenceViewModel()
+        let active = YishuDelegatedTaskPresenceEvent(
+            id: taskId,
+            parentId: UUID(),
+            mainConversationId: conversationId,
+            title: "正在停止",
+            status: .running,
+            createdAt: Date(),
+            updatedAt: Date(),
+            provider: nil,
+            model: nil,
+            resultKind: nil,
+            summary: nil,
+            sourceEventId: UUID()
+        )
+        viewModel.apply(active, expectedConversationId: conversationId)
+        viewModel.markCancelRequesting(taskId)
+        #expect(viewModel.cancelRequestState(for: taskId) == .requesting)
+        viewModel.markCancelFailed(taskId, message: "Runtime 已拒绝")
+        #expect(viewModel.cancelRequestState(for: taskId) == .failed("Runtime 已拒绝"))
+
+        let terminal = YishuDelegatedTaskPresenceEvent(
+            id: taskId,
+            parentId: active.parentId,
+            mainConversationId: conversationId,
+            title: active.title,
+            status: .cancelled,
+            createdAt: active.createdAt,
+            updatedAt: active.updatedAt.addingTimeInterval(1),
+            provider: nil,
+            model: nil,
+            resultKind: .cancelled,
+            summary: "已停止",
+            sourceEventId: UUID()
+        )
+        viewModel.apply(terminal, expectedConversationId: conversationId)
+        viewModel.markCancelAccepted(taskId)
+        #expect(viewModel.cancelRequestState(for: taskId) == .idle)
     }
 
     @Test @MainActor func delegatedTaskPresenceRejectsCrossConversationAndIncompleteTerminalEvents() {
@@ -749,6 +1001,22 @@ struct leanring_buddyTests {
         #expect(sawFailure)
         // Far under the 10s history timeout; process death must not leave UI waiting.
         #expect(elapsed < .seconds(2))
+    }
+
+    @Test @MainActor func runtimeProcessDeathEndsPendingTaskListAndCancelRPCs() async {
+        let client = YishuAgentRuntimeClient()
+        let parked = await client.parkDelegatedTaskRPCWaitsForTests()
+        #expect(client.pendingDelegatedTaskRPCCountForTests == 2)
+
+        client.endAllPendingRuntimeRequests(
+            throwing: YishuAgentRuntimeClientError.runtimeNotRunning
+        )
+        #expect(client.pendingDelegatedTaskRPCCountForTests == 0)
+
+        var failureCount = 0
+        do { try await parked.list.value } catch { failureCount += 1 }
+        do { try await parked.cancel.value } catch { failureCount += 1 }
+        #expect(failureCount == 2)
     }
 
     @Test @MainActor func runtimeProcessDeathEndsPendingMemoryListAndForgetWithoutTimeout() async throws {

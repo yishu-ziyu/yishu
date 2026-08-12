@@ -40,6 +40,12 @@ enum YishuRuntimeFailureRecoveryRoute: Equatable {
     case legacyProxy
 }
 
+enum YishuAgentRuntimeAvailability: Equatable {
+    case starting
+    case ready
+    case stopped
+}
+
 private struct VoiceTurnOrigin {
     let traceID: String
     let releaseAt: UInt64?
@@ -147,6 +153,9 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var memoryForgetInFlight = false
     /// Local 8787 voice proxy health. Panel "在线" requires this ready.
     @Published private(set) var voiceProxyAvailability: YishuVoiceProxyAvailability = .stopped
+    /// Pi sidecar health. A healthy voice proxy alone must never make the menu
+    /// claim the agent runtime is online.
+    @Published private(set) var agentRuntimeAvailability: YishuAgentRuntimeAvailability = .stopped
 
     /// Screen location (global AppKit coords) of a detected UI element the
     /// buddy should fly to and point at. Parsed from Claude's response;
@@ -202,6 +211,7 @@ final class CompanionManager: ObservableObject {
     )
     /// Background ContextTrail sampling (metadata only, no screenshot bytes).
     private var trailSampleTask: Task<Void, Never>?
+    private var taskSnapshotRefreshTask: Task<Void, Never>?
     private let trailSampleIntervalNanoseconds: UInt64 = 15_000_000_000
 
     /// Base URL for the local 奕枢 proxy. All voice API requests route through
@@ -365,6 +375,7 @@ final class CompanionManager: ObservableObject {
         }
         conversationHistory.removeAll(keepingCapacity: false)
         clearMemorySourceNotice()
+        resetDelegatedTaskProjectionForConversationChange()
         sessionScope = nextScope
         projectScopeDraft = nextScope.projectLabel ?? projectScopeDraft
         sessionScopeNotice = nextScope.kind == .privateSession
@@ -500,6 +511,7 @@ final class CompanionManager: ObservableObject {
                 // Continuing another conversation must not inherit the prior
                 // turn's memory source line (Codex PROOF-1b residual).
                 self.clearMemorySourceNotice()
+                self.resetDelegatedTaskProjectionForConversationChange()
                 self.sessionScope = .personal
                 self.historyNotice = "已继续「\(item.title)」。"
             } catch {
@@ -520,6 +532,7 @@ final class CompanionManager: ObservableObject {
         }
         conversationHistory.removeAll(keepingCapacity: false)
         clearMemorySourceNotice()
+        resetDelegatedTaskProjectionForConversationChange()
         sessionScope = .personal
         historyNotice = "已开始新对话。"
         // Keep the success notice; a plain refresh would wipe it immediately.
@@ -594,6 +607,7 @@ final class CompanionManager: ObservableObject {
                     }
                     self.conversationHistory.removeAll(keepingCapacity: false)
                     self.clearMemorySourceNotice()
+                    self.resetDelegatedTaskProjectionForConversationChange()
                     self.sessionScope = .personal
                     self.historyNotice = "已删除「\(item.title)」，已开始新对话。"
                 } else {
@@ -838,13 +852,21 @@ final class CompanionManager: ObservableObject {
         yishuPointerTrailMonitor.start()
         agentPresenceWindowManager.onCancelTask = { [weak self] task in
             guard let self else { return }
-            do {
-                try self.yishuAgentRuntimeClient.cancelDelegatedTask(
-                    taskId: task.id,
-                    mainConversationId: task.mainConversationId
-                )
-            } catch {
-                self.responseOverlayManager.showStaticMessage("暂时没能停止这项任务。")
+            self.agentPresenceWindowManager.markCancelRequesting(task.id)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    _ = try await self.yishuAgentRuntimeClient.cancelDelegatedTask(
+                        taskId: task.id,
+                        mainConversationId: task.mainConversationId
+                    )
+                    self.agentPresenceWindowManager.markCancelAccepted(task.id)
+                } catch {
+                    self.agentPresenceWindowManager.markCancelFailed(
+                        task.id,
+                        message: error.localizedDescription
+                    )
+                }
             }
         }
         agentPresenceWindowManager.onPresentResult = { [weak self] task in
@@ -854,22 +876,37 @@ final class CompanionManager: ObservableObject {
                 autoHideAfter: 12
             )
         }
+        agentPresenceWindowManager.onRetryFromBeginning = { [weak self] task in
+            self?.retryDelegatedTaskFromBeginning(task)
+        }
+        agentPresenceWindowManager.onStartNewDirection = { [weak self] task in
+            self?.promptForNewDirection(after: task)
+        }
         yishuAgentRuntimeClient.onDelegatedTaskPresenceEvent = { [weak self] event in
-            self?.agentPresenceWindowManager.apply(event)
+            guard let self else { return }
+            self.agentPresenceWindowManager.apply(
+                event,
+                expectedConversationId: self.yishuAgentRuntimeClient.currentConversationId
+            )
         }
         yishuAgentRuntimeClient.onLifecycleEvent = { [weak self] event in
             self?.updateRuntimeVisualPhase(for: event)
             switch event {
             case let .ready(mode):
+                self?.agentRuntimeAvailability = .ready
                 print("🧠 奕枢 Runtime ready (\(mode))")
                 Task { @MainActor in
                     if self?.sessionScope.kind == .personal {
                         self?.refreshPersonalHistory()
                     }
                 }
+                self?.refreshDelegatedTaskSnapshot()
             case let .stopped(exitCode):
+                self?.agentRuntimeAvailability = .stopped
                 print("⚠️ 奕枢 Runtime stopped (\(exitCode))")
-                self?.agentPresenceWindowManager.stop()
+                self?.taskSnapshotRefreshTask?.cancel()
+                self?.taskSnapshotRefreshTask = nil
+                self?.agentPresenceWindowManager.markRuntimeInterrupted()
             }
         }
         // Local voice proxy (8787) must be ready before the panel claims online.
@@ -878,12 +915,14 @@ final class CompanionManager: ObservableObject {
         }
         do {
             runtimeVisualPhase = .connecting
+            agentRuntimeAvailability = .starting
             try yishuAgentRuntimeClient.start()
             startContextTrailSampling()
         } catch {
             // A voice turn will retry once, then use the credential-isolated
             // direct Grok fallback so push-to-talk never becomes silent.
             runtimeVisualPhase = .idle
+            agentRuntimeAvailability = .stopped
             print("⚠️ 奕枢 Runtime unavailable; voice fallback remains available")
         }
         // Eagerly touch the Claude API so its TLS warmup handshake completes
@@ -909,6 +948,78 @@ final class CompanionManager: ObservableObject {
     /// Panel retry control when the local voice proxy is down.
     func retryVoiceProxy() {
         voiceProxySupervisor.retry()
+    }
+
+    /// Panel retry control for the Pi sidecar. Availability stays `starting`
+    /// until a typed runtime.ready event arrives.
+    func retryAgentRuntime() {
+        guard !yishuAgentRuntimeClient.isRunning else { return }
+        agentRuntimeAvailability = .starting
+        runtimeVisualPhase = .connecting
+        do {
+            try yishuAgentRuntimeClient.start()
+            startContextTrailSampling()
+        } catch {
+            agentRuntimeAvailability = .stopped
+            runtimeVisualPhase = .idle
+        }
+    }
+
+    private func refreshDelegatedTaskSnapshot() {
+        taskSnapshotRefreshTask?.cancel()
+        let conversationId = yishuAgentRuntimeClient.currentConversationId
+        taskSnapshotRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let tasks = try await self.yishuAgentRuntimeClient.listDelegatedTasks(
+                    mainConversationId: conversationId
+                )
+                guard !Task.isCancelled,
+                      self.agentRuntimeAvailability == .ready,
+                      self.yishuAgentRuntimeClient.currentConversationId == conversationId else {
+                    return
+                }
+                self.agentPresenceWindowManager.mergeSnapshot(tasks)
+            } catch is CancellationError {
+                return
+            } catch {
+                // Keep the last typed task state visible. An unsupported or
+                // failed snapshot must never erase an interruption card.
+            }
+        }
+    }
+
+    private func resetDelegatedTaskProjectionForConversationChange() {
+        taskSnapshotRefreshTask?.cancel()
+        taskSnapshotRefreshTask = nil
+        agentPresenceWindowManager.replaceWithSnapshot([])
+        if agentRuntimeAvailability == .ready {
+            refreshDelegatedTaskSnapshot()
+        }
+    }
+
+    private func retryDelegatedTaskFromBeginning(_ task: YishuDelegatedTaskPresenceEvent) {
+        guard canChangeConversation else {
+            ensureOverlayVisibleForVoiceFeedback()
+            responseOverlayManager.showStaticMessage(
+                "当前回答还在执行。等它结束后，再从头重试这项任务。",
+                autoHideAfter: 8
+            )
+            return
+        }
+        runVoiceTurnTask(
+            transcript: "请从头重新执行这项后台任务，不要假设之前的执行进度仍然存在：\(task.title)",
+            origin: nil
+        )
+    }
+
+    private func promptForNewDirection(after task: YishuDelegatedTaskPresenceEvent) {
+        agentPresenceWindowManager.acknowledge(task.id)
+        ensureOverlayVisibleForVoiceFeedback()
+        responseOverlayManager.showStaticMessage(
+            "按住 Control + Option，说出新的方向。",
+            autoHideAfter: 10
+        )
     }
 
     private func bindVoiceProxyAvailability() {
@@ -1084,12 +1195,15 @@ final class CompanionManager: ObservableObject {
         transientHideTask?.cancel()
         trailSampleTask?.cancel()
         trailSampleTask = nil
+        taskSnapshotRefreshTask?.cancel()
+        taskSnapshotRefreshTask = nil
 
         pendingVoiceTurnOrigin = nil
         currentResponseTask?.cancel()
         currentResponseTask = nil
         cancelActiveRuntimeTurn(reason: "application-stopping")
         yishuAgentRuntimeClient.stop()
+        agentRuntimeAvailability = .stopped
         voiceProxySupervisor.stop()
         voiceProxyAvailabilityCancellable?.cancel()
         voiceProxyAvailabilityCancellable = nil
@@ -2131,12 +2245,14 @@ final class CompanionManager: ObservableObject {
         try contextFrame.validate()
         if !yishuAgentRuntimeClient.isRunning {
             runtimeVisualPhase = .connecting
+            agentRuntimeAvailability = .starting
             do {
                 try yishuAgentRuntimeClient.start()
             } catch {
                 // A synchronous launch failure is not an active connection
                 // attempt. The outer recovery path may retry with fresh evidence.
                 runtimeVisualPhase = .idle
+                agentRuntimeAvailability = .stopped
                 throw error
             }
             startContextTrailSampling()
