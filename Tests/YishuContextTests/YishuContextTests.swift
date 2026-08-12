@@ -3,6 +3,45 @@ import XCTest
 @testable import YishuContext
 
 final class ContextFrameTests: XCTestCase {
+    func testActiveWindowScreenshotRequiresPositiveWindowIdentity() throws {
+        let now = Date()
+        let point = ScreenPoint(x: 0, y: 0, coordinateSpace: .globalTopLeft)
+        let frame = ContextFrame(
+            capturedAt: now,
+            expiresAt: now.addingTimeInterval(15),
+            cursor: ObservedValue(value: point, source: "test", capturedAt: now, confidence: 1),
+            pointerTrail: [],
+            frontmostApplication: nil,
+            activeWindow: nil,
+            elementUnderCursor: nil,
+            screenshots: [ScreenshotContext(
+                label: "window",
+                base64Data: "anBlZw==",
+                displayWidthPoints: 100,
+                displayHeightPoints: 100,
+                screenshotWidthPixels: 100,
+                screenshotHeightPixels: 100,
+                sourceWindowNumber: 0
+            )],
+            warnings: []
+        )
+        XCTAssertThrowsError(try frame.validate(referenceDate: now)) { error in
+            XCTAssertEqual(error as? ContextFrameValidationError, .invalidScreenshot)
+        }
+    }
+
+    func testLegacyWindowWithoutNumberStillDecodes() throws {
+        let data = Data(
+            #"{"title":"Legacy","ownerName":"Safari","processIdentifier":42,"bounds":null}"#.utf8
+        )
+        let window = try JSONDecoder().decode(WindowContext.self, from: data)
+        XCTAssertNil(window.windowNumber)
+
+        let encoded = try JSONEncoder().encode(window)
+        let raw = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertNil(raw["windowNumber"])
+    }
+
     func testLegacyScreenshotWithoutDisplayOriginStillDecodes() throws {
         let data = Data(
             #"""

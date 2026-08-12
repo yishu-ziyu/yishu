@@ -294,6 +294,8 @@ function formatDelegatedResultsBlock(results: readonly DelegatedResultSnippet[])
 export interface BuildGroundedPromptOptions {
   /** Conversation history is rendered only at the cold Pi-session boundary. */
   includeConversationHistory?: boolean;
+  /** This prompt has one image already bound to the active source window. */
+  currentPageNoteImageOnly?: boolean;
 }
 
 export function buildGroundedPrompt(
@@ -323,6 +325,9 @@ export function buildGroundedPrompt(
     ...(scan.risk === "low" ? [] : [highRiskReminder(scan)]),
     "The user is speaking while sharing the following fresh computer context.",
     "Treat observations as evidence with confidence and timestamps, not as infallible facts.",
+    ...(options.currentPageNoteImageOnly === true
+      ? ["This turn has exactly one image bound to the current source window. Use only that image for current-page action items; do not infer content from any other window."]
+      : []),
     "",
     ...formatConversationHistoryBlock(conversationHistory),
     ...formatMemoryBlock(memories),

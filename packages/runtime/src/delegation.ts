@@ -194,6 +194,76 @@ export interface MainTurnHandle {
   readonly sessionScope: SessionScope;
   readonly contextFrame: ContextFrame;
   readonly modelPreference?: ModelPreference;
+  /**
+   * Present only for one clearly phrased current-page-to-Notes request whose
+   * source window was fully observed.  Keeping this on the live turn handle
+   * makes the model tool unusable outside that one turn, even though Pi keeps
+   * a session's tool registry across turns.
+   */
+  readonly saveCurrentPageActionsToNote?: (
+    input: CurrentPageNoteInput,
+    signal?: AbortSignal,
+  ) => Promise<CurrentPageNoteResult>;
+}
+
+export interface CurrentPageNoteInput {
+  title: string;
+  items: readonly string[];
+}
+
+/** Content-free result returned to Pi; note text never enters runtime events. */
+export interface CurrentPageNoteResult {
+  dispatched: boolean;
+  succeeded: boolean;
+  verified: boolean;
+  status: "verified" | "unverified" | "blocked" | "stale" | "cancelled" | "failed";
+  code?: string;
+}
+
+/**
+ * High-precision voice boundary for the single composed capability. Questions,
+ * negations, and vague "summarize this" requests deliberately fall through to
+ * ordinary conversation and never receive the Notes-writing tool.
+ */
+export function isCurrentPageActionsNoteUtterance(utterance: string): boolean {
+  const text = utterance.trim();
+  if (text.length === 0 || text.length > 240) return false;
+  if (/[？?]/u.test(text)
+    || /(?:吗|么|能不能|可不可以|是否|要不要)\s*$/u.test(text)
+    || /(?:不要|别|取消|不必|不用|不是|并非)/u.test(text)) return false;
+  const currentPage = /(?:当前(?:页面|页|窗口)|这个页面)/u.test(text);
+  const actionItems = /(?:三件事|三条|3\s*条|最多\s*(?:三|3)\s*条)/u.test(text);
+  const organize = /(?:整理|列成|提炼)/u.test(text);
+  const note = /(?:备忘录|备忘|notes?)/iu.test(text);
+  return currentPage && actionItems && organize && note;
+}
+
+const currentPageNoteParameters = Type.Object({
+  title: Type.String({
+    minLength: 1,
+    maxLength: 120,
+    description: "A concise title that identifies the current visible page.",
+  }),
+  items: Type.Array(Type.String({
+    minLength: 1,
+    maxLength: 500,
+    description: "One visible, actionable item from the current page.",
+  }), {
+    minItems: 1,
+    maxItems: 3,
+    description: "One to three distinct visible action items; do not invent any item.",
+  }),
+}, { additionalProperties: false });
+
+function normalizeCurrentPageNoteInput(input: CurrentPageNoteInput): CurrentPageNoteInput | null {
+  const title = input.title.trim().replace(/\s+/gu, " ");
+  if (title.length === 0 || title.length > 120) return null;
+  if (!Array.isArray(input.items) || input.items.length < 1 || input.items.length > 3) return null;
+  const items = input.items.map((item) => item.trim().replace(/\s+/gu, " "));
+  if (items.some((item) => item.length === 0 || item.length > 500)) return null;
+  const unique = new Set(items.map((item) => item.normalize("NFKC").toLocaleLowerCase()));
+  if (unique.size !== items.length) return null;
+  return { title, items };
 }
 
 export interface DelegationCoordinatorDeps {
@@ -322,7 +392,60 @@ export class DelegationCoordinator {
         extraTools: [createWebSearchTool() as unknown as ToolDefinition],
       };
     }
-    return { computerControl: true, extraTools: [this.createDelegateTool(conversationId)] };
+    const activeMainTurn = this.mainTurns.get(conversationId);
+    return {
+      computerControl: true,
+      extraTools: [this.createDelegateTool(conversationId)],
+      // Registered in every Main Pi session so an existing conversation can
+      // enable it for one turn without a cold start.  It stays inactive unless
+      // the current live Main turn owns the narrow request below.
+      registeredExtraTools: [this.createCurrentPageNoteTool(conversationId)],
+      activeExtraToolNames: activeMainTurn?.saveCurrentPageActionsToNote === undefined
+        ? ["delegate"]
+        : ["delegate", "save_current_page_actions_to_note"],
+    };
+  }
+
+  private createCurrentPageNoteTool(conversationId: string): ToolDefinition {
+    return {
+      name: "save_current_page_actions_to_note",
+      label: "Save current page actions to Notes",
+      description: [
+        "Create exactly one Apple Note from one to three visible action items on the current page.",
+        "Use only when this turn explicitly asks to organize the current page into at most three action items and save a note.",
+        "The title and every item must be grounded only in the one screenshot bound to the current source window; do not infer missing work or inspect other windows.",
+        "Provide a short title and one to three distinct items. The runtime owns the source window identity and verifies the created note.",
+        "If no clear visible action items exist, do not call this tool.",
+      ].join(" "),
+      promptSnippet: "Save up to three clearly visible current-page action items as exactly one verified Apple Note.",
+      promptGuidelines: [
+        "Never use this for questions, summaries, vague requests, a different window, or any screenshot not bound to the current window.",
+        "Never include source app, process, window, screenshot, or target identity parameters.",
+        "After an unverified result, say it may have been created but do not claim success or retry.",
+      ],
+      parameters: currentPageNoteParameters,
+      executionMode: "sequential",
+      execute: async (_toolCallId, rawInput, signal) => {
+        const turn = this.mainTurns.get(conversationId);
+        const input = normalizeCurrentPageNoteInput(rawInput as CurrentPageNoteInput);
+        if (!turn?.saveCurrentPageActionsToNote || !input) {
+          throw new Error("This current-page Notes request is no longer available.");
+        }
+        const result = await turn.saveCurrentPageActionsToNote(input, signal);
+        if (!result.succeeded || result.status === "blocked" || result.status === "stale" || result.status === "cancelled" || result.status === "failed") {
+          throw new Error(result.code ?? "The current-page note was not created.");
+        }
+        return {
+          content: [{
+            type: "text",
+            text: result.verified
+              ? "The exact note was created and read back."
+              : "The note may have been submitted but was not verified. Do not retry or claim completion.",
+          }],
+          details: result,
+        };
+      },
+    } as ToolDefinition;
   }
 
   /** Mark shutdown so in-flight children settle as cancelled, deterministically. */

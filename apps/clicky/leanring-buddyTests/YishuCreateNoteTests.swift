@@ -1,5 +1,7 @@
+import CoreGraphics
 import Foundation
 import Testing
+import YishuContext
 @testable import Clicky
 
 @MainActor
@@ -40,6 +42,39 @@ struct YishuCreateNoteTests {
         invalid["effectClass"] = "navigation"
         #expect(YishuAgentRuntimeClient.decodeComputerActionRequest(
             payload: invalid,
+            requestId: requestID,
+            traceId: traceID,
+            schemaVersion: NSNumber(value: 1)
+        ) == nil)
+
+        let source: [String: Any] = [
+            "sourceBundleId": "com.apple.Safari",
+            "sourcePid": 42,
+            "sourceWindowNumber": 9,
+            "sourceWindowTitle": "Three actions",
+            "sourceWindowBounds": ["x": 12.0, "y": 34.0, "width": 800.0, "height": 600.0],
+        ]
+        let pageRequest = try #require(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: payload.merging(source) { _, new in new },
+            requestId: requestID,
+            traceId: traceID,
+            schemaVersion: NSNumber(value: 1)
+        ))
+        #expect(pageRequest.sourceWindowTarget?.windowNumber == 9)
+
+        var partialSource = payload
+        partialSource["sourceBundleId"] = "com.apple.Safari"
+        #expect(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: partialSource,
+            requestId: requestID,
+            traceId: traceID,
+            schemaVersion: NSNumber(value: 1)
+        ) == nil)
+
+        var invalidBounds = payload.merging(source) { _, new in new }
+        invalidBounds["sourceWindowBounds"] = ["x": 0, "y": 0, "width": 0, "height": 100]
+        #expect(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: invalidBounds,
             requestId: requestID,
             traceId: traceID,
             schemaVersion: NSNumber(value: 1)
@@ -107,6 +142,73 @@ struct YishuCreateNoteTests {
         #expect(blocked.code == .permissionDenied)
         #expect(!blocked.succeeded)
         #expect(blockedExecutionCount == 0)
+    }
+
+    @Test func pageNoteSourceAndAuthorizationAreBothCheckedAtSubmission() async {
+        let title = "Current page"
+        let content = "1. First\n2. Second\n3. Third"
+        let request = YishuComputerActionRequest(
+            requestId: UUID(), traceId: UUID(), actionId: UUID(), action: "create_note", x: 0, y: 0,
+            title: title, content: content,
+            sourceBundleId: "com.apple.Safari", sourcePid: 42, sourceWindowNumber: 9,
+            sourceWindowTitle: "Three actions",
+            sourceWindowBounds: YishuWindowBounds(x: 12, y: 34, width: 800, height: 600),
+            targetBundleId: "com.apple.Notes", intentId: UUID().uuidString,
+            attemptId: UUID().uuidString, basisFrameId: UUID().uuidString, effectClass: "write"
+        )
+        var authorized = true
+        var sourceMatches = true
+        var submissions = 0
+        let executor: YishuComputerUseActuator.NotesExecutor = { receivedTitle, _, expectedPlaintext, fence in
+            YishuComputerUseActuator.authorizedCommit(fence) {
+                submissions += 1
+                return .created(noteId: "note-id", title: receivedTitle, plaintext: expectedPlaintext)
+            } ?? .blockedBeforeSubmission
+        }
+
+        let verified = await YishuComputerUseActuator.perform(
+            request, screenCaptures: [], authorizationFence: { authorized }, notesExecutor: executor,
+            sourceWindowValidator: { _ in sourceMatches }
+        )
+        #expect(verified.verified)
+        #expect(submissions == 1)
+
+        sourceMatches = false
+        let stale = await YishuComputerUseActuator.perform(
+            request, screenCaptures: [], authorizationFence: { authorized }, notesExecutor: executor,
+            sourceWindowValidator: { _ in sourceMatches }
+        )
+        #expect(stale.code == .targetStale)
+        #expect(submissions == 1)
+
+        sourceMatches = true
+        authorized = false
+        let blocked = await YishuComputerUseActuator.perform(
+            request, screenCaptures: [], authorizationFence: { authorized }, notesExecutor: executor,
+            sourceWindowValidator: { _ in sourceMatches }
+        )
+        #expect(blocked.code == .permissionDenied)
+        #expect(submissions == 1)
+    }
+
+    @Test func sourceWindowUsesOnlyTheFrontmostWindowForTheSameApp() {
+        let pid = pid_t(42)
+        let oldWindow: [String: Any] = [
+            kCGWindowOwnerPID as String: pid,
+            kCGWindowLayer as String: 0,
+            kCGWindowNumber as String: 9,
+        ]
+        let newlyFrontmostWindow: [String: Any] = [
+            kCGWindowOwnerPID as String: pid,
+            kCGWindowLayer as String: 0,
+            kCGWindowNumber as String: 10,
+        ]
+        let selected = YishuComputerUseActuator.frontmostLayerZeroWindow(
+            in: [newlyFrontmostWindow, oldWindow],
+            ownedBy: pid
+        )
+        #expect(selected?[kCGWindowNumber as String] as? Int == 10)
+        #expect(selected?[kCGWindowNumber as String] as? Int != 9)
     }
 }
 

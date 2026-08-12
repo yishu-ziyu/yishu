@@ -9,7 +9,29 @@ const createNoteInputSchema = z.object({
   intentId: z.string().uuid(),
   attemptId: z.string().uuid(),
   basisFrameId: z.string().uuid(),
-}).strict();
+  sourceBundleId: z.string().trim().min(1).max(255).optional(),
+  sourcePid: z.number().int().positive().optional(),
+  sourceWindowNumber: z.number().int().positive().optional(),
+  sourceWindowTitle: z.string().trim().min(1).max(240).optional(),
+  sourceWindowBounds: z.object({
+    x: z.number().finite(),
+    y: z.number().finite(),
+    width: z.number().finite().positive(),
+    height: z.number().finite().positive(),
+  }).strict().optional(),
+}).strict().superRefine((input, ctx) => {
+  const source = [
+    input.sourceBundleId,
+    input.sourcePid,
+    input.sourceWindowNumber,
+    input.sourceWindowTitle,
+    input.sourceWindowBounds,
+  ];
+  const count = source.filter((value) => value !== undefined).length;
+  if (count !== 0 && count !== source.length) {
+    ctx.addIssue({ code: "custom", message: "Note source identity must be complete or absent." });
+  }
+});
 
 export type CreateNoteInput = z.infer<typeof createNoteInputSchema>;
 
@@ -35,7 +57,21 @@ export function createNoteAction() {
           message: "The Notes bridge is unavailable.",
         };
       }
-      const request: CreateNoteRequest = ctx.input;
+      const request: CreateNoteRequest = {
+        content: ctx.input.content,
+        title: ctx.input.title,
+        targetBundleId: ctx.input.targetBundleId,
+        intentId: ctx.input.intentId,
+        attemptId: ctx.input.attemptId,
+        basisFrameId: ctx.input.basisFrameId,
+        ...(ctx.input.sourceBundleId === undefined ? {} : {
+          sourceBundleId: ctx.input.sourceBundleId,
+          sourcePid: ctx.input.sourcePid!,
+          sourceWindowNumber: ctx.input.sourceWindowNumber!,
+          sourceWindowTitle: ctx.input.sourceWindowTitle!,
+          sourceWindowBounds: ctx.input.sourceWindowBounds!,
+        }),
+      };
       const result = await executor.perform(request, ctx.signal);
       if (result.succeeded) ctx.markCommitted();
       return { ...result, verified: isVerifiedCreateNoteResult(result) };

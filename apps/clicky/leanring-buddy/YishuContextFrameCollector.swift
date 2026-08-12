@@ -17,18 +17,38 @@ final class YishuContextFrameCollector {
         self.pointerMonitor = pointerMonitor
     }
 
-    func capture() async -> YishuCapturedContext {
+    /// `activeWindowOnly` is reserved for the narrow current-page-to-note
+    /// request. Ordinary turns keep their full display evidence unchanged.
+    func capture(activeWindowOnly: Bool = false) async -> YishuCapturedContext {
         let snapshot = captureMetadata(includePointerTrail: true)
         var warnings = snapshot.warnings
         var screenCaptures: [CompanionScreenCapture] = []
+        var activeWindowCapture: CompanionWindowCapture?
+        if activeWindowOnly, let windowNumber = snapshot.activeWindow?.value.windowNumber {
+            do {
+                activeWindowCapture = try await CompanionScreenCaptureUtility.captureWindowAsJPEG(
+                    windowNumber: windowNumber
+                )
+            } catch {
+                // Do not fall back to the cursor display. The exact page is
+                // either available as its own image or omitted altogether.
+                warnings.append("active-window-capture-unavailable")
+            }
+        }
         do {
             screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
         } catch {
             warnings.append("screen-capture-unavailable:\(compactError(error))")
         }
 
-        let screenshots = screenCaptures.prefix(4).map { capture in
-            YishuScreenshotContext(
+        let screenshots: [YishuScreenshotContext]
+        if activeWindowOnly {
+            // No display fallback: a missing exact window image means no image
+            // evidence for this write-capable path.
+            screenshots = activeWindowCapture.map { [Self.activeWindowScreenshot(from: $0)] } ?? []
+        } else {
+            screenshots = screenCaptures.prefix(4).map { capture in
+                YishuScreenshotContext(
                 label: capture.label,
                 mediaType: "image/jpeg",
                 base64Data: capture.imageData.base64EncodedString(),
@@ -39,6 +59,7 @@ final class YishuContextFrameCollector {
                 displayOriginXPoints: capture.displayFrame.origin.x,
                 displayOriginYPoints: capture.displayFrame.origin.y
             )
+            }
         }
 
         let frame = YishuContextFrame(
@@ -70,6 +91,19 @@ final class YishuContextFrameCollector {
             )
             return YishuCapturedContext(frame: safeFrame, screenCaptures: screenCaptures)
         }
+    }
+
+    static func activeWindowScreenshot(from capture: CompanionWindowCapture) -> YishuScreenshotContext {
+        YishuScreenshotContext(
+            label: "current frontmost window",
+            mediaType: "image/jpeg",
+            base64Data: capture.imageData.base64EncodedString(),
+            displayWidthPoints: capture.widthInPoints,
+            displayHeightPoints: capture.heightInPoints,
+            screenshotWidthPixels: capture.widthInPixels,
+            screenshotHeightPixels: capture.heightInPixels,
+            sourceWindowNumber: capture.windowNumber
+        )
     }
 
     /// Metadata-only capture for ContextTrail background sampling.
@@ -192,11 +226,13 @@ final class YishuContextFrameCollector {
 
         let rawTitle = window[kCGWindowName as String] as? String
         let title = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let windowNumber = window[kCGWindowNumber as String] as? Int
         return YishuObservedValue(
             value: YishuWindowContext(
                 title: title?.isEmpty == false ? truncated(title, length: 240) : nil,
                 ownerName: (window[kCGWindowOwnerName as String] as? String) ?? "Unknown application",
                 processIdentifier: processIdentifier,
+                windowNumber: windowNumber.flatMap { $0 > 0 ? $0 : nil },
                 bounds: bounds
             ),
             source: "cg-window-list",

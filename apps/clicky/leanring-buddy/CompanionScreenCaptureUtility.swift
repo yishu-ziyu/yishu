@@ -23,8 +23,67 @@ struct CompanionScreenCapture {
     let screenshotHeightInPixels: Int
 }
 
+/// A window-scoped screenshot kept separate from display screenshots. It is
+/// evidence for page understanding only, never an input to click mapping.
+struct CompanionWindowCapture {
+    let imageData: Data
+    let windowNumber: Int
+    let widthInPoints: Int
+    let heightInPoints: Int
+    let widthInPixels: Int
+    let heightInPixels: Int
+}
+
 @MainActor
 enum CompanionScreenCaptureUtility {
+
+    /// Captures one currently shareable window by Quartz identity. No display
+    /// is substituted when the window is unavailable: callers must fail closed
+    /// rather than show the model whichever screen contains the cursor.
+    static func captureWindowAsJPEG(windowNumber: Int) async throws -> CompanionWindowCapture {
+        guard windowNumber > 0 else {
+            throw NSError(domain: "CompanionScreenCapture", code: -3,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid window identifier"])
+        }
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let window = content.windows.first(where: { Int($0.windowID) == windowNumber }) else {
+            throw NSError(domain: "CompanionScreenCapture", code: -4,
+                          userInfo: [NSLocalizedDescriptionKey: "Active window is not shareable"])
+        }
+        let frame = window.frame
+        guard frame.width > 0, frame.height > 0 else {
+            throw NSError(domain: "CompanionScreenCapture", code: -5,
+                          userInfo: [NSLocalizedDescriptionKey: "Active window has invalid bounds"])
+        }
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let configuration = windowCaptureConfiguration(for: frame)
+        let image = try await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: configuration
+        )
+        guard let jpegData = NSBitmapImageRep(cgImage: image)
+            .representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
+            throw NSError(domain: "CompanionScreenCapture", code: -6,
+                          userInfo: [NSLocalizedDescriptionKey: "Could not encode active window"])
+        }
+        return CompanionWindowCapture(
+            imageData: jpegData,
+            windowNumber: windowNumber,
+            widthInPoints: Int(frame.width.rounded(.up)),
+            heightInPoints: Int(frame.height.rounded(.up)),
+            widthInPixels: configuration.width,
+            heightInPixels: configuration.height
+        )
+    }
+
+    static func windowCaptureConfiguration(for frame: CGRect) -> SCStreamConfiguration {
+        let configuration = SCStreamConfiguration()
+        let longestSide = max(frame.width, frame.height)
+        let scale = min(1, 1280 / longestSide)
+        configuration.width = max(1, Int((frame.width * scale).rounded(.up)))
+        configuration.height = max(1, Int((frame.height * scale).rounded(.up)))
+        return configuration
+    }
 
     /// Captures all connected displays as JPEG data, labeling each with
     /// whether the user's cursor is on that screen. This gives the AI

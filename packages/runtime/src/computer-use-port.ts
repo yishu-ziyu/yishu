@@ -25,6 +25,8 @@ export interface ComputerActionContext {
   basisFrameId?: string;
   /** Optional policy vocabulary retained for older clients. */
   effectClass?: string;
+  /** Called only after the request has entered the macOS receipt queue. */
+  onDispatched?: () => void;
 }
 
 export interface ComputerActionResult {
@@ -177,6 +179,7 @@ export class StdioComputerUsePort implements ComputerUsePort {
           ...(context.generation === undefined ? {} : { generation: context.generation }),
           effectClass,
         }));
+        context.onDispatched?.();
       } catch (error) {
         this.finish(actionId, error instanceof Error ? error : new Error(String(error)));
       }

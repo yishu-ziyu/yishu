@@ -4,6 +4,57 @@ import YishuContext
 @testable import Clicky
 
 final class YishuContextFrameContractTests: XCTestCase {
+    @MainActor
+    func testPageNoteWindowCaptureIntentIsNarrow() {
+        XCTAssertTrue(CompanionManager.requiresCurrentPageNoteWindow(
+            "把当前页面需要我做的三件事整理成一条备忘录"
+        ))
+        XCTAssertTrue(CompanionManager.requiresCurrentPageNoteWindow(
+            "把这个页面的3条行动项提炼成备忘"
+        ))
+        XCTAssertFalse(CompanionManager.requiresCurrentPageNoteWindow(
+            "不要把当前页面的三件事整理成备忘录"
+        ))
+        XCTAssertFalse(CompanionManager.requiresCurrentPageNoteWindow(
+            "能把当前页面三条行动项整理成备忘录吗？"
+        ))
+    }
+
+    @MainActor
+    func testActiveWindowScreenshotCarriesOnlyWindowIdentityMetadata() throws {
+        let screenshot = YishuContextFrameCollector.activeWindowScreenshot(from: CompanionWindowCapture(
+            imageData: Data("jpeg".utf8),
+            windowNumber: 73,
+            widthInPoints: 900,
+            heightInPoints: 640,
+            widthInPixels: 1280,
+            heightInPixels: 911
+        ))
+
+        XCTAssertEqual(screenshot.label, "current frontmost window")
+        XCTAssertEqual(screenshot.sourceWindowNumber, 73)
+        XCTAssertNil(screenshot.displayOriginXPoints)
+        XCTAssertNil(screenshot.displayOriginYPoints)
+
+        let data = try JSONEncoder().encode(screenshot)
+        let raw = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(raw["sourceWindowNumber"] as? Int, 73)
+        XCTAssertNil(raw["displayOriginXPoints"])
+        XCTAssertNil(raw["displayOriginYPoints"])
+
+        let display = YishuScreenshotContext(
+            label: "display",
+            base64Data: "anBlZw==",
+            displayWidthPoints: 100,
+            displayHeightPoints: 100,
+            screenshotWidthPixels: 100,
+            screenshotHeightPixels: 100
+        )
+        let displayData = try JSONEncoder().encode(display)
+        let displayRaw = try XCTUnwrap(JSONSerialization.jsonObject(with: displayData) as? [String: Any])
+        XCTAssertNil(displayRaw["sourceWindowNumber"])
+    }
+
     func testClickyAdapterKeepsCanonicalJSONWireShape() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let point = YishuScreenPoint(x: 320, y: 240, coordinateSpace: .globalTopLeft)

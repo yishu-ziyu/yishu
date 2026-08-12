@@ -108,6 +108,12 @@ export interface CreateNoteRequest {
   intentId: string;
   attemptId: string;
   basisFrameId: string;
+  /** Optional complete source-window identity for current-page composition. */
+  sourceBundleId?: string;
+  sourcePid?: number;
+  sourceWindowNumber?: number;
+  sourceWindowTitle?: string;
+  sourceWindowBounds?: { x: number; y: number; width: number; height: number };
 }
 
 /** Content-free receipt returned after creating and reading back one note. */

@@ -94,6 +94,19 @@ test("display origins survive protocol validation and trail projection", () => {
   const incomplete = makeTurnStartCommand();
   delete incomplete.payload.contextFrame.screenshots[0]?.displayOriginYPoints;
   assert.throws(() => clientCommandSchema.parse(incomplete));
+
+  const sourceBound = makeTurnStartCommand();
+  sourceBound.payload.contextFrame.screenshots[0]!.sourceWindowNumber = 7;
+  assert.equal(clientCommandSchema.parse(sourceBound).payload.contextFrame.screenshots[0]?.sourceWindowNumber, 7);
+  const swiftWindowOnly = JSON.parse(JSON.stringify(sourceBound));
+  delete swiftWindowOnly.payload.contextFrame.screenshots[0].displayOriginXPoints;
+  delete swiftWindowOnly.payload.contextFrame.screenshots[0].displayOriginYPoints;
+  assert.equal(clientCommandSchema.parse(swiftWindowOnly).payload.contextFrame.screenshots[0]?.sourceWindowNumber, 7);
+  sourceBound.payload.contextFrame.screenshots[0]!.sourceWindowNumber = 0;
+  assert.throws(() => clientCommandSchema.parse(sourceBound));
+  const nullOrigin = JSON.parse(JSON.stringify(swiftWindowOnly));
+  nullOrigin.payload.contextFrame.screenshots[0].displayOriginXPoints = null;
+  assert.throws(() => clientCommandSchema.parse(nullOrigin));
 });
 
 test("conversation id is optional for old turns and carried without a second turn id", () => {
@@ -279,6 +292,20 @@ test("requested action metadata is optional for old clients but typed for new cl
   assert.throws(() => computerActionRequestedPayloadSchema.parse({
     ...createNote,
     targetBundleId: "com.evil.Notes",
+  }));
+
+  const sourceBoundNote = computerActionRequestedPayloadSchema.parse({
+    ...createNote,
+    sourceBundleId: "com.apple.Safari",
+    sourcePid: 42,
+    sourceWindowNumber: 7,
+    sourceWindowTitle: "今日任务",
+    sourceWindowBounds: { x: 10, y: 20, width: 800, height: 600 },
+  });
+  assert.equal(sourceBoundNote.action, "create_note");
+  assert.throws(() => computerActionRequestedPayloadSchema.parse({
+    ...sourceBoundNote,
+    sourceWindowTitle: undefined,
   }));
 
   const reminder = computerActionRequestedPayloadSchema.parse({
