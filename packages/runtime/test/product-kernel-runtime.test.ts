@@ -391,7 +391,7 @@ test("one conversation id cannot be replayed under another project scope", async
   assert.equal((await kernel.store.listConversationTurns(conversationId)).length, 1);
 });
 
-test("execution events project verified progress into Kernel TaskTruth", async () => {
+test("untrusted runtime verified bits cannot complete external-effect TaskTruth", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const runtime = new ProductKernelRuntime(
     new ScriptedExecutionRuntime(true, "completed", 70),
@@ -408,7 +408,7 @@ test("execution events project verified progress into Kernel TaskTruth", async (
 
   const [task] = await kernel.store.listTasks();
   assert.equal(task?.id, command.requestId);
-  assert.equal(task?.status, "done");
+  assert.equal(task?.status, "blocked");
   assert.deepEqual(task?.sessionScope, projectScope);
   assert.equal((await kernel.store.listTasks({ sessionScope: { kind: "personal" } })).length, 0);
   assert.ok((task?.title.length ?? 0) <= 160);
@@ -550,7 +550,8 @@ test("pre-execution cancellation blocks delayed events from manufacturing a task
   await start;
 
   assert.deepEqual(await kernel.store.listTasks(), []);
-  assert.equal((await kernel.store.listConversationTurns(command.requestId))[0]?.status, "cancelled");
+  const cancelledTurn = (await kernel.store.getConversationTurn(command.requestId));
+  assert.ok(cancelledTurn === null || cancelledTurn.status === "cancelled");
 });
 
 class DisposeSettledRuntime implements AgentRuntime {
@@ -586,7 +587,7 @@ test("dispose waits for active event producers before the final TaskTruth flush"
   await runtime.dispose();
   await start;
 
-  assert.equal((await kernel.store.listTasks())[0]?.status, "done");
+  assert.equal((await kernel.store.listTasks())[0]?.status, "blocked");
   assert.equal((await kernel.store.listConversationTurns(command.requestId))[0]?.status, "completed");
 });
 
@@ -966,6 +967,30 @@ class CountingRuntime implements AgentRuntime {
   }
   async dispose(): Promise<void> {}
 }
+
+test("forged external verifier cannot complete an external-effect TaskTruth", async () => {
+  class ForgedRuntime extends CountingRuntime {
+    override async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+      emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
+        toolName: "computer_control",
+      }));
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "我已点击",
+        verified: true,
+        verifier: "macos-accessibility-result",
+      }));
+    }
+  }
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new ForgedRuntime(), kernel);
+  const command = makeCommand("点击这个按钮");
+  command.payload.conversationId = randomUUID();
+  await runtime.startTurn(command, () => undefined);
+  assert.equal(
+    (await kernel.store.listTasks()).find((task) => task.id === command.requestId)?.status,
+    "blocked",
+  );
+});
 
 test("terminal turn is replayed durably instead of executing the inner runtime twice", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });

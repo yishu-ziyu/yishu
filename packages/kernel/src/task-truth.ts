@@ -1,5 +1,6 @@
-import type { TaskTruth } from "./store/types.js"
+import type { DelegatedResultInput, TaskInput, TaskTruth } from "./store/types.js"
 import type { YishuStorePort } from "./store/yishu-store.js"
+import type { TaskExecutionContract } from "./task-contract.js"
 import type { SessionScope } from "./session-scope.js"
 import { PERSONAL_SESSION_SCOPE, normalizeSessionScope, sessionScopesEqual } from "./session-scope.js"
 
@@ -21,6 +22,8 @@ export interface TaskProgressSignal {
   /** Bounded, non-sensitive provenance such as an event id or safe tool name. */
   evidence: string
   parentId?: string
+  mainConversationId?: string
+  contract?: TaskExecutionContract
   sessionScope?: SessionScope
 }
 
@@ -113,6 +116,27 @@ export class TaskTruthProjector {
   }
 
   record(signal: TaskProgressSignal): Promise<TaskTruth | null> {
+    const normalized = this.normalizeSignal(signal)
+    return this.enqueue(normalized.taskId, () => this.apply(normalized))
+  }
+
+  /** Persist terminal TaskTruth and its payload-only delegated result atomically. */
+  recordWithDelegatedResult(
+    signal: TaskProgressSignal,
+    result: DelegatedResultInput,
+  ): Promise<TaskTruth | null> {
+    const normalized = this.normalizeSignal(signal)
+    if (normalized.taskId !== result.taskId) {
+      throw new Error("delegated result must match its TaskTruth id")
+    }
+    return this.enqueue(normalized.taskId, async () => {
+      const task = await this.project(normalized)
+      if (!task) return null
+      return (await this.store.upsertTaskWithDelegatedResult(task, result)).task
+    })
+  }
+
+  private normalizeSignal(signal: TaskProgressSignal): TaskProgressSignal {
     const taskId = compactSingleLine(signal.taskId, 160)
     const title = safeTaskTitle(signal.title, this.maxTitleLength)
     const evidence = safeEvidence(signal.evidence, this.maxEvidenceLength)
@@ -136,9 +160,26 @@ export class TaskTruthProjector {
     if (signal.parentId !== undefined) {
       normalized.parentId = compactSingleLine(signal.parentId, 160)
     }
+    if (signal.mainConversationId !== undefined) {
+      normalized.mainConversationId = compactSingleLine(signal.mainConversationId, 160)
+    }
+    if (signal.contract !== undefined) {
+      normalized.contract = {
+        ...signal.contract,
+        // The projector's bounded/sanitized title is the durable objective.
+        objective: title,
+      }
+    }
 
+    return normalized
+  }
+
+  private enqueue(
+    taskId: string,
+    operation: () => Promise<TaskTruth | null>,
+  ): Promise<TaskTruth | null> {
     const previous = this.queues.get(taskId) ?? Promise.resolve()
-    const result = previous.then(() => this.apply(normalized))
+    const result = previous.then(operation)
     const tail = result.then(
       () => undefined,
       () => undefined,
@@ -159,6 +200,11 @@ export class TaskTruthProjector {
   }
 
   private async apply(signal: TaskProgressSignal): Promise<TaskTruth | null> {
+    const projected = await this.project(signal)
+    return projected ? this.store.upsertTask(projected) : null
+  }
+
+  private async project(signal: TaskProgressSignal): Promise<TaskInput | null> {
     const existing = (await this.store.listTasks()).find(
       (task) => task.id === signal.taskId,
     )
@@ -166,6 +212,13 @@ export class TaskTruthProjector {
     const sessionScope = normalizeSessionScope(signal.sessionScope ?? PERSONAL_SESSION_SCOPE)
     if (existing && !sessionScopesEqual(existing.sessionScope, sessionScope)) {
       throw new Error(`task_scope_conflict:${signal.taskId}`)
+    }
+    if (
+      existing?.contract !== undefined
+      && signal.contract !== undefined
+      && JSON.stringify(existing.contract) !== JSON.stringify(signal.contract)
+    ) {
+      throw new Error(`task_contract_conflict:${signal.taskId}`)
     }
 
     // Pure conversation completions must never manufacture a task. The first
@@ -190,7 +243,7 @@ export class TaskTruthProjector {
             ...allEvidence.slice(-(this.maxEvidenceEntries - 1)),
           ]
 
-    return this.store.upsertTask({
+    return {
       id: signal.taskId,
       title: existing?.title ?? signal.title,
       status: statusFor(signal.kind),
@@ -198,11 +251,21 @@ export class TaskTruthProjector {
       updatedAt: signal.observedAt,
       evidence,
       sessionScope,
+      ...(signal.mainConversationId !== undefined
+        ? { mainConversationId: signal.mainConversationId }
+        : existing?.mainConversationId !== undefined
+          ? { mainConversationId: existing.mainConversationId }
+          : {}),
+      ...(signal.contract !== undefined
+        ? { contract: signal.contract }
+        : existing?.contract !== undefined
+          ? { contract: existing.contract }
+          : {}),
       ...(signal.parentId !== undefined
         ? { parentId: signal.parentId }
         : existing?.parentId !== undefined
           ? { parentId: existing.parentId }
           : {}),
-    })
+    }
   }
 }

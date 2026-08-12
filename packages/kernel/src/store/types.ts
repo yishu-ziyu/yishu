@@ -1,5 +1,6 @@
 import type { SessionScope } from "../session-scope.js"
 import type { SuggestionOutcomeStatus } from "../mind/document.js"
+import type { TaskExecutionContract } from "../task-contract.js"
 
 export type { SuggestionOutcomeStatus } from "../mind/document.js"
 
@@ -87,6 +88,75 @@ export interface TaskTruth {
   /** Scope is copied from the originating turn so task queries cannot cross projects. */
   sessionScope: SessionScope
   parentId?: string
+  /** Owning Main conversation for delegated execution and restart recovery. */
+  mainConversationId?: string
+  /** Immutable product-owned execution/success boundary; absent on legacy rows. */
+  contract?: TaskExecutionContract
+}
+
+/** Delivery metadata for one delegated child result; never a task status. */
+export type DelegatedResultKind =
+  | "succeeded"
+  | "completed"
+  | "unverified"
+  | "failed"
+  | "cancelled"
+
+export type DelegatedTaskSequenceStepStatus =
+  | "pending"
+  | "running"
+  | "passed"
+  | "failed"
+
+/** A visible step derived from a real child RuntimeEvent (never from a timer). */
+export interface DelegatedTaskSequenceStep {
+  id: string
+  label: string
+  status: DelegatedTaskSequenceStepStatus
+  occurredAt: string
+  sourceEventId: string
+}
+
+/**
+ * Durable payload-only Result Inbox row.
+ *
+ * `claim*` is a delivery reservation for one Main turn. `delivery*` records
+ * that the claiming turn durably completed. Neither field duplicates
+ * TaskTruth status.
+ */
+export interface DelegatedResultRecord {
+  taskId: string
+  parentId: string
+  mainConversationId: string
+  resultKind: DelegatedResultKind
+  summary: string
+  completedAt: string
+  sequence: DelegatedTaskSequenceStep[]
+  claimTurnId?: string
+  claimedAt?: string
+  deliveryTurnId?: string
+  deliveredAt?: string
+}
+
+export type DelegatedResultInput = Pick<
+  DelegatedResultRecord,
+  | "taskId"
+  | "parentId"
+  | "mainConversationId"
+  | "resultKind"
+  | "summary"
+  | "completedAt"
+> & {
+  sequence?: DelegatedTaskSequenceStep[]
+}
+
+export interface DelegatedResultListOptions {
+  mainConversationId?: string
+  taskId?: string
+  /** Defaults to true so task-history projections can restore delivered rows. */
+  includeDelivered?: boolean
+  /** Only rows currently reserved by a Main turn. */
+  claimedOnly?: boolean
 }
 
 /**
@@ -173,6 +243,7 @@ export interface YishuStoreSnapshot {
   verifiedSkills: VerifiedSkill[]
   mandates: Mandate[]
   tasks: TaskTruth[]
+  delegatedResults: DelegatedResultRecord[]
   conversations: Conversation[]
   turns: ConversationTurn[]
   events: ConversationEvent[]

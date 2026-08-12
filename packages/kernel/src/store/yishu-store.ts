@@ -10,6 +10,10 @@ import type {
   ConversationListOptions,
   ConversationTurn,
   ConversationTurnInput,
+  DelegatedResultInput,
+  DelegatedResultListOptions,
+  DelegatedResultRecord,
+  DelegatedTaskSequenceStep,
   ForgetMemoryResult,
   Learning,
   LearningInput,
@@ -46,6 +50,10 @@ import {
   MAX_MEMORY_LIST_LIMIT,
   MEMORY_LIST_SUMMARY_MAX,
 } from "./types.js"
+import {
+  createTaskExecutionContract,
+  type TaskExecutionContract,
+} from "../task-contract.js"
 import type { SessionScope } from "../session-scope.js"
 import {
   assertDurableSessionScope,
@@ -211,6 +219,7 @@ function emptySnapshot(): YishuStoreSnapshot {
     verifiedSkills: [],
     mandates: [],
     tasks: [],
+    delegatedResults: [],
     conversations: [],
     turns: [],
     events: [],
@@ -270,8 +279,11 @@ function cloneSnapshot(data: YishuStoreSnapshot): YishuStoreSnapshot {
         sessionScope: cloneSessionScope(t.sessionScope),
       }
       if (t.parentId !== undefined) copy.parentId = t.parentId
+      if (t.mainConversationId !== undefined) copy.mainConversationId = t.mainConversationId
+      if (t.contract !== undefined) copy.contract = { ...t.contract }
       return copy
     }),
+    delegatedResults: data.delegatedResults.map(cloneDelegatedResult),
     conversations: data.conversations.map((conversation) => ({
       ...conversation,
       sessionScope: cloneSessionScope(conversation.sessionScope),
@@ -302,6 +314,7 @@ function parseSnapshot(raw: unknown): YishuStoreSnapshot {
     verifiedSkills: parseVerifiedSkills(raw.verifiedSkills),
     mandates: Array.isArray(raw.mandates) ? (raw.mandates as Mandate[]) : [],
     tasks: parseTasks(raw.tasks),
+    delegatedResults: parseDelegatedResults(raw.delegatedResults),
     conversations: parseConversations(raw.conversations),
     turns: parseConversationTurns(raw.turns),
     events: parseConversationEvents(raw.events),
@@ -343,7 +356,182 @@ function parseTasks(raw: unknown): TaskTruth[] {
       if (typeof value.parentId !== "string") throw new Error("yishu-store: invalid task parent id")
       task.parentId = value.parentId
     }
+    if (value.mainConversationId !== undefined) {
+      if (typeof value.mainConversationId !== "string" || value.mainConversationId.trim().length === 0) {
+        throw new Error("yishu-store: invalid task main conversation id")
+      }
+      task.mainConversationId = value.mainConversationId
+    }
+    if (value.contract !== undefined) task.contract = normalizeTaskContract(value.contract, value.title)
     return task
+  })
+}
+
+function normalizeTaskContract(raw: unknown, taskTitle: string): TaskExecutionContract {
+  if (!isRecord(raw)) throw new Error("yishu-store: invalid task contract")
+  if (
+    typeof raw.objective !== "string"
+    || (raw.successMode !== "read_only_delivery" && raw.successMode !== "external_effect")
+    || !["automatic", "reversible", "standing_mandate", "explicit_approval"].includes(String(raw.authority))
+    || !["low", "medium", "high", "critical"].includes(String(raw.risk))
+    || typeof raw.maxAttempts !== "number"
+  ) {
+    throw new Error("yishu-store: invalid task contract")
+  }
+  try {
+    return createTaskExecutionContract({
+      // A durable objective is the bounded, sanitized TaskTruth title rather
+      // than an unbounded copy of the original utterance.
+      objective: sanitizeVisibleText(taskTitle, "task contract objective"),
+      successMode: raw.successMode,
+      authority: raw.authority as TaskExecutionContract["authority"],
+      risk: raw.risk as TaskExecutionContract["risk"],
+      maxAttempts: raw.maxAttempts,
+    })
+  } catch {
+    throw new Error("yishu-store: invalid task contract")
+  }
+}
+
+function sameTaskContract(
+  left: TaskExecutionContract,
+  right: TaskExecutionContract,
+): boolean {
+  return left.objective === right.objective
+    && left.successMode === right.successMode
+    && left.authority === right.authority
+    && left.risk === right.risk
+    && left.maxAttempts === right.maxAttempts
+}
+
+const DELEGATED_RESULT_KINDS = new Set([
+  "succeeded",
+  "completed",
+  "unverified",
+  "failed",
+  "cancelled",
+] as const)
+const DELEGATED_STEP_STATUSES = new Set([
+  "pending",
+  "running",
+  "passed",
+  "failed",
+] as const)
+const MAX_DELEGATED_RESULT_SUMMARY = 500
+const MAX_DELEGATED_SEQUENCE_STEPS = 64
+
+function validIsoTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value))
+}
+
+function delegatedIdentifier(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 160) {
+    throw new Error(`yishu-store: invalid delegated result ${field}`)
+  }
+  return value
+}
+
+function normalizeDelegatedSequence(raw: unknown): DelegatedTaskSequenceStep[] {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw) || raw.length > MAX_DELEGATED_SEQUENCE_STEPS) {
+    throw new Error("yishu-store: invalid delegated result sequence")
+  }
+  return raw.map((candidate) => {
+    if (!isRecord(candidate)) throw new Error("yishu-store: invalid delegated result step")
+    const id = delegatedIdentifier(candidate.id, "step id")
+    const sourceEventId = delegatedIdentifier(candidate.sourceEventId, "source event id")
+    if (
+      typeof candidate.label !== "string"
+      || candidate.label.trim().length === 0
+      || candidate.label.length > 120
+      || typeof candidate.status !== "string"
+      || !DELEGATED_STEP_STATUSES.has(candidate.status as never)
+      || !validIsoTimestamp(candidate.occurredAt)
+    ) {
+      throw new Error("yishu-store: invalid delegated result step")
+    }
+    return {
+      id,
+      label: sanitizeVisibleText(candidate.label, "delegated task step label"),
+      status: candidate.status as DelegatedTaskSequenceStep["status"],
+      occurredAt: candidate.occurredAt,
+      sourceEventId,
+    }
+  })
+}
+
+function normalizeDelegatedResult(
+  input: DelegatedResultInput | DelegatedResultRecord,
+): DelegatedResultRecord {
+  const taskId = delegatedIdentifier(input.taskId, "task id")
+  const parentId = delegatedIdentifier(input.parentId, "parent id")
+  const mainConversationId = delegatedIdentifier(input.mainConversationId, "conversation id")
+  if (!DELEGATED_RESULT_KINDS.has(input.resultKind as never)) {
+    throw new Error("yishu-store: invalid delegated result kind")
+  }
+  if (
+    typeof input.summary !== "string"
+    || input.summary.trim().length === 0
+    || input.summary.length > MAX_DELEGATED_RESULT_SUMMARY
+    || !validIsoTimestamp(input.completedAt)
+  ) {
+    throw new Error("yishu-store: invalid delegated result payload")
+  }
+  const record: DelegatedResultRecord = {
+    taskId,
+    parentId,
+    mainConversationId,
+    resultKind: input.resultKind,
+    summary: sanitizeVisibleText(input.summary, "delegated result summary"),
+    completedAt: input.completedAt,
+    sequence: normalizeDelegatedSequence(input.sequence),
+  }
+  if ("claimTurnId" in input && input.claimTurnId !== undefined) {
+    record.claimTurnId = delegatedIdentifier(input.claimTurnId, "claim turn id")
+    if (!validIsoTimestamp(input.claimedAt)) {
+      throw new Error("yishu-store: invalid delegated result claimed time")
+    }
+    record.claimedAt = input.claimedAt
+  } else if ("claimedAt" in input && input.claimedAt !== undefined) {
+    throw new Error("yishu-store: delegated result claim is incomplete")
+  }
+  if ("deliveryTurnId" in input && input.deliveryTurnId !== undefined) {
+    record.deliveryTurnId = delegatedIdentifier(input.deliveryTurnId, "delivery turn id")
+    if (!validIsoTimestamp(input.deliveredAt)) {
+      throw new Error("yishu-store: invalid delegated result delivered time")
+    }
+    record.deliveredAt = input.deliveredAt
+  } else if ("deliveredAt" in input && input.deliveredAt !== undefined) {
+    throw new Error("yishu-store: delegated result delivery is incomplete")
+  }
+  return record
+}
+
+function cloneDelegatedResult(result: DelegatedResultRecord): DelegatedResultRecord {
+  return {
+    ...result,
+    sequence: result.sequence.map((step) => ({ ...step })),
+  }
+}
+
+function sameDelegatedResultPayload(
+  left: DelegatedResultRecord,
+  right: DelegatedResultRecord,
+): boolean {
+  return left.taskId === right.taskId
+    && left.parentId === right.parentId
+    && left.mainConversationId === right.mainConversationId
+    && left.resultKind === right.resultKind
+    && left.summary === right.summary
+    && left.completedAt === right.completedAt
+    && JSON.stringify(left.sequence) === JSON.stringify(right.sequence)
+}
+
+function parseDelegatedResults(raw: unknown): DelegatedResultRecord[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map((value) => {
+    if (!isRecord(value)) throw new Error("yishu-store: invalid delegated result record")
+    return normalizeDelegatedResult(value as unknown as DelegatedResultRecord)
   })
 }
 
@@ -712,6 +900,23 @@ export interface YishuStorePort {
   revokeMandate(id: string): Promise<boolean>
   upsertTask(input: TaskInput): Promise<TaskTruth>
   listTasks(options?: TaskSearchOptions): Promise<TaskTruth[]>
+  putDelegatedResult(input: DelegatedResultInput): Promise<DelegatedResultRecord>
+  /** Atomically persist the canonical TaskTruth transition and its result payload. */
+  upsertTaskWithDelegatedResult(
+    task: TaskInput,
+    result: DelegatedResultInput,
+  ): Promise<{ task: TaskTruth; result: DelegatedResultRecord }>
+  listDelegatedResults(options?: DelegatedResultListOptions): Promise<DelegatedResultRecord[]>
+  /** Atomically reserve every pending result in one conversation for one Main turn. */
+  claimDelegatedResults(
+    mainConversationId: string,
+    claimTurnId: string,
+    claimedAt?: string,
+  ): Promise<DelegatedResultRecord[]>
+  /** Mark rows reserved by this completed Main turn as delivered. */
+  ackDelegatedResults(claimTurnId: string, deliveredAt?: string): Promise<number>
+  /** Return rows reserved by a failed/cancelled Main turn to the pending inbox. */
+  releaseDelegatedResults(claimTurnId: string): Promise<number>
   upsertConversation(input: ConversationInput): Promise<Conversation>
   upsertConversationTurn(input: ConversationTurnInput): Promise<ConversationTurn>
   appendConversationEvent(input: ConversationEventInput): Promise<ConversationEvent>
@@ -1131,9 +1336,16 @@ class YishuStoreCore {
       ? cloneSessionScope(existing.sessionScope)
       : normalizeSessionScope(input.sessionScope)
     assertDurableSessionScope(sessionScope)
+    const contract = input.contract === undefined
+      ? existing?.contract
+      : normalizeTaskContract(input.contract, input.title)
     if (existing) {
       if (!sessionScopesEqual(existing.sessionScope, sessionScope)) {
         throw new Error(`task_scope_conflict:${input.id}`)
+      }
+      if (existing.contract !== undefined && contract !== undefined
+        && !sameTaskContract(existing.contract, contract)) {
+        throw new Error(`task_contract_conflict:${input.id}`)
       }
       existing.title = input.title
       existing.status = input.status
@@ -1144,10 +1356,19 @@ class YishuStoreCore {
       } else {
         delete existing.parentId
       }
+      if (input.mainConversationId !== undefined) {
+        if (existing.mainConversationId !== undefined
+          && !conversationIdsEqual(existing.mainConversationId, input.mainConversationId)) {
+          throw new Error(`task_conversation_conflict:${input.id}`)
+        }
+        existing.mainConversationId = input.mainConversationId
+      }
+      if (contract !== undefined) existing.contract = { ...contract }
       return {
         ...existing,
         evidence: [...existing.evidence],
         sessionScope: cloneSessionScope(existing.sessionScope),
+        ...(existing.contract !== undefined ? { contract: { ...existing.contract } } : {}),
       }
     }
 
@@ -1163,11 +1384,14 @@ class YishuStoreCore {
     if (input.parentId !== undefined) {
       task.parentId = input.parentId
     }
+    if (input.mainConversationId !== undefined) task.mainConversationId = input.mainConversationId
+    if (contract !== undefined) task.contract = { ...contract }
     this.data.tasks.push(task)
     return {
       ...task,
       evidence: [...task.evidence],
       sessionScope: cloneSessionScope(task.sessionScope),
+      ...(task.contract !== undefined ? { contract: { ...task.contract } } : {}),
     }
   }
 
@@ -1189,8 +1413,118 @@ class YishuStoreCore {
         sessionScope: cloneSessionScope(t.sessionScope),
       }
       if (t.parentId !== undefined) copy.parentId = t.parentId
+      if (t.mainConversationId !== undefined) copy.mainConversationId = t.mainConversationId
+      if (t.contract !== undefined) copy.contract = { ...t.contract }
       return copy
     })
+  }
+
+  putDelegatedResultSync(input: DelegatedResultInput): DelegatedResultRecord {
+    this.ensureData()
+    const normalized = normalizeDelegatedResult(input)
+    const existing = this.data.delegatedResults.find((result) => result.taskId === normalized.taskId)
+    if (existing) {
+      if (!sameDelegatedResultPayload(existing, normalized)) {
+        throw new Error(`delegated_result_conflict:${normalized.taskId}`)
+      }
+      return cloneDelegatedResult(existing)
+    }
+    this.data.delegatedResults.push(normalized)
+    return cloneDelegatedResult(normalized)
+  }
+
+  upsertTaskWithDelegatedResultSync(
+    taskInput: TaskInput,
+    resultInput: DelegatedResultInput,
+  ): { task: TaskTruth; result: DelegatedResultRecord } {
+    this.ensureData()
+    if (taskInput.id !== resultInput.taskId) {
+      throw new Error("delegated result must match its TaskTruth id")
+    }
+    const before = cloneSnapshot(this.data)
+    try {
+      const task = this.upsertTaskSync(taskInput)
+      const result = this.putDelegatedResultSync(resultInput)
+      return { task, result }
+    } catch (error) {
+      this.data = before
+      throw error
+    }
+  }
+
+  listDelegatedResultsSync(options?: DelegatedResultListOptions): DelegatedResultRecord[] {
+    this.ensureData()
+    const includeDelivered = options?.includeDelivered ?? true
+    return this.data.delegatedResults
+      .filter((result) =>
+        (options?.mainConversationId === undefined
+          || conversationIdsEqual(result.mainConversationId, options.mainConversationId))
+        && (options?.taskId === undefined || result.taskId === options.taskId)
+        && (includeDelivered || result.deliveryTurnId === undefined)
+        && (options?.claimedOnly !== true || result.claimTurnId !== undefined)
+      )
+      .sort((left, right) => left.completedAt.localeCompare(right.completedAt))
+      .map(cloneDelegatedResult)
+  }
+
+  claimDelegatedResultsSync(
+    mainConversationId: string,
+    claimTurnId: string,
+    claimedAt = nowIso(),
+  ): DelegatedResultRecord[] {
+    this.ensureData()
+    const conversationId = delegatedIdentifier(mainConversationId, "conversation id")
+    const turnId = delegatedIdentifier(claimTurnId, "claim turn id")
+    if (!validIsoTimestamp(claimedAt)) {
+      throw new Error("yishu-store: invalid delegated result claimed time")
+    }
+    for (const result of this.data.delegatedResults) {
+      if (
+        conversationIdsEqual(result.mainConversationId, conversationId)
+        && result.deliveryTurnId === undefined
+        && (result.claimTurnId === undefined || result.claimTurnId === turnId)
+      ) {
+        result.claimTurnId = turnId
+        result.claimedAt ??= claimedAt
+      }
+    }
+    return this.data.delegatedResults
+      .filter((result) =>
+        conversationIdsEqual(result.mainConversationId, conversationId)
+        && result.deliveryTurnId === undefined
+        && result.claimTurnId === turnId
+      )
+      .sort((left, right) => left.completedAt.localeCompare(right.completedAt))
+      .map(cloneDelegatedResult)
+  }
+
+  ackDelegatedResultsSync(claimTurnId: string, deliveredAt = nowIso()): number {
+    this.ensureData()
+    const turnId = delegatedIdentifier(claimTurnId, "claim turn id")
+    if (!validIsoTimestamp(deliveredAt)) {
+      throw new Error("yishu-store: invalid delegated result delivered time")
+    }
+    let changed = 0
+    for (const result of this.data.delegatedResults) {
+      if (result.claimTurnId !== turnId || result.deliveryTurnId !== undefined) continue
+      result.deliveryTurnId = turnId
+      result.deliveredAt = deliveredAt
+      changed += 1
+    }
+    return changed
+  }
+
+  releaseDelegatedResultsSync(claimTurnId: string): number {
+    this.ensureData()
+    const turnId = delegatedIdentifier(claimTurnId, "claim turn id")
+    let changed = 0
+    for (const result of this.data.delegatedResults) {
+      if (result.claimTurnId !== turnId || result.deliveryTurnId !== undefined) continue
+      delete result.claimTurnId
+      delete result.claimedAt
+      changed += 1
+    }
+    return changed
   }
 
   upsertConversationSync(input: ConversationInput): Conversation {
@@ -1894,6 +2228,92 @@ export class YishuStore extends YishuStoreCore implements YishuStorePort {
     })
   }
 
+  async putDelegatedResult(input: DelegatedResultInput): Promise<DelegatedResultRecord> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const result = this.putDelegatedResultSync(input)
+      await this.saveUnsafe()
+      return result
+    })
+  }
+
+  async upsertTaskWithDelegatedResult(
+    task: TaskInput,
+    result: DelegatedResultInput,
+  ): Promise<{ task: TaskTruth; result: DelegatedResultRecord }> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const before = cloneSnapshot(this.data)
+      try {
+        const stored = this.upsertTaskWithDelegatedResultSync(task, result)
+        await this.saveUnsafe()
+        return stored
+      } catch (error) {
+        this.data = before
+        await this.writeSnapshotUnsafe(before).catch(() => undefined)
+        throw error
+      }
+    })
+  }
+
+  async listDelegatedResults(
+    options?: DelegatedResultListOptions,
+  ): Promise<DelegatedResultRecord[]> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      return this.listDelegatedResultsSync(options)
+    })
+  }
+
+  async claimDelegatedResults(
+    mainConversationId: string,
+    claimTurnId: string,
+    claimedAt?: string,
+  ): Promise<DelegatedResultRecord[]> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const before = cloneSnapshot(this.data)
+      try {
+        const results = this.claimDelegatedResultsSync(mainConversationId, claimTurnId, claimedAt)
+        if (results.length > 0) await this.saveUnsafe()
+        return results
+      } catch (error) {
+        this.data = before
+        throw error
+      }
+    })
+  }
+
+  async ackDelegatedResults(claimTurnId: string, deliveredAt?: string): Promise<number> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const before = cloneSnapshot(this.data)
+      try {
+        const changed = this.ackDelegatedResultsSync(claimTurnId, deliveredAt)
+        if (changed > 0) await this.saveUnsafe()
+        return changed
+      } catch (error) {
+        this.data = before
+        throw error
+      }
+    })
+  }
+
+  async releaseDelegatedResults(claimTurnId: string): Promise<number> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const before = cloneSnapshot(this.data)
+      try {
+        const changed = this.releaseDelegatedResultsSync(claimTurnId)
+        if (changed > 0) await this.saveUnsafe()
+        return changed
+      } catch (error) {
+        this.data = before
+        throw error
+      }
+    })
+  }
+
   async upsertConversation(input: ConversationInput): Promise<Conversation> {
     return this.enqueue(async () => {
       await this.ensureLoadedUnsafe()
@@ -2232,6 +2652,39 @@ export class InMemoryYishuStore extends YishuStoreCore implements YishuStorePort
 
   async listTasks(options?: TaskSearchOptions): Promise<TaskTruth[]> {
     return this.listTasksSync(options)
+  }
+
+  async putDelegatedResult(input: DelegatedResultInput): Promise<DelegatedResultRecord> {
+    return this.putDelegatedResultSync(input)
+  }
+
+  async upsertTaskWithDelegatedResult(
+    task: TaskInput,
+    result: DelegatedResultInput,
+  ): Promise<{ task: TaskTruth; result: DelegatedResultRecord }> {
+    return this.upsertTaskWithDelegatedResultSync(task, result)
+  }
+
+  async listDelegatedResults(
+    options?: DelegatedResultListOptions,
+  ): Promise<DelegatedResultRecord[]> {
+    return this.listDelegatedResultsSync(options)
+  }
+
+  async claimDelegatedResults(
+    mainConversationId: string,
+    claimTurnId: string,
+    claimedAt?: string,
+  ): Promise<DelegatedResultRecord[]> {
+    return this.claimDelegatedResultsSync(mainConversationId, claimTurnId, claimedAt)
+  }
+
+  async ackDelegatedResults(claimTurnId: string, deliveredAt?: string): Promise<number> {
+    return this.ackDelegatedResultsSync(claimTurnId, deliveredAt)
+  }
+
+  async releaseDelegatedResults(claimTurnId: string): Promise<number> {
+    return this.releaseDelegatedResultsSync(claimTurnId)
   }
 
   async upsertConversation(input: ConversationInput): Promise<Conversation> {

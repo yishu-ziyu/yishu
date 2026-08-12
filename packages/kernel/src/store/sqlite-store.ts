@@ -11,6 +11,10 @@ import type {
   ConversationListOptions,
   ConversationTurn,
   ConversationTurnInput,
+  DelegatedResultInput,
+  DelegatedResultListOptions,
+  DelegatedResultRecord,
+  DelegatedTaskSequenceStep,
   ForgetMemoryResult,
   Learning,
   LearningInput,
@@ -78,6 +82,10 @@ import {
   assertStoreOperationNotAborted,
   StoreOperationCancelledError,
 } from "./yishu-store.js";
+import {
+  createTaskExecutionContract,
+  type TaskExecutionContract,
+} from "../task-contract.js";
 
 /**
  * Local SQLite-backed product store (node:sqlite DatabaseSync).
@@ -603,6 +611,10 @@ export class SqliteYishuStore implements YishuStorePort {
   }
 
   async upsertTask(input: TaskInput): Promise<TaskTruth> {
+    return this.upsertTaskRow(input);
+  }
+
+  private upsertTaskRow(input: TaskInput): TaskTruth {
     const stamp = new Date().toISOString();
     const existing = this.db
       .prepare(`SELECT * FROM tasks WHERE id = ?`)
@@ -612,6 +624,21 @@ export class SqliteYishuStore implements YishuStorePort {
       : normalizeSessionScope(input.sessionScope);
     assertDurableSessionScope(sessionScope);
     const scopeColumns = sessionScopeColumns(sessionScope);
+    const storedContract = existing ? taskContractFromRow(existing) : undefined;
+    const contract = input.contract === undefined
+      ? storedContract
+      : normalizeSqliteTaskContract(input.contract, input.title);
+    if (storedContract && contract && !sameSqliteTaskContract(storedContract, contract)) {
+      throw new Error(`task_contract_conflict:${input.id}`);
+    }
+    const existingConversationId = typeof existing?.main_conversation_id === "string"
+      ? existing.main_conversation_id
+      : undefined;
+    if (input.mainConversationId !== undefined && existingConversationId !== undefined
+      && !sqliteConversationIdsEqual(input.mainConversationId, existingConversationId)) {
+      throw new Error(`task_conversation_conflict:${input.id}`);
+    }
+    const mainConversationId = input.mainConversationId ?? existingConversationId;
 
     if (existing) {
       if (!sessionScopesEqual(sessionScopeFromRow(existing), sessionScope)) {
@@ -620,6 +647,7 @@ export class SqliteYishuStore implements YishuStorePort {
       this.db
         .prepare(
           `UPDATE tasks SET title = ?, status = ?, evidence_json = ?, updated_at = ?, parent_id = ?,
+             main_conversation_id = ?, contract_json = ?,
              scope_kind = ?, project_id = ?, project_label = ?
            WHERE id = ?`,
         )
@@ -629,6 +657,8 @@ export class SqliteYishuStore implements YishuStorePort {
           JSON.stringify(input.evidence),
           input.updatedAt ?? stamp,
           input.parentId ?? null,
+          mainConversationId ?? null,
+          contract === undefined ? null : JSON.stringify(contract),
           scopeColumns.kind,
           scopeColumns.projectId,
           scopeColumns.projectLabel,
@@ -639,8 +669,9 @@ export class SqliteYishuStore implements YishuStorePort {
         .prepare(
           `INSERT INTO tasks (
              id, title, status, created_at, updated_at, evidence_json, parent_id,
+             main_conversation_id, contract_json,
              scope_kind, project_id, project_label
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.id,
@@ -650,6 +681,8 @@ export class SqliteYishuStore implements YishuStorePort {
           input.updatedAt ?? stamp,
           JSON.stringify(input.evidence),
           input.parentId ?? null,
+          mainConversationId ?? null,
+          contract === undefined ? null : JSON.stringify(contract),
           scopeColumns.kind,
           scopeColumns.projectId,
           scopeColumns.projectLabel,
@@ -670,6 +703,138 @@ export class SqliteYishuStore implements YishuStorePort {
     if (options?.sessionScope === undefined) return tasks;
     const requestedScope = normalizeSessionScope(options.sessionScope);
     return tasks.filter((task) => sessionScopesEqual(task.sessionScope, requestedScope));
+  }
+
+  async putDelegatedResult(input: DelegatedResultInput): Promise<DelegatedResultRecord> {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.putDelegatedResultRow(input);
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async upsertTaskWithDelegatedResult(
+    taskInput: TaskInput,
+    resultInput: DelegatedResultInput,
+  ): Promise<{ task: TaskTruth; result: DelegatedResultRecord }> {
+    if (taskInput.id !== resultInput.taskId) {
+      throw new Error("delegated result must match its TaskTruth id");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const task = this.upsertTaskRow(taskInput);
+      const result = this.putDelegatedResultRow(resultInput);
+      this.db.exec("COMMIT");
+      return { task, result };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async listDelegatedResults(
+    options?: DelegatedResultListOptions,
+  ): Promise<DelegatedResultRecord[]> {
+    const rows = this.db
+      .prepare(`SELECT * FROM delegated_results ORDER BY completed_at ASC, task_id ASC`)
+      .all() as Array<Record<string, unknown>>;
+    const includeDelivered = options?.includeDelivered ?? true;
+    return rows
+      .map(rowToDelegatedResult)
+      .filter((result) =>
+        (options?.mainConversationId === undefined
+          || sqliteConversationIdsEqual(result.mainConversationId, options.mainConversationId))
+        && (options?.taskId === undefined || result.taskId === options.taskId)
+        && (includeDelivered || result.deliveryTurnId === undefined)
+        && (options?.claimedOnly !== true || result.claimTurnId !== undefined)
+      );
+  }
+
+  async claimDelegatedResults(
+    mainConversationId: string,
+    claimTurnId: string,
+    claimedAt = new Date().toISOString(),
+  ): Promise<DelegatedResultRecord[]> {
+    const conversationId = delegatedResultIdentifier(mainConversationId, "conversation id");
+    const turnId = delegatedResultIdentifier(claimTurnId, "claim turn id");
+    assertDelegatedTimestamp(claimedAt, "claimed time");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(
+        `UPDATE delegated_results
+         SET claim_turn_id = ?, claimed_at = COALESCE(claimed_at, ?)
+         WHERE main_conversation_id = ? COLLATE NOCASE
+           AND delivery_turn_id IS NULL
+           AND (claim_turn_id IS NULL OR claim_turn_id = ?)`,
+      ).run(turnId, claimedAt, conversationId, turnId);
+      const rows = this.db.prepare(
+        `SELECT * FROM delegated_results
+         WHERE main_conversation_id = ? COLLATE NOCASE AND claim_turn_id = ? AND delivery_turn_id IS NULL
+         ORDER BY completed_at ASC, task_id ASC`,
+      ).all(conversationId, turnId) as Array<Record<string, unknown>>;
+      this.db.exec("COMMIT");
+      return rows.map(rowToDelegatedResult);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async ackDelegatedResults(
+    claimTurnId: string,
+    deliveredAt = new Date().toISOString(),
+  ): Promise<number> {
+    const turnId = delegatedResultIdentifier(claimTurnId, "claim turn id");
+    assertDelegatedTimestamp(deliveredAt, "delivered time");
+    const result = this.db.prepare(
+      `UPDATE delegated_results SET delivery_turn_id = ?, delivered_at = ?
+       WHERE claim_turn_id = ? AND delivery_turn_id IS NULL`,
+    ).run(turnId, deliveredAt, turnId);
+    return Number(result.changes);
+  }
+
+  async releaseDelegatedResults(claimTurnId: string): Promise<number> {
+    const turnId = delegatedResultIdentifier(claimTurnId, "claim turn id");
+    const result = this.db.prepare(
+      `UPDATE delegated_results SET claim_turn_id = NULL, claimed_at = NULL
+       WHERE claim_turn_id = ? AND delivery_turn_id IS NULL`,
+    ).run(turnId);
+    return Number(result.changes);
+  }
+
+  private putDelegatedResultRow(input: DelegatedResultInput): DelegatedResultRecord {
+    const normalized = normalizeSqliteDelegatedResult(input);
+    const existing = this.db.prepare(`SELECT * FROM delegated_results WHERE task_id = ?`)
+      .get(normalized.taskId) as Record<string, unknown> | undefined;
+    if (existing) {
+      const stored = rowToDelegatedResult(existing);
+      if (!sameSqliteDelegatedResultPayload(stored, normalized)) {
+        throw new Error(`delegated_result_conflict:${normalized.taskId}`);
+      }
+      return stored;
+    }
+    this.db.prepare(
+      `INSERT INTO delegated_results (
+         task_id, parent_id, main_conversation_id, result_kind, summary,
+         completed_at, sequence_json, claim_turn_id, claimed_at,
+         delivery_turn_id, delivered_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)`,
+    ).run(
+      normalized.taskId,
+      normalized.parentId,
+      normalized.mainConversationId,
+      normalized.resultKind,
+      normalized.summary,
+      normalized.completedAt,
+      JSON.stringify(normalized.sequence),
+    );
+    const row = this.db.prepare(`SELECT * FROM delegated_results WHERE task_id = ?`)
+      .get(normalized.taskId) as Record<string, unknown>;
+    return rowToDelegatedResult(row);
   }
 
   async upsertConversation(input: ConversationInput): Promise<Conversation> {
@@ -1198,6 +1363,10 @@ export class SqliteYishuStore implements YishuStorePort {
         .prepare(`SELECT * FROM tasks`)
         .all()
         .map((r) => rowToTask(r as Record<string, unknown>)),
+      delegatedResults: this.db
+        .prepare(`SELECT * FROM delegated_results ORDER BY completed_at ASC, task_id ASC`)
+        .all()
+        .map((r) => rowToDelegatedResult(r as Record<string, unknown>)),
       conversations: this.db
         .prepare(`SELECT * FROM conversations ORDER BY created_at ASC`)
         .all()
@@ -1327,10 +1496,27 @@ export class SqliteYishuStore implements YishuStorePort {
         updated_at TEXT NOT NULL,
         evidence_json TEXT NOT NULL,
         parent_id TEXT,
+        main_conversation_id TEXT COLLATE NOCASE,
+        contract_json TEXT,
         scope_kind TEXT NOT NULL DEFAULT 'personal',
         project_id TEXT,
         project_label TEXT
       );
+      CREATE TABLE IF NOT EXISTS delegated_results (
+        task_id TEXT PRIMARY KEY,
+        parent_id TEXT NOT NULL,
+        main_conversation_id TEXT NOT NULL COLLATE NOCASE,
+        result_kind TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        completed_at TEXT NOT NULL,
+        sequence_json TEXT NOT NULL DEFAULT '[]',
+        claim_turn_id TEXT,
+        claimed_at TEXT,
+        delivery_turn_id TEXT,
+        delivered_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_delegated_results_claim
+        ON delegated_results (claim_turn_id);
       CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
         created_at TEXT NOT NULL,
@@ -1405,6 +1591,8 @@ export class SqliteYishuStore implements YishuStorePort {
       ["tasks", "scope_kind", "TEXT NOT NULL DEFAULT 'personal'"],
       ["tasks", "project_id", "TEXT"],
       ["tasks", "project_label", "TEXT"],
+      ["tasks", "main_conversation_id", "TEXT"],
+      ["tasks", "contract_json", "TEXT"],
       ["conversations", "scope_kind", "TEXT NOT NULL DEFAULT 'personal'"],
       ["conversations", "project_id", "TEXT"],
       ["conversations", "project_label", "TEXT"],
@@ -1419,6 +1607,15 @@ export class SqliteYishuStore implements YishuStorePort {
         // Fresh/current schemas already contain the additive column.
       }
     }
+    this.db.exec(`
+      DROP INDEX IF EXISTS idx_delegated_results_conversation_delivery;
+      CREATE INDEX idx_delegated_results_conversation_delivery
+        ON delegated_results (
+          main_conversation_id COLLATE NOCASE,
+          delivery_turn_id,
+          completed_at
+        );
+    `);
     // Ensure singleton mind row exists for fresh and upgraded databases.
     this.db
       .prepare(
@@ -1427,8 +1624,8 @@ export class SqliteYishuStore implements YishuStorePort {
          ON CONFLICT(id) DO NOTHING`,
       )
       .run();
-    if (currentVersion < 4) {
-      this.db.exec("PRAGMA user_version = 4;");
+    if (currentVersion < 5) {
+      this.db.exec("PRAGMA user_version = 5;");
     }
   }
 }
@@ -1804,7 +2001,182 @@ function rowToTask(row: Record<string, unknown>): TaskTruth {
     sessionScope: sessionScopeFromRow(row),
   };
   if (row.parent_id != null) task.parentId = String(row.parent_id);
+  if (row.main_conversation_id != null) task.mainConversationId = String(row.main_conversation_id);
+  const contract = taskContractFromRow(row);
+  if (contract !== undefined) task.contract = contract;
   return task;
+}
+
+function normalizeSqliteTaskContract(raw: unknown, title: string): TaskExecutionContract {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("yishu sqlite: invalid task contract");
+  }
+  const value = raw as Record<string, unknown>;
+  if (
+    typeof value.objective !== "string"
+    || (value.successMode !== "read_only_delivery" && value.successMode !== "external_effect")
+    || !["automatic", "reversible", "standing_mandate", "explicit_approval"].includes(String(value.authority))
+    || !["low", "medium", "high", "critical"].includes(String(value.risk))
+    || typeof value.maxAttempts !== "number"
+  ) {
+    throw new Error("yishu sqlite: invalid task contract");
+  }
+  try {
+    return createTaskExecutionContract({
+      objective: sanitizeVisibleText(title, "task contract objective"),
+      successMode: value.successMode,
+      authority: value.authority as TaskExecutionContract["authority"],
+      risk: value.risk as TaskExecutionContract["risk"],
+      maxAttempts: value.maxAttempts,
+    });
+  } catch {
+    throw new Error("yishu sqlite: invalid task contract");
+  }
+}
+
+function taskContractFromRow(row: Record<string, unknown>): TaskExecutionContract | undefined {
+  if (row.contract_json == null) return undefined;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(String(row.contract_json));
+  } catch {
+    throw new Error("yishu sqlite: invalid task contract");
+  }
+  return normalizeSqliteTaskContract(raw, String(row.title));
+}
+
+function sameSqliteTaskContract(left: TaskExecutionContract, right: TaskExecutionContract): boolean {
+  return left.objective === right.objective
+    && left.successMode === right.successMode
+    && left.authority === right.authority
+    && left.risk === right.risk
+    && left.maxAttempts === right.maxAttempts;
+}
+
+function sqliteConversationIdsEqual(left: string, right: string): boolean {
+  return left === right || left.toLowerCase() === right.toLowerCase();
+}
+
+const SQLITE_DELEGATED_RESULT_KINDS = new Set([
+  "succeeded",
+  "completed",
+  "unverified",
+  "failed",
+  "cancelled",
+] as const);
+const SQLITE_DELEGATED_STEP_STATUSES = new Set([
+  "pending",
+  "running",
+  "passed",
+  "failed",
+] as const);
+
+function delegatedResultIdentifier(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 160) {
+    throw new Error(`yishu sqlite: invalid delegated result ${field}`);
+  }
+  return value;
+}
+
+function assertDelegatedTimestamp(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw new Error(`yishu sqlite: invalid delegated result ${field}`);
+  }
+}
+
+function normalizeSqliteDelegatedSequence(raw: unknown): DelegatedTaskSequenceStep[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > 64) {
+    throw new Error("yishu sqlite: invalid delegated result sequence");
+  }
+  return raw.map((candidate) => {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error("yishu sqlite: invalid delegated result step");
+    }
+    const step = candidate as Record<string, unknown>;
+    const id = delegatedResultIdentifier(step.id, "step id");
+    const sourceEventId = delegatedResultIdentifier(step.sourceEventId, "source event id");
+    if (
+      typeof step.label !== "string"
+      || step.label.trim().length === 0
+      || step.label.length > 120
+      || typeof step.status !== "string"
+      || !SQLITE_DELEGATED_STEP_STATUSES.has(step.status as never)
+    ) {
+      throw new Error("yishu sqlite: invalid delegated result step");
+    }
+    assertDelegatedTimestamp(step.occurredAt, "step time");
+    return {
+      id,
+      label: sanitizeVisibleText(step.label, "delegated task step label"),
+      status: step.status as DelegatedTaskSequenceStep["status"],
+      occurredAt: step.occurredAt,
+      sourceEventId,
+    };
+  });
+}
+
+function normalizeSqliteDelegatedResult(input: DelegatedResultInput): DelegatedResultRecord {
+  const taskId = delegatedResultIdentifier(input.taskId, "task id");
+  const parentId = delegatedResultIdentifier(input.parentId, "parent id");
+  const mainConversationId = delegatedResultIdentifier(input.mainConversationId, "conversation id");
+  if (!SQLITE_DELEGATED_RESULT_KINDS.has(input.resultKind as never)) {
+    throw new Error("yishu sqlite: invalid delegated result kind");
+  }
+  if (
+    typeof input.summary !== "string"
+    || input.summary.trim().length === 0
+    || input.summary.length > 500
+  ) {
+    throw new Error("yishu sqlite: invalid delegated result summary");
+  }
+  assertDelegatedTimestamp(input.completedAt, "completed time");
+  return {
+    taskId,
+    parentId,
+    mainConversationId,
+    resultKind: input.resultKind,
+    summary: sanitizeVisibleText(input.summary, "delegated result summary"),
+    completedAt: input.completedAt,
+    sequence: normalizeSqliteDelegatedSequence(input.sequence),
+  };
+}
+
+function sameSqliteDelegatedResultPayload(
+  left: DelegatedResultRecord,
+  right: DelegatedResultRecord,
+): boolean {
+  return left.taskId === right.taskId
+    && left.parentId === right.parentId
+    && left.mainConversationId === right.mainConversationId
+    && left.resultKind === right.resultKind
+    && left.summary === right.summary
+    && left.completedAt === right.completedAt
+    && JSON.stringify(left.sequence) === JSON.stringify(right.sequence);
+}
+
+function rowToDelegatedResult(row: Record<string, unknown>): DelegatedResultRecord {
+  const sequence = normalizeSqliteDelegatedSequence(parseJsonArray(row.sequence_json));
+  const result = normalizeSqliteDelegatedResult({
+    taskId: String(row.task_id),
+    parentId: String(row.parent_id),
+    mainConversationId: String(row.main_conversation_id),
+    resultKind: String(row.result_kind) as DelegatedResultRecord["resultKind"],
+    summary: String(row.summary),
+    completedAt: String(row.completed_at),
+    sequence,
+  });
+  if (row.claim_turn_id != null) {
+    result.claimTurnId = delegatedResultIdentifier(row.claim_turn_id, "claim turn id");
+    assertDelegatedTimestamp(row.claimed_at, "claimed time");
+    result.claimedAt = row.claimed_at;
+  }
+  if (row.delivery_turn_id != null) {
+    result.deliveryTurnId = delegatedResultIdentifier(row.delivery_turn_id, "delivery turn id");
+    assertDelegatedTimestamp(row.delivered_at, "delivered time");
+    result.deliveredAt = row.delivered_at;
+  }
+  return result;
 }
 
 function sessionScopeColumns(scope: SessionScope): {
