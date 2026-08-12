@@ -115,12 +115,18 @@ but it does not create a fake turn, acknowledge the task, or consume Result
 Inbox. The next ordinary utterance can therefore refer to the same result (for
 example, “第二条为什么？”) through the canonical Main-turn delivery path.
 
-The first durable initiative slice is one explicit application-return reminder.
-Kernel atomically creates its standing mandate, TaskTruth, and ContextWatch;
-only post-creation observations can move it from waiting to armed, and the
-first later return atomically fires its result once. Clicky projects the typed
-waiting/armed/fired state and reuses the same quiet-window return surface. This
-does not claim a general scheduler or checkpoint resume.
+The current initiative slice has two one-shot reminders: an explicit
+application-return reminder that arms only after a post-creation departure and
+fires once on the first later return, and an explicit relative reminder such as
+“20 minutes from now remind me to drink water” (1–1440 minutes or 1–24 hours).
+The latter delegates timing, sleep, exit, and restart delivery to one system
+notification; an undecided first permission only prompts and reports that it is
+not set, while success requires an exact read-back of the pending notification.
+Foreground delivery completes immediately, then speaks once after the quiet
+window without losing the reminder across conversations; clicking history or
+interrupting with PTT does not replay it. Unknown outcomes are never retried,
+and absolute dates, repeats, list/edit/delete, and general scheduling remain
+out of scope.
 
 Recent context is a scoped, in-memory evidence trail. Clicky samples metadata
 about every five seconds; every append/query carries an exact SessionScope,

@@ -113,11 +113,22 @@ const createNoteComputerActionSchema = z.object({
   targetBundleId: z.literal("com.apple.Notes"),
 });
 
+/** One system-owned relative reminder. The body travels only to macOS. */
+const scheduleReminderComputerActionSchema = z.object({
+  action: z.literal("schedule_reminder"),
+  x: z.literal(0),
+  y: z.literal(0),
+  reminderId: z.string().uuid(),
+  delaySeconds: z.number().int().min(60).max(86_400),
+  body: z.string().trim().min(1).max(500),
+});
+
 export const computerActionSchema = z.discriminatedUnion("action", [
   leftClickComputerActionSchema,
   finderHistoryBackComputerActionSchema,
   setTextComputerActionSchema,
   createNoteComputerActionSchema,
+  scheduleReminderComputerActionSchema,
 ]);
 
 /**
@@ -153,6 +164,9 @@ export const computerActionMethodSchema = z.enum(COMPUTER_ACTION_METHODS);
  */
 export const COMPUTER_ACTION_RESULT_CODES = [
   "permission_denied",
+  "notification_permission_pending",
+  "notification_permission_denied",
+  "notification_schedule_failed",
   "screen_unavailable",
   "target_out_of_bounds",
   "ax_lookup_failed",
@@ -169,6 +183,7 @@ export const COMPUTER_ACTION_RESULT_CODES = [
   "quartz_event_creation_failed",
   "quartz_unverified",
   "verified_accessibility",
+  "verified_system_notification",
   "verified_screen",
   "direct_action_already_attempted",
   "action_limit_reached",
@@ -199,6 +214,7 @@ export const computerActionRequestedPayloadSchema = z.discriminatedUnion("action
   finderHistoryBackComputerActionSchema.extend(computerActionRequestMetadata),
   setTextComputerActionSchema.extend(computerActionRequestMetadata),
   createNoteComputerActionSchema.extend(computerActionRequestMetadata),
+  scheduleReminderComputerActionSchema.extend(computerActionRequestMetadata),
 ]);
 
 export const computerActionResultPayloadSchema = z.object({

@@ -10,6 +10,7 @@
 import Darwin
 import ServiceManagement
 import SwiftUI
+import UserNotifications
 
 @main
 struct leanring_buddyApp: App {
@@ -28,7 +29,7 @@ struct leanring_buddyApp: App {
 /// Manages the companion lifecycle: creates the menu bar panel and starts
 /// the companion voice pipeline on launch.
 @MainActor
-final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
+final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
     private let companionManager = CompanionManager()
     private let singleInstance = YishuSingleInstanceLock()
@@ -54,6 +55,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         ClickyAnalytics.configure()
         ClickyAnalytics.trackAppOpened()
+        UNUserNotificationCenter.current().delegate = self
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
@@ -67,6 +69,35 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         companionManager.stop()
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+        let content = notification.request.content
+        guard content.userInfo["kind"] as? String == "yishu_time_reminder",
+              let identifier = content.userInfo["reminderId"] as? String,
+              identifier == notification.request.identifier else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            self?.companionManager.enqueueTimeReminderReturn(
+                identifier: identifier,
+                body: content.body
+            )
+        }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        // Opening an old banner is never a reason to speak it again.
+        completionHandler()
     }
 
     /// Registers the app as a login item so it launches automatically on

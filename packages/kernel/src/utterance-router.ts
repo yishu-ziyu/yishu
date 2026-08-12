@@ -12,7 +12,8 @@ export type ProductActionName =
   | "run_skill"
   | "watch_app_return"
   | "finder_history_back"
-  | "create_note";
+  | "create_note"
+  | "schedule_time_reminder";
 
 export interface ProductUtteranceRoute {
   action: ProductActionName;
@@ -31,6 +32,15 @@ export function routeProductUtterance(
   const text = utterance.trim();
   if (text.length === 0) return null;
   const lower = text.toLowerCase();
+
+  const timeReminder = parseRelativeTimeReminder(text);
+  if (timeReminder) {
+    return {
+      action: "schedule_time_reminder",
+      input: timeReminder,
+      confidence: 0.99,
+    };
+  }
 
   const note = parseCreateNote(text);
   if (note) {
@@ -186,6 +196,20 @@ export function formatProductActionSpeech(
   status: string,
   output: unknown,
 ): string {
+  if (action === "schedule_time_reminder") {
+    const result = output as { succeeded?: boolean; verified?: boolean; code?: string } | null;
+    if (result?.verified) return "已经设好提醒。";
+    if (result?.code === "notification_permission_pending") {
+      return "还没有设置，请允许后再说一次。";
+    }
+    if (result?.code === "notification_permission_denied") {
+      return "系统提醒权限没有允许，所以这次没有设置。";
+    }
+    if (result?.succeeded) {
+      return "提醒可能已经设好，但我没能确认；我不会重复设置。";
+    }
+    return "这次没有设置提醒。";
+  }
   if (action === "create_note") {
     const result = output as { succeeded?: boolean; verified?: boolean } | null;
     if (result?.verified) return "已新建并确认一条备忘录。";
@@ -288,6 +312,32 @@ export function formatProductActionSpeech(
     default:
       return "好，处理好了。";
   }
+}
+
+function parseRelativeTimeReminder(
+  text: string,
+): { delaySeconds: number; body: string } | null {
+  if (
+    /[？?]\s*$/u.test(text)
+    || /(?:好吗|行吗|可以吗|能吗|吗|么|嘛)\s*[。！!]?\s*$/u.test(text)
+  ) return null;
+  const match = text.match(
+    /^(?:奕枢[，,\s]*)?(?:请\s*)?(?:在\s*)?(\d{1,4})\s*(分钟|分|小时|时)\s*后\s*提醒我\s*(.{1,500}?)[。！!\s]*$/u,
+  );
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = match[2];
+  const body = match[3]?.trim() ?? "";
+  const isMinutes = unit === "分钟" || unit === "分";
+  if (!Number.isInteger(amount)
+    || (isMinutes && (amount < 1 || amount > 1_440))
+    || (!isMinutes && (amount < 1 || amount > 24))
+    || body.length === 0
+    || /^(?:不要|别|不用|无需)/u.test(body)
+    || /^(?:一下|这件事|这个|那个|到时候|别忘了|提醒)$/u.test(body)) {
+    return null;
+  }
+  return { delaySeconds: amount * (isMinutes ? 60 : 3_600), body };
 }
 
 function parseCreateNote(text: string): { content: string; title: string } | null {

@@ -131,6 +131,36 @@ export interface CreateNoteExecutor {
   ): Promise<CreateNoteResult>;
 }
 
+/** One system-owned, one-shot relative reminder. No product-side timer exists. */
+export interface ScheduleTimeReminderRequest {
+  reminderId: string;
+  delaySeconds: number;
+  body: string;
+  intentId: string;
+  attemptId: string;
+  basisFrameId: string;
+}
+
+/** Content-free receipt returned after macOS reads back the pending notification. */
+export interface ScheduleTimeReminderResult {
+  succeeded: boolean;
+  verified: boolean;
+  message: string;
+  status?: string;
+  code?: string;
+  method?: string;
+  receiptId?: string;
+  attemptId?: string;
+}
+
+/** Narrow host capability injected only for the one-shot reminder action. */
+export interface ScheduleTimeReminderExecutor {
+  perform(
+    request: ScheduleTimeReminderRequest,
+    signal?: AbortSignal,
+  ): Promise<ScheduleTimeReminderResult>;
+}
+
 /** Post-run observation of the visible or external effect. */
 export interface ActionVerification {
   verified: boolean;
@@ -287,6 +317,7 @@ export interface ActionInvokeDeps {
   mandates?: StandingMandate[];
   finderHistoryBack?: FinderHistoryBackExecutor;
   createNote?: CreateNoteExecutor;
+  scheduleTimeReminder?: ScheduleTimeReminderExecutor;
 }
 
 /** Result of authority evaluation before `run`. */

@@ -26,6 +26,13 @@ enum YishuComputerUseActuator {
         _ authorizationFence: AuthorizationFence
     ) async -> NotesExecutionOutcome
 
+    typealias TimeReminderExecutor = @MainActor (
+        _ reminderId: String,
+        _ body: String,
+        _ delaySeconds: Int,
+        _ authorizationFence: AuthorizationFence
+    ) async -> YishuTimeReminderScheduleOutcome
+
     /// One reusable commit point for AXSet/AXPress/CGEvent. Keeping the fence
     /// adjacent to the irreversible call makes cancellation testable without
     /// manufacturing real Accessibility elements in unit tests.
@@ -765,7 +772,8 @@ enum YishuComputerUseActuator {
         _ request: YishuComputerActionRequest,
         screenCaptures: [CompanionScreenCapture],
         authorizationFence: @escaping AuthorizationFence = { true },
-        notesExecutor: NotesExecutor? = nil
+        notesExecutor: NotesExecutor? = nil,
+        timeReminderExecutor: TimeReminderExecutor? = nil
     ) async -> YishuComputerActionResult {
         let receiptId = UUID().uuidString
         let attemptId = request.attemptId ?? UUID().uuidString
@@ -776,6 +784,22 @@ enum YishuComputerUseActuator {
                 attemptId: attemptId,
                 authorizationFence: authorizationFence,
                 notesExecutor: notesExecutor ?? executeNotesCreate
+            )
+        }
+        if request.action == "schedule_reminder" {
+            return await performScheduleReminder(
+                request,
+                receiptId: receiptId,
+                attemptId: attemptId,
+                authorizationFence: authorizationFence,
+                executor: timeReminderExecutor ?? { reminderId, body, delaySeconds, fence in
+                    await YishuTimeReminderDelivery.schedule(
+                        reminderId: reminderId,
+                        body: body,
+                        delaySeconds: delaySeconds,
+                        authorizationFence: fence
+                    )
+                }
             )
         }
         if request.action == "finder_history_back" {
@@ -1044,6 +1068,95 @@ enum YishuComputerUseActuator {
                 succeeded: true,
                 verified: false,
                 message: "Note creation timed out after submission.",
+                evidence: "method=native_command;code=timeout;submitted=true;readback=unknown",
+                status: .unverified,
+                method: .nativeCommand,
+                code: .timeout,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+    }
+
+    private static func performScheduleReminder(
+        _ request: YishuComputerActionRequest,
+        receiptId: String,
+        attemptId: String,
+        authorizationFence: @escaping AuthorizationFence,
+        executor: TimeReminderExecutor
+    ) async -> YishuComputerActionResult {
+        guard request.effectClass == "schedule",
+              request.intentId.flatMap(UUID.init(uuidString:)) != nil,
+              request.attemptId.flatMap(UUID.init(uuidString:)) != nil,
+              request.basisFrameId.flatMap(UUID.init(uuidString:)) != nil,
+              let reminderId = request.reminderId,
+              UUID(uuidString: reminderId) != nil,
+              let body = request.reminderBody,
+              (1...500).contains(body.count),
+              let delaySeconds = request.delaySeconds,
+              (60...86_400).contains(delaySeconds) else {
+            return failed(
+                "The reminder request is incomplete.",
+                code: .notificationScheduleFailed,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+
+        switch await executor(reminderId, body, delaySeconds, authorizationFence) {
+        case .verified:
+            return YishuComputerActionResult(
+                succeeded: true,
+                verified: true,
+                message: "The system reminder was verified.",
+                evidence: "method=native_command;code=verified_system_notification;readback=exact",
+                status: .verified,
+                method: .nativeCommand,
+                code: .verifiedSystemNotification,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .permissionPending:
+            return YishuComputerActionResult(
+                succeeded: false,
+                verified: false,
+                message: "还没设置提醒权限，请允许后再说一次。",
+                evidence: "method=native_command;code=notification_permission_pending;submitted=false",
+                status: .blocked,
+                method: .nativeCommand,
+                code: .notificationPermissionPending,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .permissionDenied:
+            return YishuComputerActionResult(
+                succeeded: false,
+                verified: false,
+                message: "提醒权限没有打开。",
+                evidence: "method=native_command;code=notification_permission_denied;submitted=false",
+                status: .blocked,
+                method: .nativeCommand,
+                code: .notificationPermissionDenied,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .failedBeforeSubmission:
+            return YishuComputerActionResult(
+                succeeded: false,
+                verified: false,
+                message: "这次没有设置提醒。",
+                evidence: "method=native_command;code=notification_schedule_failed;submitted=false",
+                status: .failed,
+                method: .nativeCommand,
+                code: .notificationScheduleFailed,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .unknownAfterSubmission:
+            return YishuComputerActionResult(
+                succeeded: true,
+                verified: false,
+                message: "提醒可能已经交给系统，但我还不能确认；我不会重复设置。",
                 evidence: "method=native_command;code=timeout;submitted=true;readback=unknown",
                 status: .unverified,
                 method: .nativeCommand,
