@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: 4b1e3b1 2026-08-12
+Verified: c268654 2026-08-13
 Review: Pi SDK 版本、九阶段产品规则、Runtime 工厂、Kernel 真相边界或 AgentCore 定位变化时
 
 ## 结论
