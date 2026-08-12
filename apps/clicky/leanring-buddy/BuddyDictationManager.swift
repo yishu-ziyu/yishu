@@ -568,6 +568,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
         let finalTranscriptFallbackDelaySeconds = activeTranscriptionSession?.finalTranscriptFallbackDelaySeconds
             ?? Self.defaultFinalTranscriptFallbackDelaySeconds
+        let expectedToken = activeTranscriptionToken
 
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
@@ -586,14 +587,17 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let shouldSubmitFinalDraftWhenFallbackTriggers = shouldAutomaticallySubmitFinalDraft
         let fallbackWorkItem = DispatchWorkItem { [weak self] in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      let expectedToken,
+                      self.activeTranscriptionToken == expectedToken else { return }
                 if isHybridTurn, let hybridToken {
                     self.applyHybridEffects(self.hybridStateMachine.reduce(
                         .timeout(token: hybridToken, sequence: self.nextTranscriptionSequence())
                     ))
                 } else {
                     self.finishCurrentDictationSessionIfNeeded(
-                        shouldSubmitFinalDraft: shouldSubmitFinalDraftWhenFallbackTriggers
+                        shouldSubmitFinalDraft: shouldSubmitFinalDraftWhenFallbackTriggers,
+                        expectedToken: expectedToken
                     )
                 }
             }
@@ -670,24 +674,27 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 keyterms: buildTranscriptionKeyterms(),
                 onTranscriptUpdate: { [weak self] transcriptText in
                     Task { @MainActor in
-                        self?.latestRecognizedText = transcriptText
+                        guard let self, self.activeTranscriptionToken == token else { return }
+                        self.latestRecognizedText = transcriptText
                     }
                 },
                 onFinalTranscriptReady: { [weak self] transcriptText in
                     Task { @MainActor in
-                        guard let self else { return }
+                        guard let self, self.activeTranscriptionToken == token else { return }
                         self.latestRecognizedText = transcriptText
 
                         if self.isFinalizingTranscript {
                             self.finishCurrentDictationSessionIfNeeded(
-                                shouldSubmitFinalDraft: self.shouldAutomaticallySubmitFinalDraft
+                                shouldSubmitFinalDraft: self.shouldAutomaticallySubmitFinalDraft,
+                                expectedToken: token
                             )
                         }
                     }
                 },
                 onError: { [weak self] error in
                     Task { @MainActor in
-                        self?.handleRecognitionError(error)
+                        guard let self, self.activeTranscriptionToken == token else { return }
+                        self.handleRecognitionError(error, token: token)
                     }
                 }
             )
@@ -700,23 +707,34 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            self?.activeTranscriptionSession?.appendAudioBuffer(buffer)
-            self?.updateAudioPowerLevel(from: buffer)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self, weak activeTranscriptionSession] buffer, _ in
+            // Preserve render-callback order through the provider's own
+            // serial queue. Deferring audio itself to MainActor lets release
+            // request a final transcript before the last queued buffer lands.
+            activeTranscriptionSession?.appendAudioBuffer(buffer)
+            Task { @MainActor [weak self] in
+                guard let self, self.activeTranscriptionToken == token else { return }
+                self.updateAudioPowerLevel(from: buffer)
+            }
         }
 
         audioEngine.prepare()
         try audioEngine.start()
     }
 
-    private func handleRecognitionError(_ error: Error) {
-        if hasFinishedCurrentDictationSession {
+    private func handleRecognitionError(
+        _ error: Error,
+        token: BuddyTranscriptionSessionToken
+    ) {
+        guard activeTranscriptionToken == token,
+              !hasFinishedCurrentDictationSession else {
             return
         }
 
         if isFinalizingTranscript && !latestRecognizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             finishCurrentDictationSessionIfNeeded(
-                shouldSubmitFinalDraft: shouldAutomaticallySubmitFinalDraft
+                shouldSubmitFinalDraft: shouldAutomaticallySubmitFinalDraft,
+                expectedToken: token
             )
         } else {
             print("❌ Buddy dictation error (\(transcriptionProvider.displayName)): \(error)")
@@ -775,7 +793,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 finishCurrentDictationSessionIfNeeded(
                     shouldSubmitFinalDraft: shouldAutomaticallySubmitFinalDraft,
                     finalTranscriptOverride: text,
-                    finalSource: source
+                    finalSource: source,
+                    expectedToken: activeTranscriptionToken
                 )
             case .armFinalTimeout:
                 break
@@ -796,7 +815,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                         authoritativeText: latestAuthoritativeTranscriptText,
                         shadowPartialText: latestShadowPartialText
                     ),
-                    finalSource: .legacyBuffered
+                    finalSource: .legacyBuffered,
+                    expectedToken: activeTranscriptionToken
                 )
             case .drop:
                 break
@@ -807,9 +827,12 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private func finishCurrentDictationSessionIfNeeded(
         shouldSubmitFinalDraft: Bool,
         finalTranscriptOverride: String? = nil,
-        finalSource: BuddyHybridTranscriptionSource? = nil
+        finalSource: BuddyHybridTranscriptionSource? = nil,
+        expectedToken: BuddyTranscriptionSessionToken?
     ) {
-        guard !hasFinishedCurrentDictationSession else { return }
+        guard let expectedToken,
+              activeTranscriptionToken == expectedToken,
+              !hasFinishedCurrentDictationSession else { return }
         hasFinishedCurrentDictationSession = true
 
         finalizeFallbackWorkItem?.cancel()

@@ -459,6 +459,13 @@ lineReader.on("line", (line) => {
 
   const operation = command.type === "turn.start"
     ? runtime.startTurn(command, emit)
+    : command.type === "turn.interrupt"
+      ? runtime.interruptTurn?.(command, emit) ?? Promise.resolve(emit(runtimeEvent(
+          "turn.interrupt.rejected",
+          command.requestId,
+          command.traceId,
+          { generation: command.payload.expectedGeneration, code: "unsupported" },
+        )))
     : command.type === "turn.steer"
       ? runtime.steerTurn(command, emit)
       : runtime.cancelTurn(command, emit);

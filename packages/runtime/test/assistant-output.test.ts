@@ -1,10 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AssistantOutputGenerationProjector,
   AssistantOutputStreamProjector,
   isDirectComputerActionUtterance,
   projectAssistantOutput,
 } from "../src/assistant-output.js";
+
+test("generation projector makes an interrupted assistant permanently stale", () => {
+  const projector = new AssistantOutputGenerationProjector();
+  const oldGeneration = projector.beginGeneration();
+  assert.equal(projector.push(oldGeneration, "旧回答半句"), "旧回答半句");
+
+  const interrupted = projector.interruptGeneration(oldGeneration);
+  assert.deepEqual(interrupted, { interruptedGeneration: 1, nextGeneration: 2 });
+  assert.equal(projector.push(oldGeneration, "迟到的旧半句。"), "");
+  assert.equal(projector.complete(oldGeneration).stale, true);
+
+  const newGeneration = projector.beginGeneration();
+  assert.equal(newGeneration, 2);
+  assert.equal(projector.push(newGeneration, "新回答。"), "新回答。");
+  assert.deepEqual(projector.complete(newGeneration), {
+    generation: 2,
+    visibleText: "新回答。",
+    computerActions: [],
+    visibleDelta: "",
+    rawText: "新回答。",
+    stale: false,
+  });
+});
 
 const capturedClickLeak = [
   "看到了，侧边栏里『调整 sub agent 为 Luna Max』旁边在转圈，我点过去。",

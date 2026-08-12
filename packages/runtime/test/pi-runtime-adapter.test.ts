@@ -49,7 +49,16 @@ function deferred<T = void>(): Deferred<T> {
 
 type FakeSessionEvent = {
   type: string;
+  message?: {
+    role: string;
+    timestamp: number;
+    responseId?: string;
+    provider?: string;
+    model?: string;
+    content?: string | Array<{ type: "text"; text: string }>;
+  };
   assistantMessageEvent?: { type: string; delta?: string };
+  toolCallId?: string;
   toolName?: string;
   isError?: boolean;
 };
@@ -63,14 +72,22 @@ class FakeAgentSession {
   readonly sessionId = `fake-pi-session-${++FakeAgentSession.nextId}`;
   readonly agent: { state: { errorMessage?: string } } = { state: {} };
   readonly prompts: { text: string; images: unknown[] }[] = [];
+  readonly steers: string[] = [];
   readonly promptStarted = deferred();
+  preflightAccepted = true;
+  preflightBarrier?: Promise<void>;
   abortCount = 0;
   abortBarrier?: Promise<void>;
   disposed = false;
   disposeCount = 0;
-  promptHandler: (session: FakeAgentSession) => Promise<void> = async (session) => {
+  promptHandler: (session: FakeAgentSession, text: string) => Promise<void> = async (session) => {
     session.emitTextDelta("收到。");
   };
+  steerHandler: (session: FakeAgentSession, text: string) => Promise<void> = async () => {};
+  queuedSteerHandler?: (session: FakeAgentSession, text: string) => Promise<void>;
+  afterPromptSettled?: (session: FakeAgentSession, text: string) => Promise<void>;
+  isStreaming = false;
+  private readonly pendingSteers: string[] = [];
   private readonly abortGate = deferred();
   private readonly listeners = new Set<(event: FakeSessionEvent) => void>();
 
@@ -87,24 +104,69 @@ class FakeAgentSession {
     }
   }
 
-  emitTextDelta(delta: string): void {
+  emitTextDelta(delta: string, message?: FakeSessionEvent["message"]): void {
     this.emitSessionEvent({
       type: "message_update",
+      ...(message === undefined ? {} : { message }),
       assistantMessageEvent: { type: "text_delta", delta },
     });
+  }
+
+  emitMessageStart(message: NonNullable<FakeSessionEvent["message"]>): void {
+    this.emitSessionEvent({ type: "message_start", message });
+  }
+
+  emitMessageEnd(message: NonNullable<FakeSessionEvent["message"]>): void {
+    this.emitSessionEvent({ type: "message_end", message });
+  }
+
+  emitTurnEnd(message: NonNullable<FakeSessionEvent["message"]>): void {
+    this.emitSessionEvent({ type: "turn_end", message });
   }
 
   waitUntilAborted(): Promise<void> {
     return this.abortGate.promise;
   }
 
-  async prompt(text: string, options?: { images?: unknown[] }): Promise<void> {
+  async prompt(
+    text: string,
+    options?: {
+      images?: unknown[];
+      streamingBehavior?: "steer" | "followUp";
+      preflightResult?: (accepted: boolean) => void;
+    },
+  ): Promise<void> {
     this.prompts.push({ text, images: options?.images ?? [] });
     this.promptStarted.resolve();
-    await this.promptHandler(this);
+    await this.preflightBarrier;
+    options?.preflightResult?.(this.preflightAccepted);
+    if (!this.preflightAccepted) {
+      throw new Error("Fake Pi prompt preflight rejected.");
+    }
+    if (this.isStreaming) {
+      this.steers.push(text);
+      this.pendingSteers.push(text);
+      await this.steerHandler(this, text);
+      return;
+    }
+    this.isStreaming = true;
+    try {
+      await this.promptHandler(this, text);
+      for (let queuedText = this.pendingSteers.shift(); queuedText !== undefined; queuedText = this.pendingSteers.shift()) {
+        const queued = this.queuedSteerHandler;
+        if (queued !== undefined) await queued(this, queuedText);
+        else await this.promptHandler(this, queuedText);
+      }
+    } finally {
+      this.isStreaming = false;
+    }
+    await this.afterPromptSettled?.(this, text);
   }
 
-  async steer(): Promise<void> {}
+  async steer(text: string): Promise<void> {
+    this.steers.push(text);
+    await this.steerHandler(this, text);
+  }
 
   async abort(): Promise<void> {
     this.abortCount += 1;
@@ -151,6 +213,7 @@ function createFakePiHarness(): FakePiHarness {
     }),
     adapterOptions: {
       modelRuntimePromise: Promise.resolve(modelRuntime as unknown as ModelRuntime),
+      interruptionSteerTimeoutMs: 100,
       createSession: (async (options: { customTools?: FakeTool[] }) => {
         const session = new FakeAgentSession();
         sessions.push(session);
@@ -194,6 +257,59 @@ function makeCommand(utterance?: string, conversationId?: string): TurnStartComm
   if (utterance !== undefined) command.payload.utterance = utterance;
   if (conversationId !== undefined) command.payload.conversationId = conversationId;
   return command;
+}
+
+function makeInterruptCommand(command: TurnStartCommand, expectedGeneration: number) {
+  return {
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.interrupt" as const,
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { expectedGeneration, reason: "user_barge_in" as const },
+  };
+}
+
+function makeSteerCommand(
+  command: TurnStartCommand,
+  message: string,
+  nextGeneration: number,
+) {
+  return {
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.steer" as const,
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      message,
+      nextGeneration,
+      interactionClass: "conversation" as const,
+    },
+  };
+}
+
+function makeCancelCommand(command: TurnStartCommand) {
+  return {
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel" as const,
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  };
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  label: string,
+  attempts = 100,
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Timed out waiting for ${label}.`);
 }
 
 function eventTypes(events: readonly RuntimeEvent[]): string[] {
@@ -252,6 +368,567 @@ test("startTurn prompts with grounded text and streams deltas to completion", as
   assert.equal(completed.payload.verified, false);
   assert.equal(completed.payload.verifier, "conversation-response-only");
   assert.ok(!events.some((event) => event.type === "turn.failed"));
+});
+
+test("barge-in suppresses stale output and completes only the replacement generation", async (t) => {
+  const harness = createFakePiHarness();
+  const oldTurnRelease = deferred();
+  const oldHalfEmitted = deferred();
+  const oldAssistant = {
+    role: "assistant",
+    timestamp: 1,
+    responseId: "old",
+    provider: LOCAL_GROK_PROVIDER,
+    model: "grok-4.5",
+    content: [{ type: "text" as const, text: "旧半句" }],
+  };
+  harness.configureSession = (session) => {
+    const emitReplacement = async (current: FakeAgentSession) => {
+      const user = {
+        role: "user",
+        timestamp: 2,
+        content: [{ type: "text" as const, text: "请改讲新答案" }],
+      };
+      const replacement = {
+        role: "assistant",
+        timestamp: 3,
+        responseId: "replacement",
+        provider: LOCAL_GROK_PROVIDER,
+        model: "grok-4.5",
+        content: [{ type: "text" as const, text: "新答案。" }],
+      };
+      current.emitMessageStart(user);
+      current.emitMessageStart(replacement);
+      current.emitTextDelta("新答案。", replacement);
+      current.emitTurnEnd(replacement);
+    };
+    session.queuedSteerHandler = emitReplacement;
+    session.promptHandler = async (current, text) => {
+      if (text === "请改讲新答案") {
+        await emitReplacement(current);
+        return;
+      }
+      current.emitMessageStart(oldAssistant);
+      current.emitTextDelta("旧半句", oldAssistant);
+      oldHalfEmitted.resolve();
+      await oldTurnRelease.promise;
+      current.emitTextDelta("迟到旧文。", oldAssistant);
+      current.emitTurnEnd(oldAssistant);
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const command = makeCommand();
+  const events: RuntimeEvent[] = [];
+  const turn = adapter.startTurn(command, (event) => events.push(event));
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+  await oldHalfEmitted.promise;
+
+  await adapter.interruptTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.interrupt",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { expectedGeneration: 1, reason: "user_barge_in" },
+  }, (event) => events.push(event));
+  const steer = adapter.steerTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.steer",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      message: "请改讲新答案",
+      nextGeneration: 2,
+      interactionClass: "conversation",
+    },
+  }, (event) => events.push(event));
+  oldTurnRelease.resolve();
+  await Promise.all([steer, turn]);
+
+  const emittedText = events
+    .filter((event) => event.type === "response.delta")
+    .map((event) => String(event.payload.text))
+    .join("");
+  assert.equal(emittedText, "旧半句新答案。");
+  const completion = events.find((event) => event.type === "response.completed");
+  assert.equal(completion?.payload.text, "新答案。");
+  assert.equal(completion?.payload.generation, 2);
+  assert.equal(session.prompts.length, 2, "replacement input is admitted exactly once");
+  assert.equal(session.prompts[1]?.text, "请改讲新答案");
+  assert.equal(
+    session.prompts.filter((prompt) => prompt.text === "请改讲新答案").length,
+    1,
+    "replacement transcript reaches Pi exactly once whether the old run is active or idle",
+  );
+  assert.ok(events.some((event) => event.type === "turn.interrupt.accepted"));
+});
+
+test("two barge-ins before the first replacement token complete only generation three", async (t) => {
+  const harness = createFakePiHarness();
+  const releaseInitial = deferred();
+  const releaseGenerationTwo = deferred();
+  const generationTwoUserSeen = deferred();
+  const assistant = (generation: number, text: string) => ({
+    role: "assistant",
+    timestamp: generation,
+    responseId: `response-${generation}`,
+    provider: LOCAL_GROK_PROVIDER,
+    model: "grok-4.5",
+    content: [{ type: "text" as const, text }],
+  });
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current, text) => {
+      if (text === "第二个问题") {
+        current.emitMessageStart({
+          role: "user",
+          timestamp: 2,
+          content: [{ type: "text", text }],
+        });
+        generationTwoUserSeen.resolve();
+        await releaseGenerationTwo.promise;
+        const message = assistant(2, "第二代旧答案");
+        current.emitMessageStart(message);
+        current.emitTextDelta("第二代旧答案", message);
+        current.emitMessageEnd(message);
+        current.emitTurnEnd(message);
+        return;
+      }
+      if (text === "最终问题") {
+        current.emitMessageStart({
+          role: "user",
+          timestamp: 3,
+          content: [{ type: "text", text }],
+        });
+        const message = assistant(3, "最终答案。");
+        current.emitMessageStart(message);
+        current.emitTextDelta("最终答案。", message);
+        current.emitMessageEnd(message);
+        current.emitTurnEnd(message);
+        return;
+      }
+      const message = assistant(1, "第一代旧答案");
+      current.emitMessageStart(message);
+      current.emitTextDelta("第一代", message);
+      await releaseInitial.promise;
+      current.emitTextDelta("迟到旧答案", message);
+      current.emitMessageEnd(message);
+      current.emitTurnEnd(message);
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const command = makeCommand();
+  const events: RuntimeEvent[] = [];
+  const turn = adapter.startTurn(command, (event) => events.push(event));
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+
+  await adapter.interruptTurn(makeInterruptCommand(command, 1), (event) => events.push(event));
+  await adapter.steerTurn(makeSteerCommand(command, "第二个问题", 2), (event) => events.push(event));
+  releaseInitial.resolve();
+  await generationTwoUserSeen.promise;
+
+  // Generation two is already the Product-owned target, but Pi has not
+  // started its assistant message. A second PTT interruption must still win.
+  await adapter.interruptTurn(makeInterruptCommand(command, 2), (event) => events.push(event));
+  await adapter.steerTurn(makeSteerCommand(command, "最终问题", 3), (event) => events.push(event));
+  releaseGenerationTwo.resolve();
+  await turn;
+
+  const accepted = events.filter((event) => event.type === "turn.interrupt.accepted");
+  assert.deepEqual(accepted.map((event) => event.payload), [
+    { interruptedGeneration: 1, nextGeneration: 2 },
+    { interruptedGeneration: 2, nextGeneration: 3 },
+  ]);
+  assert.equal(
+    events.filter((event) => event.type === "response.delta" && event.payload.generation === 2).length,
+    0,
+    "generation two stays silent after its pre-token interruption",
+  );
+  const completions = events.filter((event) => event.type === "response.completed");
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0]?.payload.generation, 3);
+  assert.equal(completions[0]?.payload.text, "最终答案。");
+  assert.equal(events.some((event) => event.type === "turn.failed"), false);
+  assert.equal(session.prompts.filter((prompt) => prompt.text === "第二个问题").length, 1);
+  assert.equal(session.prompts.filter((prompt) => prompt.text === "最终问题").length, 1);
+});
+
+test("same-text barge-in before the first assistant start never relabels the old reply", async (t) => {
+  const harness = createFakePiHarness();
+  const releaseOriginal = deferred();
+  const utterance = "继续说";
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current, text) => {
+      if (text === utterance) {
+        current.emitMessageStart({
+          role: "user",
+          timestamp: 1,
+          content: [{ type: "text", text: utterance }],
+        });
+        const replacement = {
+          role: "assistant",
+          timestamp: 1,
+          provider: LOCAL_GROK_PROVIDER,
+          model: "grok-4.5",
+        };
+        current.emitMessageStart(replacement);
+        current.emitTextDelta("新回答。", replacement);
+        current.emitMessageEnd(replacement);
+        current.emitTurnEnd(replacement);
+        return;
+      }
+      await releaseOriginal.promise;
+      // Pi can surface the original user message after the interrupt. Its raw
+      // text is intentionally identical to B and must consume only the initial
+      // prompt boundary, never arm generation two.
+      current.emitMessageStart({
+        role: "user",
+        timestamp: 1,
+        content: [{ type: "text", text: utterance }],
+      });
+      const old = {
+        role: "assistant",
+        timestamp: 1,
+        provider: LOCAL_GROK_PROVIDER,
+        model: "grok-4.5",
+      };
+      current.emitMessageStart(old);
+      current.emitTextDelta("旧回答。", old);
+      current.emitMessageEnd(old);
+      current.emitTurnEnd(old);
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const command = makeCommand(utterance);
+  const events: RuntimeEvent[] = [];
+  const turn = adapter.startTurn(command, (event) => events.push(event));
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+  await adapter.interruptTurn(makeInterruptCommand(command, 1), (event) => events.push(event));
+  await adapter.steerTurn(makeSteerCommand(command, utterance, 2), (event) => events.push(event));
+  releaseOriginal.resolve();
+  await turn;
+
+  assert.equal(
+    events.filter((event) => event.type === "response.delta" && event.payload.generation === 1).length,
+    0,
+  );
+  const completion = events.find((event) => event.type === "response.completed");
+  assert.equal(completion?.payload.generation, 2);
+  assert.equal(completion?.payload.text, "新回答。");
+  assert.equal(session.prompts.filter((prompt) => prompt.text === utterance).length, 1);
+});
+
+test("a replacement provider operation is bounded by the interruption deadline", async (t) => {
+  const harness = createFakePiHarness();
+  const releaseInitial = deferred();
+  const never = deferred();
+  harness.configureSession = (session) => {
+    session.steerHandler = async () => {
+      await never.promise;
+    };
+    session.promptHandler = async (current, text) => {
+      current.emitMessageStart({
+        role: "assistant",
+        timestamp: 1,
+        responseId: "bounded-old",
+        provider: LOCAL_GROK_PROVIDER,
+        model: "grok-4.5",
+      });
+      await releaseInitial.promise;
+      current.emitTurnEnd({
+        role: "assistant",
+        timestamp: 1,
+        responseId: "bounded-old",
+        provider: LOCAL_GROK_PROVIDER,
+        model: "grok-4.5",
+      });
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const command = makeCommand();
+  const events: RuntimeEvent[] = [];
+  const startedAt = Date.now();
+  const turn = adapter.startTurn(command, (event) => events.push(event));
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+  await adapter.interruptTurn(makeInterruptCommand(command, 1), (event) => events.push(event));
+  await adapter.steerTurn(makeSteerCommand(command, "不会完成", 2), (event) => events.push(event));
+  releaseInitial.resolve();
+  await turn;
+
+  assert.ok(Date.now() - startedAt < 1_000, "test timeout seam must keep the race bounded");
+  const failed = events.find((event) => event.type === "turn.failed");
+  assert.ok(failed);
+  assert.equal(failed.payload.code, "steer_replacement_failed_before_start");
+  assert.equal(failed.payload.generation, 2);
+  assert.equal(events.some((event) => event.type === "response.completed"), false);
+});
+
+test("an idle replacement provider failure is recoverable only before assistant start", async (t) => {
+  for (const assistantStarted of [false, true]) {
+    const harness = createFakePiHarness();
+    const initialProviderSettled = deferred();
+    const releaseInitialPrompt = deferred();
+    harness.configureSession = (session) => {
+      session.afterPromptSettled = async (_current, text) => {
+        if (text.includes("<user_utterance>")) {
+          initialProviderSettled.resolve();
+          await releaseInitialPrompt.promise;
+        }
+      };
+      session.promptHandler = async (current, text) => {
+        if (text === "恢复这句话") {
+          current.emitMessageStart({
+            role: "user",
+            timestamp: 2,
+            content: [{ type: "text", text }],
+          });
+          if (assistantStarted) {
+            current.emitMessageStart({
+              role: "assistant",
+              timestamp: 2,
+              responseId: "replacement-started",
+              provider: LOCAL_GROK_PROVIDER,
+              model: "grok-4.5",
+            });
+          }
+          throw new Error("provider down");
+        }
+        const original = {
+          role: "assistant",
+          timestamp: 1,
+          responseId: "idle-original",
+          provider: LOCAL_GROK_PROVIDER,
+          model: "grok-4.5",
+        };
+        current.emitMessageStart(original);
+        current.emitTextDelta("旧回答。", original);
+        current.emitMessageEnd(original);
+        current.emitTurnEnd(original);
+      };
+    };
+    const { adapter, workdir } = await makeAdapter(harness);
+    t.after(async () => {
+      await adapter.dispose();
+      await rm(workdir, { recursive: true, force: true });
+    });
+    const command = makeCommand();
+    const events: RuntimeEvent[] = [];
+    const turn = adapter.startTurn(command, (event) => events.push(event));
+    await harness.waitForNextSession();
+    await initialProviderSettled.promise;
+    await adapter.interruptTurn(makeInterruptCommand(command, 1), (event) => events.push(event));
+    await adapter.steerTurn(makeSteerCommand(command, "恢复这句话", 2), (event) => events.push(event));
+    releaseInitialPrompt.resolve();
+    await turn;
+
+    const failed = events.find((event) => event.type === "turn.failed");
+    assert.ok(failed);
+    assert.equal(
+      failed.payload.code,
+      assistantStarted ? "pi_turn_failed" : "steer_replacement_failed_before_start",
+    );
+    assert.equal(failed.payload.generation, 2);
+    assert.equal(
+      harness.sessions[0]!.prompts.filter((prompt) => prompt.text === "恢复这句话").length,
+      1,
+    );
+  }
+});
+
+test("an interrupted prompt rejected at Pi preflight fails without waiting for the steer timeout", async (t) => {
+  const harness = createFakePiHarness();
+  const releasePreflight = deferred();
+  harness.configureSession = (session) => {
+    session.preflightAccepted = false;
+    session.preflightBarrier = releasePreflight.promise;
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const command = makeCommand();
+  const events: RuntimeEvent[] = [];
+  const startedAt = Date.now();
+  const turn = adapter.startTurn(command, (event) => events.push(event));
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+  await adapter.interruptTurn(makeInterruptCommand(command, 1), (event) => events.push(event));
+  await adapter.steerTurn(makeSteerCommand(command, "不会进入模型", 2), (event) => events.push(event));
+  releasePreflight.resolve();
+  await turn;
+
+  assert.ok(Date.now() - startedAt < 1_000);
+  assert.ok(events.some((event) => event.type === "turn.interrupt.accepted"));
+  assert.ok(events.some((event) => event.type === "turn.failed"));
+  assert.equal(session.prompts.filter((prompt) => prompt.text === "不会进入模型").length, 0);
+});
+
+test("an accepted interruption fences computer dispatch before the actuator port", async (t) => {
+  const harness = createFakePiHarness();
+  const invokeTool = deferred();
+  const toolFinished = deferred();
+  let performed = 0;
+  const { adapter, workdir } = await makeAdapter(harness, {
+    async perform() {
+      performed += 1;
+      return { succeeded: true, verified: true, message: "must not dispatch" };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  });
+  cleanupAfter(t, adapter, workdir);
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      const assistant = {
+        role: "assistant",
+        timestamp: 1,
+        responseId: "effect-old",
+        provider: LOCAL_GROK_PROVIDER,
+        model: "grok-4.5",
+      };
+      current.emitMessageStart(assistant);
+      await invokeTool.promise;
+      const tool = harness.capturedTools.find((candidate) => candidate.name === "computer_control")!;
+      await assert.rejects(
+        () => tool.execute(
+          "interrupted-effect",
+          { action: "left_click", x: 20, y: 30 },
+          undefined,
+          undefined,
+          {} as never,
+        ),
+        /interrupted/i,
+      );
+      toolFinished.resolve();
+      await current.waitUntilAborted();
+    };
+  };
+  const command = makeCommand("点击保存按钮");
+  const events: RuntimeEvent[] = [];
+  const turn = adapter.startTurn(command, (event) => events.push(event));
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+  await adapter.interruptTurn(makeInterruptCommand(command, 1), (event) => events.push(event));
+  invokeTool.resolve();
+  await toolFinished.promise;
+
+  assert.equal(performed, 0);
+  assert.equal(events.filter((event) => event.type === "computer.action.requested").length, 0);
+  await adapter.cancelTurn(makeCancelCommand(command), (event) => events.push(event));
+  await turn;
+});
+
+test("an accepted interruption fences delegate before its effectful execute", async (t) => {
+  const harness = createFakePiHarness();
+  const release = deferred();
+  let delegated = 0;
+  const delegate = {
+    name: "delegate",
+    label: "Delegate",
+    description: "test delegate",
+    parameters: {} as never,
+    execute: async () => {
+      delegated += 1;
+      return { content: [], details: {} };
+    },
+  } as unknown as FakeTool;
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  adapter.setSessionToolPolicy(() => ({ computerControl: false, extraTools: [delegate] }));
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      current.emitMessageStart({
+        role: "assistant",
+        timestamp: 1,
+        responseId: "delegate-old",
+        provider: LOCAL_GROK_PROVIDER,
+        model: "grok-4.5",
+      });
+      await release.promise;
+      await current.waitUntilAborted();
+    };
+  };
+  const command = makeCommand();
+  const events: RuntimeEvent[] = [];
+  const turn = adapter.startTurn(command, (event) => events.push(event));
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+  await adapter.interruptTurn(makeInterruptCommand(command, 1), (event) => events.push(event));
+  const fencedDelegate = harness.capturedTools.find((tool) => tool.name === "delegate")!;
+  await assert.rejects(
+    () => fencedDelegate.execute("delegate-after-floor", { task: "do it" }, undefined, undefined, {} as never),
+    /interrupted/i,
+  );
+
+  assert.equal(delegated, 0);
+  release.resolve();
+  await adapter.cancelTurn(makeCancelCommand(command), (event) => events.push(event));
+  await turn;
+});
+
+test("an effect already admitted makes the competing interruption reject", async (t) => {
+  const harness = createFakePiHarness();
+  const releaseTurn = deferred();
+  const releaseDelegate = deferred();
+  const delegateStarted = deferred();
+  const delegate = {
+    name: "delegate",
+    label: "Delegate",
+    description: "test delegate",
+    parameters: {} as never,
+    execute: async () => {
+      delegateStarted.resolve();
+      await releaseDelegate.promise;
+      return { content: [], details: {} };
+    },
+  } as unknown as FakeTool;
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  adapter.setSessionToolPolicy(() => ({ computerControl: false, extraTools: [delegate] }));
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      current.emitMessageStart({
+        role: "assistant",
+        timestamp: 1,
+        responseId: "delegate-first",
+        provider: LOCAL_GROK_PROVIDER,
+        model: "grok-4.5",
+      });
+      await releaseTurn.promise;
+      current.emitTextDelta("完成。", {
+        role: "assistant",
+        timestamp: 1,
+        responseId: "delegate-first",
+        provider: LOCAL_GROK_PROVIDER,
+        model: "grok-4.5",
+      });
+    };
+  };
+  const command = makeCommand();
+  const events: RuntimeEvent[] = [];
+  const turn = adapter.startTurn(command, (event) => events.push(event));
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+  const fencedDelegate = harness.capturedTools.find((tool) => tool.name === "delegate")!;
+  const effect = fencedDelegate.execute("delegate-first", { task: "do it" }, undefined, undefined, {} as never);
+  await delegateStarted.promise;
+  await adapter.interruptTurn(makeInterruptCommand(command, 1), (event) => events.push(event));
+
+  const rejected = events.find((event) => event.type === "turn.interrupt.rejected");
+  assert.ok(rejected);
+  assert.equal(rejected.payload.code, "effect_already_dispatched");
+  assert.equal(events.some((event) => event.type === "turn.interrupt.accepted"), false);
+  releaseDelegate.resolve();
+  releaseTurn.resolve();
+  await effect;
+  await turn;
 });
 
 test("prompt rejection fails the turn with a credential-safe message", async (t) => {

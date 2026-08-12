@@ -33,6 +33,7 @@ import type {
   MindLearnResult,
   MindSectionWriteInput,
   PromoteSkillOptions,
+  ReplaceOpenConversationTurnInput,
   SkillCandidate,
   SkillCandidateInput,
   StoreMutationOptions,
@@ -1256,6 +1257,49 @@ export class SqliteYishuStore implements YishuStorePort {
       .prepare(`SELECT * FROM conversation_turns WHERE id = ?`)
       .get(id) as Record<string, unknown>;
     return rowToConversationTurn(row);
+  }
+
+  async replaceOpenConversationTurnInput(
+    input: ReplaceOpenConversationTurnInput,
+  ): Promise<boolean> {
+    const stamp = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const matching = this.db
+        .prepare(
+          `SELECT id FROM conversation_turns
+           WHERE id = ? AND conversation_id = ? AND trace_id = ? AND status = 'open'`,
+        )
+        .get(input.turnId, input.conversationId, input.traceId);
+      if (!matching) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+      const userInput = sanitizeVisibleText(input.userInput, "conversation user input");
+      const result = this.db
+        .prepare(
+          `UPDATE conversation_turns
+           SET user_input = ?, updated_at = ?
+           WHERE id = ? AND conversation_id = ? AND trace_id = ? AND status = 'open'`,
+        )
+        .run(
+          userInput,
+          stamp,
+          input.turnId,
+          input.conversationId,
+          input.traceId,
+        );
+      const changed = Number(result.changes) === 1;
+      if (!changed) throw new Error("open_conversation_turn_update_lost");
+      this.db
+        .prepare(`UPDATE conversations SET updated_at = ? WHERE id = ?`)
+        .run(stamp, input.conversationId);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async appendConversationEvent(input: ConversationEventInput): Promise<ConversationEvent> {

@@ -13,7 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { PI_CAPABILITY_PROFILES } from "./capability-profiles.js";
 import {
-  AssistantOutputStreamProjector,
+  AssistantOutputGenerationProjector,
   isDirectComputerActionUtterance,
 } from "./assistant-output.js";
 import {
@@ -47,6 +47,7 @@ import {
   type ComputerAction,
   type ModelPreference,
   type TurnCancelCommand,
+  type TurnInterruptCommand,
   type TurnStartCommand,
   type TurnSteerCommand,
 } from "./protocol.js";
@@ -62,6 +63,35 @@ import { markTrustedExternalReceipt } from "./trusted-task-receipt.js";
 
 type RuntimeModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 const SESSION_ABORT_TIMEOUT_MS = 2_000;
+const INTERRUPTION_STEER_TIMEOUT_MS = 30_000;
+
+interface DeferredSignal {
+  readonly promise: Promise<void>;
+  resolve(): void;
+  reject(error: Error): void;
+}
+
+interface SteerCycle {
+  readonly generation: number;
+  readonly submitted: DeferredSignal;
+  readonly supersededSignal: DeferredSignal;
+  readonly deadlineAt: number;
+  operation?: Promise<void>;
+  text?: string;
+  userObserved?: boolean;
+  assistantStarted?: boolean;
+  superseded?: boolean;
+}
+
+function deferredSignal(): DeferredSignal {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 async function abortSessionWithin(session: AgentSession): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -92,6 +122,394 @@ interface ActiveComputerTurn {
   actionCount: number;
   allActionsVerified: boolean;
   lastResult?: ComputerActionResult;
+  generationState?: PiTurnGenerationState;
+}
+
+interface AssistantMessageIdentity {
+  role?: string;
+  timestamp?: number;
+  responseId?: string;
+  provider?: string;
+  model?: string;
+  content?: string | Array<{ type?: string; text?: string }>;
+}
+
+type InterruptDecision = {
+  accepted: true;
+  interruptedGeneration: number;
+  nextGeneration: number;
+} | {
+  accepted: false;
+  generation: number;
+  reason: "generation_mismatch" | "effect_already_dispatched" | "terminal";
+};
+
+class SteerReplacementFailedBeforeStartError extends Error {
+  constructor() {
+    super("Pi replacement failed before producing an assistant response.");
+    this.name = "SteerReplacementFailedBeforeStartError";
+  }
+}
+
+function assistantMessageIdentity(message: AssistantMessageIdentity | undefined): string | undefined {
+  if (message?.role !== "assistant"
+    || typeof message.responseId !== "string"
+    || message.responseId.length === 0) return undefined;
+  return JSON.stringify([
+    message.responseId,
+    message.provider ?? "",
+    message.model ?? "",
+  ]);
+}
+
+function userMessageText(message: AssistantMessageIdentity | undefined): string | undefined {
+  if (message?.role !== "user") return undefined;
+  if (typeof message.content === "string") return message.content.trim();
+  const text = message.content
+    ?.filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("")
+    .trim();
+  return text && text.length > 0 ? text : undefined;
+}
+
+/**
+ * Synchronous per-turn arbiter for presentation generations and irreversible
+ * effect dispatch. JavaScript runs each method without an await boundary: an
+ * interrupt either advances the floor first, or observes the already-latched
+ * effect and rejects. It can never acknowledge an interrupt and dispatch the
+ * old generation afterwards.
+ */
+class PiTurnGenerationState {
+  readonly output = new AssistantOutputGenerationProjector();
+  private readonly generationByMessage = new Map<string, number>();
+  private readonly steerCycles = new Map<number, SteerCycle>();
+  private readonly textByGeneration = new Map<number, string>();
+  private readonly directActionByGeneration = new Map<number, boolean>();
+  private readonly effectsAllowedByGeneration = new Map<number, boolean>();
+  private readonly generationByToolCall = new Map<string, number>();
+  private initialMessageUnbound = true;
+  private initialUserBoundaryPassed = false;
+  private authoritativeGeneration = 1;
+  private currentAssistantGeneration: number | undefined;
+  private lastAssistantGeneration: number | undefined;
+  private effectDispatchGeneration: number | undefined;
+  private nextAssistantGeneration: number | undefined;
+  private readonly initialPromptAdmitted = deferredSignal();
+  private terminal = false;
+  private lastEndedGeneration: number | undefined;
+
+  constructor(
+    initialDirectAction: boolean,
+    initialEffectsAllowed: boolean,
+    private readonly interruptionSteerTimeoutMs = INTERRUPTION_STEER_TIMEOUT_MS,
+  ) {
+    const generation = this.output.beginGeneration();
+    this.directActionByGeneration.set(generation, initialDirectAction);
+    this.effectsAllowedByGeneration.set(generation, initialEffectsAllowed);
+    this.textByGeneration.set(generation, "");
+    // The initial prompt normally consumes this signal itself. Keep a
+    // rejection observer attached for the preflight-false path where no steer
+    // was submitted and therefore nobody else awaits the barrier.
+    void this.initialPromptAdmitted.promise.catch(() => undefined);
+  }
+
+  markInitialPromptAdmitted(): void {
+    this.initialPromptAdmitted.resolve();
+  }
+
+  rejectInitialPrompt(error: Error): void {
+    this.initialPromptAdmitted.reject(error);
+  }
+
+  async awaitInitialPromptAdmitted(): Promise<void> {
+    await this.initialPromptAdmitted.promise;
+  }
+
+  get currentGeneration(): number {
+    return this.authoritativeGeneration;
+  }
+
+  beginAssistantMessage(message: AssistantMessageIdentity | undefined): number | undefined {
+    const identity = assistantMessageIdentity(message);
+    if (message?.role !== "assistant") return undefined;
+    let generation: number;
+    if (this.initialMessageUnbound) {
+      this.initialMessageUnbound = false;
+      this.initialUserBoundaryPassed = true;
+      generation = this.output.ensureGeneration();
+    } else if (this.nextAssistantGeneration !== undefined) {
+      generation = this.nextAssistantGeneration;
+      this.output.beginGeneration(generation);
+      this.directActionByGeneration.set(generation, false);
+      this.effectsAllowedByGeneration.set(generation, false);
+      this.textByGeneration.set(generation, "");
+      this.nextAssistantGeneration = undefined;
+      const cycle = this.steerCycles.get(generation);
+      if (cycle !== undefined) cycle.assistantStarted = true;
+    } else {
+      // Provider tool continuations still belong to the same user reply. An
+      // assistant message only becomes a new product generation after Pi has
+      // visibly injected the admitted steering user message.
+      generation = this.output.ensureGeneration();
+    }
+    this.currentAssistantGeneration = generation;
+    if (identity !== undefined) this.rememberAssistantIdentity(identity, generation);
+    return generation;
+  }
+
+  observeUserMessage(message: AssistantMessageIdentity | undefined): void {
+    const text = userMessageText(message);
+    if (text === undefined) return;
+    if (!this.initialUserBoundaryPassed) {
+      // The first Pi user message belongs to the original prompt, even when a
+      // barge-in was accepted during prompt preflight and the utterance text is
+      // identical. Subsequent exact matches may be admitted steering input.
+      this.initialUserBoundaryPassed = true;
+      return;
+    }
+    for (const cycle of [...this.steerCycles.values()].sort((a, b) => a.generation - b.generation)) {
+      if (cycle.userObserved
+        || cycle.superseded && cycle.operation === undefined
+        || cycle.text === undefined
+        || cycle.text !== text
+        || !this.canObserveSteerUser(cycle.generation)) continue;
+      cycle.userObserved = true;
+      // Pi may drain multiple queued steering messages into one provider run.
+      // Until an assistant starts, the newest observed user message owns that
+      // single response generation.
+      this.nextAssistantGeneration = cycle.generation;
+      return;
+    }
+  }
+
+  observeAssistantMessageEnd(message: AssistantMessageIdentity | undefined): void {
+    const generation = this.generationForMessage(message);
+    if (generation === undefined) return;
+    this.lastAssistantGeneration = generation;
+    if (this.currentAssistantGeneration === generation) {
+      this.currentAssistantGeneration = undefined;
+    }
+  }
+
+  observeTurnEnd(message: AssistantMessageIdentity | undefined): void {
+    const identity = assistantMessageIdentity(message);
+    if (identity !== undefined) {
+      const known = this.generationByMessage.get(identity);
+      if (known !== undefined && known > 0) {
+        this.lastEndedGeneration = Math.max(this.lastEndedGeneration ?? 0, known);
+        this.lastAssistantGeneration = known;
+        return;
+      }
+    }
+    const generation = this.lastAssistantGeneration
+      ?? this.currentAssistantGeneration
+      ?? this.output.currentGeneration;
+    if (generation !== undefined) {
+      this.lastEndedGeneration = Math.max(this.lastEndedGeneration ?? 0, generation);
+    }
+  }
+
+  generationForMessage(message: AssistantMessageIdentity | undefined): number | undefined {
+    const identity = assistantMessageIdentity(message);
+    if (identity !== undefined) {
+      const known = this.generationByMessage.get(identity);
+      if (known !== undefined) return known > 0 ? known : undefined;
+    }
+    if (this.initialMessageUnbound) {
+      this.initialMessageUnbound = false;
+      const generation = this.output.ensureGeneration();
+      this.currentAssistantGeneration = generation;
+      if (identity !== undefined) this.rememberAssistantIdentity(identity, generation);
+      return generation;
+    }
+    if (identity !== undefined && this.currentAssistantGeneration !== undefined) {
+      this.rememberAssistantIdentity(identity, this.currentAssistantGeneration);
+      const known = this.generationByMessage.get(identity);
+      return known !== undefined && known > 0 ? known : undefined;
+    }
+    return this.currentAssistantGeneration ?? this.output.currentGeneration;
+  }
+
+  appendText(generation: number, text: string): void {
+    if (!this.output.accepts(generation) || text.length === 0) return;
+    this.textByGeneration.set(generation, (this.textByGeneration.get(generation) ?? "") + text);
+  }
+
+  text(generation = this.currentGeneration): string {
+    return this.textByGeneration.get(generation) ?? "";
+  }
+
+  isDirectAction(generation = this.currentGeneration): boolean {
+    return this.directActionByGeneration.get(generation) === true;
+  }
+
+  interrupt(expectedGeneration: number): InterruptDecision {
+    const generation = this.authoritativeGeneration;
+    if (this.terminal) return { accepted: false, generation, reason: "terminal" };
+    if (expectedGeneration !== generation) {
+      return { accepted: false, generation, reason: "generation_mismatch" };
+    }
+    if (this.effectDispatchGeneration === generation) {
+      return { accepted: false, generation, reason: "effect_already_dispatched" };
+    }
+    const interrupted = this.output.interruptGeneration(generation);
+    const interruptedCycle = this.steerCycles.get(generation);
+    if (interruptedCycle !== undefined) {
+      interruptedCycle.superseded = true;
+      interruptedCycle.supersededSignal.resolve();
+      if (interruptedCycle.operation === undefined) interruptedCycle.submitted.resolve();
+    }
+    this.authoritativeGeneration = interrupted.nextGeneration;
+    const cycle: SteerCycle = {
+      generation: interrupted.nextGeneration,
+      submitted: deferredSignal(),
+      supersededSignal: deferredSignal(),
+      deadlineAt: Date.now() + this.interruptionSteerTimeoutMs,
+    };
+    void cycle.supersededSignal.promise.catch(() => undefined);
+    this.steerCycles.set(cycle.generation, cycle);
+    return { accepted: true, ...interrupted };
+  }
+
+  admitConversationSteer(
+    message: string,
+    nextGeneration: number,
+    operation: () => Promise<void>,
+  ): number | undefined {
+    const cycle = this.steerCycles.get(nextGeneration);
+    if (this.terminal
+      || cycle === undefined
+      || cycle.superseded
+      || cycle.operation !== undefined
+      || this.authoritativeGeneration !== nextGeneration) return undefined;
+    cycle.text = message.trim();
+    cycle.operation = Promise.resolve().then(operation);
+    // The turn owns and awaits the operation; attach an immediate rejection
+    // observer so a provider preflight failure cannot become unhandled first.
+    void cycle.operation.catch(() => undefined);
+    cycle.submitted.resolve();
+    return cycle.generation;
+  }
+
+  async awaitAdmittedReplacement(): Promise<void> {
+    while (this.authoritativeGeneration > 1) {
+      const targetGeneration = this.authoritativeGeneration;
+      const cycle = this.steerCycles.get(targetGeneration);
+      if (cycle === undefined) {
+        throw new Error("Interrupted turn lost its conversational steer cycle.");
+      }
+      await this.awaitSteerSubmission(cycle);
+      const operation = cycle.operation;
+      if (operation === undefined) {
+        if (cycle.superseded || this.authoritativeGeneration !== targetGeneration) continue;
+        throw new Error("Interrupted turn ended without a conversational steer.");
+      }
+      let operationError: unknown;
+      try {
+        await this.awaitWithinCycleDeadline(cycle, operation);
+      } catch (error) {
+        operationError = error;
+      }
+      // A newer accepted barge-in supersedes this operation. The older prompt
+      // may have carried the newer queued steer to completion, so join the
+      // latest cycle instead of failing on the captured generation.
+      if (this.authoritativeGeneration !== targetGeneration) continue;
+      if (operationError !== undefined) {
+        if (!cycle.assistantStarted) throw new SteerReplacementFailedBeforeStartError();
+        throw operationError;
+      }
+      if (!cycle.assistantStarted) {
+        throw new SteerReplacementFailedBeforeStartError();
+      }
+      if (!this.output.accepts(targetGeneration)) {
+        throw new Error("Pi ended before producing the admitted steering response.");
+      }
+      return;
+    }
+  }
+
+  beginEffectDispatch(): number | undefined {
+    const generation = this.output.currentGeneration ?? this.authoritativeGeneration;
+    if (this.terminal
+      || !this.output.accepts(generation)
+      || this.effectsAllowedByGeneration.get(generation) !== true) return undefined;
+    this.effectDispatchGeneration = generation;
+    return generation;
+  }
+
+  generationForToolStart(toolCallId: string | undefined): number {
+    const generation = this.output.currentGeneration ?? this.authoritativeGeneration;
+    if (toolCallId !== undefined) this.generationByToolCall.set(toolCallId, generation);
+    return generation;
+  }
+
+  generationForToolEnd(toolCallId: string | undefined): number {
+    const current = this.output.currentGeneration ?? this.authoritativeGeneration;
+    if (toolCallId === undefined) return current;
+    const generation = this.generationByToolCall.get(toolCallId) ?? current;
+    this.generationByToolCall.delete(toolCallId);
+    return generation;
+  }
+
+  accepts(generation: number): boolean {
+    return !this.terminal && this.output.accepts(generation);
+  }
+
+  finish(): boolean {
+    if (this.terminal || !this.output.accepts(this.authoritativeGeneration)) return false;
+    this.terminal = true;
+    return true;
+  }
+
+  private rememberAssistantIdentity(identity: string, generation: number): void {
+    const known = this.generationByMessage.get(identity);
+    if (known === undefined) {
+      this.generationByMessage.set(identity, generation);
+    } else if (known !== generation) {
+      // A provider response id must never be reused to relabel stale output as
+      // current. Zero is an internal fail-closed collision sentinel.
+      this.generationByMessage.set(identity, 0);
+    }
+  }
+
+  private canObserveSteerUser(generation: number): boolean {
+    if (!this.initialUserBoundaryPassed || generation < 2) return false;
+    for (let candidate = 2; candidate < generation; candidate += 1) {
+      const predecessor = this.steerCycles.get(candidate);
+      if (predecessor === undefined) return false;
+      if (predecessor.assistantStarted) {
+        if ((this.lastEndedGeneration ?? 0) < candidate) return false;
+        continue;
+      }
+      if (!predecessor.userObserved
+        && !(predecessor.superseded && predecessor.operation === undefined)) return false;
+    }
+    return true;
+  }
+
+  private async awaitSteerSubmission(cycle: SteerCycle): Promise<void> {
+    await this.awaitWithinCycleDeadline(cycle, cycle.submitted.promise);
+  }
+
+  private async awaitWithinCycleDeadline(
+    cycle: SteerCycle,
+    operation: Promise<void>,
+  ): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const remaining = Math.max(0, cycle.deadlineAt - Date.now());
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("Interrupted turn timed out waiting for conversational steer.")),
+        remaining,
+      );
+    });
+    try {
+      await Promise.race([operation, cycle.supersededSignal.promise, timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
 }
 
 interface ActiveProviderTurn {
@@ -222,6 +640,7 @@ export function piSessionCacheKey(
 export interface PiRuntimeAdapterOptions {
   modelRuntimePromise?: Promise<ModelRuntime>;
   createSession?: typeof createAgentSession;
+  interruptionSteerTimeoutMs?: number;
 }
 
 /**
@@ -244,11 +663,14 @@ export class PiRuntimeAdapter implements AgentRuntime {
   private readonly workingDirectory: string;
   private readonly modelRuntimePromise: Promise<ModelRuntime>;
   private readonly createSession: typeof createAgentSession;
+  private readonly interruptionSteerTimeoutMs: number;
   readonly authService: YishuAuthService;
   private readonly sessions = new Map<string, AgentSession>();
   private readonly activeSessionByRequestId = new Map<string, AgentSession>();
   private readonly sessionKeyByRequestId = new Map<string, string>();
   private readonly activeProviderTurns = new Map<string, ActiveProviderTurn>();
+  private readonly activeGenerationByRequestId = new Map<string, PiTurnGenerationState>();
+  private readonly activeGenerationBySessionKey = new Map<string, PiTurnGenerationState>();
   private readonly pendingRequestIds = new Set<string>();
   private readonly cancelledRequestIds = new Set<string>();
   private readonly activeTurnOperations = new Set<Promise<void>>();
@@ -270,6 +692,8 @@ export class PiRuntimeAdapter implements AgentRuntime {
   ) {
     this.workingDirectory = workingDirectory;
     this.createSession = options.createSession ?? createAgentSession;
+    this.interruptionSteerTimeoutMs = options.interruptionSteerTimeoutMs
+      ?? INTERRUPTION_STEER_TIMEOUT_MS;
     // Keep provider/model state in this process. In particular, do not read or
     // write the user's global ~/.pi/agent models.json/auth.json. OAuth state is
     // product-owned under Yishu/Auth/auth.json instead.
@@ -303,6 +727,23 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.sessionToolPolicy = policy;
   }
 
+  private fenceEffectfulExtraTool(tool: ToolDefinition, sessionKey: string): ToolDefinition {
+    if (tool.name !== "delegate") return tool;
+    const execute = tool.execute.bind(tool);
+    return {
+      ...tool,
+      execute: async (...args: Parameters<typeof tool.execute>) => {
+        const activeTurn = this.activeComputerTurn.getStore();
+        const generationState = activeTurn?.generationState
+          ?? this.activeGenerationBySessionKey.get(sessionKey);
+        if (generationState?.beginEffectDispatch() === undefined) {
+          throw new Error("delegate was blocked because its assistant generation was interrupted.");
+        }
+        return execute(...args);
+      },
+    } as ToolDefinition;
+  }
+
   /**
    * Synchronously detach every cached/active session for one conversation.
    * Used as the supersede fence before a replacement turn is admitted; the
@@ -313,11 +754,13 @@ export class PiRuntimeAdapter implements AgentRuntime {
     for (const [key, session] of this.sessions.entries()) {
       if (!key.endsWith(suffix)) continue;
       this.sessions.delete(key);
+      this.activeGenerationBySessionKey.delete(key);
       for (const [requestId, activeSession] of this.activeSessionByRequestId.entries()) {
         if (activeSession !== session) continue;
         this.activeSessionByRequestId.delete(requestId);
         this.sessionKeyByRequestId.delete(requestId);
         this.cancelledRequestIds.add(requestId);
+        this.activeGenerationByRequestId.delete(requestId);
         this.computerUsePort.cancelRequest(requestId, "turn_superseded");
       }
       // Detachment is synchronous, so a replacement cannot reuse this Pi
@@ -333,6 +776,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
     // must not dispose the same provider session a second time.
     if (this.sessions.get(sessionKey) !== session) return;
     this.sessions.delete(sessionKey);
+    this.activeGenerationBySessionKey.delete(sessionKey);
     session.dispose();
   }
 
@@ -440,34 +884,69 @@ export class PiRuntimeAdapter implements AgentRuntime {
       return;
     }
 
-    let streamedText = "";
     const directComputerAction = isDirectComputerActionUtterance(command.payload.utterance);
     const observedFrontmost = command.payload.contextFrame.frontmostApplication?.value;
-    const outputProjector = new AssistantOutputStreamProjector();
-    const emitVisibleDelta = (text: string): void => {
-      if (text.length === 0) return;
-      streamedText += text;
-      emit(runtimeEvent("response.delta", command.requestId, command.traceId, { text }));
+    const taskContract = taskExecutionContractFromCommand(command);
+    const authorizedText = authorizedTextForUtterance(command.payload.utterance);
+    const allowsFollowupClick = authorizedText !== undefined
+      && actionSequencePattern.test(command.payload.utterance)
+      && clickOrPressPattern.test(command.payload.utterance);
+    const allowedActionSequence: Array<"set_text" | "left_click"> = authorizedText !== undefined
+      ? ["set_text", ...(allowsFollowupClick ? ["left_click" as const] : [])]
+      : directComputerAction ? ["left_click"] : [];
+    const generationState = new PiTurnGenerationState(
+      directComputerAction,
+      true,
+      this.interruptionSteerTimeoutMs,
+    );
+    this.activeGenerationByRequestId.set(command.requestId, generationState);
+    this.activeGenerationBySessionKey.set(sessionKey, generationState);
+    const emitVisibleDelta = (generation: number, text: string): void => {
+      if (text.length === 0 || !generationState.accepts(generation)) return;
+      generationState.appendText(generation, text);
+      emit(runtimeEvent("response.delta", command.requestId, command.traceId, {
+        text,
+        generation,
+      }));
     };
     const unsubscribe = session.subscribe((event) => {
       if (this.isRequestCancelled(command.requestId)) return;
+      if (event.type === "message_start") {
+        generationState.observeUserMessage(event.message);
+        generationState.beginAssistantMessage(event.message);
+      }
+      if (event.type === "message_end") {
+        generationState.observeAssistantMessageEnd(event.message);
+      }
+      if (event.type === "turn_end") {
+        generationState.observeTurnEnd(event.message);
+      }
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-        emitVisibleDelta(outputProjector.push(
+        const generation = generationState.generationForMessage(event.message);
+        if (generation === undefined) return;
+        emitVisibleDelta(generation, generationState.output.push(
+          generation,
           event.assistantMessageEvent.delta,
-          directComputerAction,
+          generationState.isDirectAction(generation),
         ));
       }
 
       if (event.type === "tool_execution_start") {
+        const generation = generationState.generationForToolStart(event.toolCallId);
+        if (!generationState.accepts(generation)) return;
         emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
           toolName: event.toolName,
+          generation,
         }));
       }
 
       if (event.type === "tool_execution_end") {
+        const generation = generationState.generationForToolEnd(event.toolCallId);
+        if (!generationState.accepts(generation)) return;
         emit(runtimeEvent("tool.completed", command.requestId, command.traceId, {
           toolName: event.toolName,
           isError: event.isError,
+          generation,
         }));
       }
     });
@@ -478,14 +957,10 @@ export class PiRuntimeAdapter implements AgentRuntime {
       sessionId: session.sessionId,
       provider: preference.provider,
       model: preference.model,
+      generation: generationState.currentGeneration,
       ...(preference.provider === LOCAL_GROK_PROVIDER ? { baseUrl: LOCAL_GROK_BASE_URL } : {}),
     }));
 
-    const taskContract = taskExecutionContractFromCommand(command);
-    const authorizedText = authorizedTextForUtterance(command.payload.utterance);
-    const allowsFollowupClick = authorizedText !== undefined
-      && actionSequencePattern.test(command.payload.utterance)
-      && clickOrPressPattern.test(command.payload.utterance);
     const computerTurn: ActiveComputerTurn = {
       requestId: command.requestId,
       traceId: command.traceId,
@@ -493,9 +968,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
       basisFrameId: command.payload.contextFrame.frameId,
       directComputerAction,
       ...(authorizedText !== undefined ? { authorizedText } : {}),
-      allowedActionSequence: authorizedText !== undefined
-        ? ["set_text", ...(allowsFollowupClick ? ["left_click" as const] : [])]
-        : directComputerAction ? ["left_click"] : [],
+      allowedActionSequence,
       ...(observedFrontmost?.bundleIdentifier && observedFrontmost.processIdentifier > 0
         ? {
             frontmostTarget: {
@@ -510,14 +983,18 @@ export class PiRuntimeAdapter implements AgentRuntime {
       emit,
       actionCount: 0,
       allActionsVerified: true,
+      generationState,
     };
-
     let completedSuccessfully = false;
     try {
       await this.activeComputerTurn.run(computerTurn, async () => {
         await session.prompt(buildGroundedPrompt(command, {
           includeConversationHistory: sessionCreated,
         }), {
+          preflightResult: (accepted) => {
+            if (accepted) generationState.markInitialPromptAdmitted();
+            else generationState.rejectInitialPrompt(new Error("Initial Pi prompt preflight was rejected."));
+          },
           images: command.payload.contextFrame.screenshots.map((screenshot) => ({
             type: "image" as const,
             data: screenshot.base64Data,
@@ -531,16 +1008,27 @@ export class PiRuntimeAdapter implements AgentRuntime {
           throw new Error(session.agent.state.errorMessage);
         }
 
-        const completedOutput = outputProjector.complete();
+        // An accepted interruption owns the turn until its explicitly admitted
+        // conversational steer produces a replacement assistant generation.
+        // If the first provider cycle already became idle, steerTurn starts a
+        // fresh prompt on the same Pi session and this await joins it.
+        await generationState.awaitAdmittedReplacement();
+
+        const generation = generationState.currentGeneration;
+        const completedOutput = generationState.output.complete(generation);
+        if (completedOutput.stale) {
+          throw new Error("Pi ended before the interrupted response was replaced.");
+        }
         const compatibilityAction = completedOutput.computerActions.at(0);
         if (shouldRunCompatibilityComputerAction(
-          directComputerAction,
+          generationState.isDirectAction(generation),
           computerTurn.actionCount,
           compatibilityAction !== undefined,
         ) && compatibilityAction) {
           emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
             toolName: "computer_control",
             compatibilityMode: true,
+            generation,
           }));
           let isError = false;
           try {
@@ -553,21 +1041,27 @@ export class PiRuntimeAdapter implements AgentRuntime {
             toolName: "computer_control",
             isError,
             compatibilityMode: true,
+            generation,
           }));
         }
 
-        if (directComputerAction && computerTurn.actionCount > 0) {
-          emitVisibleDelta(this.conciseActionResult(computerTurn.lastResult));
+        if (generationState.isDirectAction(generation) && computerTurn.actionCount > 0) {
+          emitVisibleDelta(generation, this.conciseActionResult(computerTurn.lastResult));
         } else {
-          emitVisibleDelta(completedOutput.visibleDelta);
+          emitVisibleDelta(generation, completedOutput.visibleDelta);
         }
 
-        if (streamedText.trim().length === 0) {
+        const authoritativeText = generationState.text(generation);
+        if (authoritativeText.trim().length === 0) {
           throw new Error("Pi completed the turn without a user-visible response.");
+        }
+        if (!generationState.finish()) {
+          throw new Error("Pi response generation was interrupted before completion.");
         }
 
         const completion = runtimeEvent("response.completed", command.requestId, command.traceId, {
-          text: streamedText,
+          text: authoritativeText,
+          generation,
           verified: computerTurn.actionCount > 0 && computerTurn.allActionsVerified,
           verifier: computerTurn.actionCount > 0
             ? "macos-accessibility-result"
@@ -582,13 +1076,23 @@ export class PiRuntimeAdapter implements AgentRuntime {
       if (this.isRequestCancelled(command.requestId)) return;
       if (preference.provider !== LOCAL_GROK_PROVIDER) reloginProvider = preference.provider;
       emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
-        code: "pi_turn_failed",
+        code: error instanceof SteerReplacementFailedBeforeStartError
+          ? "steer_replacement_failed_before_start"
+          : "pi_turn_failed",
         message: safeRuntimeErrorMessage(error),
+        generation: Math.max(
+          generationState.currentGeneration,
+          generationState.output.acceptanceFloor,
+        ),
       }));
     } finally {
       unsubscribe();
       this.activeSessionByRequestId.delete(command.requestId);
       this.sessionKeyByRequestId.delete(command.requestId);
+      this.activeGenerationByRequestId.delete(command.requestId);
+      if (this.activeGenerationBySessionKey.get(sessionKey) === generationState) {
+        this.activeGenerationBySessionKey.delete(sessionKey);
+      }
       if (!completedSuccessfully || this.isRequestCancelled(command.requestId)) {
         this.evictSession(sessionKey, session);
       }
@@ -601,7 +1105,8 @@ export class PiRuntimeAdapter implements AgentRuntime {
 
   async steerTurn(command: TurnSteerCommand, emit: RuntimeEventSink): Promise<void> {
     const session = this.activeSessionByRequestId.get(command.requestId);
-    if (!session) {
+    const generationState = this.activeGenerationByRequestId.get(command.requestId);
+    if (!session || !generationState) {
       emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
         code: "turn_not_active",
         message: "No active Pi turn matches this request.",
@@ -609,9 +1114,54 @@ export class PiRuntimeAdapter implements AgentRuntime {
       return;
     }
 
-    await session.steer(command.payload.message);
+    const nextGeneration = generationState.admitConversationSteer(
+      command.payload.message,
+      command.payload.nextGeneration,
+      async () => {
+        // AgentSession.prompt is the atomic SDK entry: while streaming it
+        // queues exactly one steer; while idle it starts exactly one fresh run.
+        // Checking isStreaming ourselves would race the provider settling.
+        await generationState.awaitInitialPromptAdmitted();
+        await session.prompt(command.payload.message, {
+          streamingBehavior: "steer",
+        });
+      },
+    );
+    if (nextGeneration === undefined) {
+      emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
+        code: "steer_failed",
+        message: "Conversational steer did not match an accepted interruption.",
+        generation: generationState.currentGeneration,
+      }));
+      return;
+    }
     emit(runtimeEvent("runtime.status", command.requestId, command.traceId, {
       status: "steering_received",
+      generation: nextGeneration,
+    }));
+  }
+
+  async interruptTurn(command: TurnInterruptCommand, emit: RuntimeEventSink): Promise<void> {
+    const generationState = this.activeGenerationByRequestId.get(command.requestId);
+    if (!generationState) {
+      emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
+        generation: command.payload.expectedGeneration,
+        code: "turn_not_active",
+      }));
+      return;
+    }
+
+    const decision = generationState.interrupt(command.payload.expectedGeneration);
+    if (!decision.accepted) {
+      emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
+        generation: decision.generation,
+        code: decision.reason,
+      }));
+      return;
+    }
+    emit(runtimeEvent("turn.interrupt.accepted", command.requestId, command.traceId, {
+      interruptedGeneration: decision.interruptedGeneration,
+      nextGeneration: decision.nextGeneration,
     }));
   }
 
@@ -623,8 +1173,10 @@ export class PiRuntimeAdapter implements AgentRuntime {
     const session = this.activeSessionByRequestId.get(command.requestId);
     if (session) {
       this.activeSessionByRequestId.delete(command.requestId);
+      this.activeGenerationByRequestId.delete(command.requestId);
       const sessionKey = this.sessionKeyByRequestId.get(command.requestId);
       this.sessionKeyByRequestId.delete(command.requestId);
+      if (sessionKey !== undefined) this.activeGenerationBySessionKey.delete(sessionKey);
       // Remove the poisoned/aborting session from the cache before awaiting
       // provider cancellation. A superseding turn can then cold-start without
       // ever sharing the old session while abort is still in flight.
@@ -661,6 +1213,8 @@ export class PiRuntimeAdapter implements AgentRuntime {
     }
     this.sessions.clear();
     this.activeSessionByRequestId.clear();
+    this.activeGenerationByRequestId.clear();
+    this.activeGenerationBySessionKey.clear();
     this.sessionKeyByRequestId.clear();
     this.activeProviderTurns.clear();
     this.pendingRequestIds.clear();
@@ -783,6 +1337,25 @@ export class PiRuntimeAdapter implements AgentRuntime {
       dispatchedAction = action;
     }
 
+    const effectGeneration = activeTurn.generationState?.beginEffectDispatch();
+    if (activeTurn.generationState !== undefined && effectGeneration === undefined) {
+      const refusal: ComputerActionResult = {
+        succeeded: false,
+        verified: false,
+        status: "cancelled",
+        code: "cancelled",
+        method: "unknown",
+        attemptId,
+        message: "Desktop action was blocked because its assistant generation was interrupted.",
+      };
+      throw new ComputerActionError(refusal.message, {
+        status: refusal.status!,
+        code: refusal.code!,
+        method: refusal.method!,
+        attemptId,
+      }, refusal);
+    }
+
     // Count only dispatched actions. A blocked second call must not emit a
     // computer.action.requested event, while the original attempt still keeps
     // the compatibility POINT fallback behind actionCount === 0.
@@ -795,6 +1368,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
         attemptId,
         basisFrameId: activeTurn.basisFrameId,
         effectClass: "write",
+        ...(effectGeneration === undefined ? {} : { generation: effectGeneration }),
       }, signal);
       activeTurn.lastResult = result;
       activeTurn.allActionsVerified &&= result.verified === true;
@@ -921,7 +1495,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
               this.performComputerAction(action, signal)
             )) as unknown as ToolDefinition]
           : []),
-        ...toolPolicy.extraTools,
+        ...toolPolicy.extraTools.map((tool) => this.fenceEffectfulExtraTool(tool, sessionKey)),
       ],
       ...capabilityConfiguration,
     });
@@ -963,6 +1537,9 @@ export class PiRuntimeAdapter implements AgentRuntime {
       settle: () => settle(),
       cancel: async () => {
         this.activeSessionByRequestId.delete(requestId);
+        this.activeGenerationByRequestId.delete(requestId);
+        const sessionKey = this.sessionKeyByRequestId.get(requestId);
+        if (sessionKey !== undefined) this.activeGenerationBySessionKey.delete(sessionKey);
         if (turn.session) await turn.session.abort();
       },
     };
@@ -997,10 +1574,12 @@ export class PiRuntimeAdapter implements AgentRuntime {
       if (keyProvider !== provider) continue;
       session.dispose();
       this.sessions.delete(key);
+      this.activeGenerationBySessionKey.delete(key);
     }
     for (const [requestId, session] of this.activeSessionByRequestId.entries()) {
       if ([...this.activeProviderTurns.values()].some((turn) => turn.requestId === requestId && turn.provider === provider)) {
         this.activeSessionByRequestId.delete(requestId);
+        this.activeGenerationByRequestId.delete(requestId);
         session.dispose();
       }
     }

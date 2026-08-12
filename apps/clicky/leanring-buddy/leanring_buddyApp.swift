@@ -34,6 +34,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private let singleInstance = YishuSingleInstanceLock()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        guard !YishuVoiceProxySupervisor.shouldSkipRealProxyLifecycle else { return }
         guard singleInstance.acquire() else {
             let bundleID = Bundle.main.bundleIdentifier ?? "com.clicky-app.leanring-buddy"
             NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)

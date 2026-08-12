@@ -55,6 +55,93 @@ private struct VoiceTurnOrigin {
 private struct YishuRuntimeVoiceResponse {
     let text: String
     let speechAlreadyPresented: Bool
+    let presentationTranscript: String
+    let allowsScreenEffects: Bool
+}
+
+enum YishuRuntimePresentationAdvance: Equatable {
+    case stale
+    case current
+    case advanced
+}
+
+/// Pure accumulator for one Runtime-owned presentation generation. The manager
+/// uses the `advanced` edge to replace its sentence pipeline and visible text,
+/// so a final response can never concatenate pre-interrupt and steered output.
+struct YishuRuntimePresentationReducer: Equatable {
+    private(set) var generation = 1
+    private(set) var accumulatedText = ""
+    private(set) var completedText: String?
+
+    var authoritativeText: String {
+        completedText ?? accumulatedText
+    }
+
+    mutating func advancePresentation(to nextGeneration: Int) -> YishuRuntimePresentationAdvance {
+        guard nextGeneration >= generation else { return .stale }
+        guard nextGeneration > generation else { return .current }
+        generation = nextGeneration
+        accumulatedText = ""
+        completedText = nil
+        return .advanced
+    }
+
+    mutating func appendCurrentDelta(_ text: String) {
+        accumulatedText += text
+    }
+
+    mutating func completeCurrent(with text: String) {
+        completedText = text
+    }
+}
+
+/// Same-session steer is intentionally narrower than ordinary conversation.
+/// It carries language context only: any desktop effect, product action, screen
+/// reference, or ambiguous deictic phrase requires a fresh ContextFrame/turn.
+enum YishuBargeInPolicy {
+    static func allowsSameSessionConversation(_ utterance: String) -> Bool {
+        let text = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty,
+              YishuSentenceSpeechPolicy.allowsStreaming(for: text),
+              YishuProductUtteranceRouter.classify(text) == .conversation else {
+            return false
+        }
+        // Keep this at least as conservative as ProductKernelRuntime's
+        // COMPUTER_EFFECT_INTENT. Classifier drift must cost a fresh frame,
+        // never a rejected steer that leaves the user waiting.
+        let runtimeEffect = #"(?:\b(?:click|press|open|close|type|enter|select|drag|scroll|send|delete|move|rename|create|save|execute|copy|paste|cut)\b|点击|打开|关闭|输入|选择|拖动|滚动|发送|删除|移动|重命名|创建|保存|执行|复制|粘贴|剪切|拷贝)"#
+        guard text.range(
+            of: runtimeEffect,
+            options: [.regularExpression, .caseInsensitive]
+        ) == nil else { return false }
+        let screenDependency = #"(?:这个|那个|这些|那些|这里|那里|刚才那个|刚刚那个|上一段|上一个|前一个|刚才的|当前|现在这个|屏幕|页面|网页|窗口|按钮|菜单|光标|鼠标|左边|右边|上面|下面|前台|选中|高亮|图里|截图|\b(?:this|that|these|those|here|there|last|previous|current\s+(?:screen|page|window)|screen|page|window|button|menu|cursor|selected)\b)"#
+        guard text.range(
+            of: screenDependency,
+            options: [.regularExpression, .caseInsensitive]
+        ) == nil else { return false }
+
+        // Bare pronouns remain valid language context (for example, “它是什么
+        // 意思?”). They require a fresh frame only when coupled to a likely
+        // target mutation or spatial relation.
+        let referentialInteraction = #"(?:(?:它|其).*(?:改|替换|放到|放在|移到|位置|旁边|里面)|(?:改|替换|放到|放在|移到).*(?:它|其)|\b(?:it|its)\b.*\b(?:change|replace|put|position|beside|inside)\b|\b(?:change|replace|put)\b.*\b(?:it|its)\b)"#
+        return text.range(
+            of: referentialInteraction,
+            options: [.regularExpression, .caseInsensitive]
+        ) == nil
+    }
+}
+
+private enum YishuBargeInStatus: Equatable {
+    case awaitingAcknowledgement
+    case accepted(nextGeneration: Int)
+    case rejected
+}
+
+private struct YishuBargeInAttempt: Equatable {
+    let id: UUID
+    let requestId: UUID
+    let voiceTraceID: String
+    var status: YishuBargeInStatus
 }
 
 private struct DirectClickPrewarmCache {
@@ -253,6 +340,12 @@ final class CompanionManager: ObservableObject {
     private var currentResponseTask: Task<Void, Never>?
     private var activeVoiceTurnToken: UUID?
     private var activeRuntimeRequestId: UUID?
+    private var activeRuntimePresentationTranscript: String?
+    private var activeTurnEffectInFlight = false
+    private var activeBargeInAttempt: YishuBargeInAttempt?
+    private var bargeInInterruptTask: Task<Void, Never>?
+    private var bargeInSubmissionTask: Task<Void, Never>?
+    private var bargeInTranscriptWatchdogTask: Task<Void, Never>?
     private var visualStateMachine = YishuVisualStateMachine()
     private var runtimeVisualPhase: YishuRuntimeVisualPhase {
         get { visualStateMachine.runtimePhase }
@@ -1625,6 +1718,12 @@ final class CompanionManager: ObservableObject {
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
+            // Key-down owns the audio channel synchronously. No async Runtime
+            // acknowledgement is allowed to delay stopping a spoken sentence.
+            cancelActiveSentenceSpeechPipeline()
+            elevenLabsTTSClient.stopPlayback()
+            clearMemorySourceNotice()
+
             // The user takes the floor immediately. Stop only the item already
             // speaking; waiting returns stay queued for the next quiet window.
             interruptDelegatedTaskReturnForForegroundTurn()
@@ -1635,6 +1734,9 @@ final class CompanionManager: ObservableObject {
             pendingVoiceTurnOrigin = VoiceTurnOrigin(
                 traceID: voiceTurnTraceID,
                 releaseAt: nil
+            )
+            let preservingRuntimeTurn = beginBargeInIfEligible(
+                voiceTraceID: voiceTurnTraceID
             )
             directClickPrewarmTask?.cancel()
             directClickPrewarmTask = nil
@@ -1664,20 +1766,22 @@ final class CompanionManager: ObservableObject {
 
             // Immediate state so the waveform appears on key-down, not after
             // the async permission/session start hop.
-            if voiceState != .responding {
-                voiceState = .listening
-            }
+            voiceState = .listening
             livePartialTranscript = ""
 
             // Dismiss the menu bar panel so it doesn't cover the screen
             NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
 
-            // Cancel any in-progress response and TTS from a previous utterance
-            currentResponseTask?.cancel()
-            currentResponseTask = nil
-            cancelActiveRuntimeTurn(reason: "user-interrupted")
+            // A pure, effect-free Runtime turn stays alive only after its old
+            // generation has been synchronously fenced. Every other path keeps
+            // the established cancel + fresh ContextFrame behavior.
+            if !preservingRuntimeTurn {
+                invalidateActiveVoiceTurn()
+                currentResponseTask?.cancel()
+                currentResponseTask = nil
+                cancelActiveRuntimeTurn(reason: "user-interrupted")
+            }
             responseOverlayManager.hideOverlay()
-            elevenLabsTTSClient.stopPlayback()
             clearDetectedElementLocation()
 
             // Dismiss the onboarding prompt if it's showing
@@ -1725,7 +1829,7 @@ final class CompanionManager: ObservableObject {
                         print("🗣️ 奕枢 received transcript (\(trimmed.count) characters)")
                         ClickyAnalytics.trackUserMessageSent(transcript: trimmed)
                         let origin = self.consumeVoiceTurnOrigin(for: voiceTurnTraceID)
-                        self.runVoiceTurnTask(
+                        self.submitVoiceTranscript(
                             transcript: trimmed,
                             origin: origin
                         )
@@ -1750,6 +1854,7 @@ final class CompanionManager: ObservableObject {
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
+            armBargeInTranscriptWatchdogIfNeeded()
             Self.logVoicePhase(
                 turnID: releasedOrigin?.traceID ?? "unknown",
                 phase: "ptt_release",
@@ -1811,10 +1916,209 @@ final class CompanionManager: ObservableObject {
         return String(compactUUID.prefix(12)).lowercased()
     }
 
+    private func beginBargeInIfEligible(voiceTraceID: String) -> Bool {
+        guard let requestId = activeRuntimeRequestId,
+              currentResponseTask != nil,
+              activeVoiceTurnToken != nil,
+              !activeTurnConsumedComputerAction,
+              !activeTurnEffectInFlight,
+              let currentTranscript = activeRuntimePresentationTranscript,
+              YishuBargeInPolicy.allowsSameSessionConversation(currentTranscript),
+              let generation = yishuAgentRuntimeClient.activeGeneration(requestId: requestId),
+              yishuAgentRuntimeClient.suppressTurnForInterruption(
+                requestId: requestId,
+                expectedGeneration: generation
+              ) else {
+            return false
+        }
+
+        bargeInInterruptTask?.cancel()
+        bargeInSubmissionTask?.cancel()
+        let attempt = YishuBargeInAttempt(
+            id: UUID(),
+            requestId: requestId,
+            voiceTraceID: voiceTraceID,
+            status: .awaitingAcknowledgement
+        )
+        activeBargeInAttempt = attempt
+        bargeInInterruptTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let status: YishuBargeInStatus
+            do {
+                let decision = try await self.yishuAgentRuntimeClient.interruptTurn(
+                    requestId: requestId,
+                    expectedGeneration: generation
+                )
+                switch decision {
+                case let .accepted(interruptedGeneration, nextGeneration)
+                    where interruptedGeneration == generation:
+                    status = .accepted(nextGeneration: nextGeneration)
+                case .accepted, .rejected:
+                    status = .rejected
+                }
+            } catch {
+                status = .rejected
+            }
+            guard var current = self.activeBargeInAttempt,
+                  current.id == attempt.id else { return }
+            current.status = status
+            self.activeBargeInAttempt = current
+            if status == .rejected {
+                // Keep the attempt token so an already-arrived transcript can
+                // still consume exactly one fresh-start route. Only the old,
+                // now permanently suppressed Runtime turn is retired here.
+                self.cancelInterruptedRuntimeTurnPreservingAttempt(
+                    requestId: requestId,
+                    reason: "barge-in-interrupt-rejected"
+                )
+            }
+        }
+        return true
+    }
+
+    private func submitVoiceTranscript(
+        transcript: String,
+        origin: VoiceTurnOrigin?
+    ) {
+        bargeInTranscriptWatchdogTask?.cancel()
+        bargeInTranscriptWatchdogTask = nil
+        guard let attempt = activeBargeInAttempt else {
+            runVoiceTurnTask(transcript: transcript, origin: origin)
+            return
+        }
+        bargeInSubmissionTask?.cancel()
+        let acknowledgementTask = bargeInInterruptTask
+        bargeInSubmissionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            if !YishuBargeInPolicy.allowsSameSessionConversation(transcript) {
+                self.fallbackFromBargeIn(
+                    attemptID: attempt.id,
+                    transcript: transcript,
+                    origin: origin,
+                    reason: "fresh-context-required"
+                )
+                return
+            }
+
+            await acknowledgementTask?.value
+            guard let current = self.activeBargeInAttempt,
+                  current.id == attempt.id else { return }
+            guard case let .accepted(nextGeneration) = current.status,
+                  self.activeRuntimeRequestId == current.requestId,
+                  self.currentResponseTask != nil,
+                  self.activeVoiceTurnToken != nil,
+                  !self.activeTurnEffectInFlight,
+                  self.yishuAgentRuntimeClient.hasActiveTurn(requestId: current.requestId) else {
+                self.fallbackFromBargeIn(
+                    attemptID: attempt.id,
+                    transcript: transcript,
+                    origin: origin,
+                    reason: "interrupt-not-active"
+                )
+                return
+            }
+
+            do {
+                try self.yishuAgentRuntimeClient.steerTurn(
+                    requestId: current.requestId,
+                    message: transcript,
+                    nextGeneration: nextGeneration
+                )
+            } catch {
+                self.fallbackFromBargeIn(
+                    attemptID: attempt.id,
+                    transcript: transcript,
+                    origin: origin,
+                    reason: "steer-send-failed"
+                )
+                return
+            }
+
+            self.activeRuntimePresentationTranscript = transcript
+            self.activeBargeInAttempt = nil
+            self.bargeInInterruptTask = nil
+            self.bargeInSubmissionTask = nil
+            self.turnVisualPhase = .reasoning
+            self.voiceState = .processing
+            self.ensureOverlayVisibleForVoiceFeedback()
+            self.responseOverlayManager.showThinking()
+        }
+    }
+
+    private func fallbackFromBargeIn(
+        attemptID: UUID,
+        transcript: String,
+        origin: VoiceTurnOrigin?,
+        reason: String
+    ) {
+        guard activeBargeInAttempt?.id == attemptID else { return }
+        activeBargeInAttempt = nil
+        bargeInInterruptTask = nil
+        bargeInSubmissionTask = nil
+        invalidateActiveVoiceTurn()
+        currentResponseTask?.cancel()
+        currentResponseTask = nil
+        cancelActiveRuntimeTurn(reason: reason)
+        runVoiceTurnTask(transcript: transcript, origin: origin)
+    }
+
+    private func invalidateActiveVoiceTurn() {
+        activeVoiceTurnToken = nil
+        activeTurnEffectInFlight = false
+    }
+
+    private func ownsVoiceTurn(_ token: UUID) -> Bool {
+        activeVoiceTurnToken == token && !Task.isCancelled
+    }
+
+    private func cancelInterruptedRuntimeTurnPreservingAttempt(
+        requestId: UUID,
+        reason: String
+    ) {
+        cancelActiveSentenceSpeechPipeline()
+        invalidateActiveVoiceTurn()
+        currentResponseTask?.cancel()
+        currentResponseTask = nil
+        guard activeRuntimeRequestId == requestId else { return }
+        activeRuntimeRequestId = nil
+        activeRuntimePresentationTranscript = nil
+        activeTurnEffectInFlight = false
+        turnVisualPhase = .idle
+        try? yishuAgentRuntimeClient.cancelTurn(requestId: requestId, reason: reason)
+    }
+
+    private func armBargeInTranscriptWatchdogIfNeeded() {
+        guard let attempt = activeBargeInAttempt else { return }
+        bargeInTranscriptWatchdogTask?.cancel()
+        bargeInTranscriptWatchdogTask = Task { @MainActor [weak self] in
+            do {
+                // The slowest shipping provider finalizes in 15 seconds.
+                try await Task.sleep(nanoseconds: 17_000_000_000)
+            } catch {
+                return
+            }
+            guard let self,
+                  self.activeBargeInAttempt?.id == attempt.id else { return }
+            self.presentUnclearHearingFailure(traceID: attempt.voiceTraceID)
+        }
+    }
+
+    private func clearBargeInAttempt() {
+        activeBargeInAttempt = nil
+        bargeInInterruptTask?.cancel()
+        bargeInInterruptTask = nil
+        bargeInSubmissionTask?.cancel()
+        bargeInSubmissionTask = nil
+        bargeInTranscriptWatchdogTask?.cancel()
+        bargeInTranscriptWatchdogTask = nil
+    }
+
     /// User held PTT but ASR produced no usable text.
     /// Show a short failure on the cursor overlay; do not write a completed
     /// assistant answer, do not start TTS, do not call the runtime.
     private func presentUnclearHearingFailure(traceID: String) {
+        clearBargeInAttempt()
+        invalidateActiveVoiceTurn()
         currentResponseTask?.cancel()
         currentResponseTask = nil
         cancelActiveRuntimeTurn(reason: "unclear-hearing")
@@ -1850,6 +2154,7 @@ final class CompanionManager: ObservableObject {
         transcript: String,
         origin: VoiceTurnOrigin?
     ) {
+        clearBargeInAttempt()
         currentResponseTask?.cancel()
         cancelActiveSentenceSpeechPipeline()
         cancelActiveRuntimeTurn(reason: "superseded")
@@ -1901,7 +2206,8 @@ final class CompanionManager: ObservableObject {
                 transcript: transcript,
                 intentIsDirect: directIntent,
                 timing: timing,
-                traceID: origin?.traceID
+                traceID: origin?.traceID,
+                turnToken: turnToken
             ) {
             case .handled:
                 return
@@ -1923,29 +2229,36 @@ final class CompanionManager: ObservableObject {
             // ContextTrail append happens in Node ProductKernelRuntime on turn.start
             // (screenshot bytes stripped). Background samples use trail.observe.
 
-            guard !Task.isCancelled else { return }
+            guard ownsVoiceTurn(turnToken) else { return }
             do {
                 turnVisualPhase = .reasoning
                 let response = try await respondThroughYishuRuntime(
                     transcript: transcript,
                     contextFrame: capturedContext.frame,
                     screenCaptures: capturedContext.screenCaptures,
-                    timing: timing
+                    timing: timing,
+                    turnToken: turnToken
                 )
-                try Task.checkCancellation()
+                guard self.ownsVoiceTurn(turnToken) else { throw CancellationError() }
                 try await presentVoiceResponse(
                     response.text,
-                    transcript: transcript,
-                    screenCaptures: capturedContext.screenCaptures,
+                    transcript: response.presentationTranscript,
+                    screenCaptures: response.allowsScreenEffects
+                        ? capturedContext.screenCaptures
+                        : [],
                     timing: timing,
-                    speechAlreadyPresented: response.speechAlreadyPresented
+                    speechAlreadyPresented: response.speechAlreadyPresented,
+                    turnToken: turnToken
                 )
             } catch is CancellationError {
                 clearMemorySourceNotice()
                 responseOverlayManager.hideOverlay()
             } catch {
+                if freshStartAfterRejectedSteerIfNeeded(error, turnToken: turnToken) {
+                    return
+                }
                 clearMemorySourceNotice()
-                guard !Task.isCancelled else { return }
+                guard ownsVoiceTurn(turnToken) else { return }
                 let actionResult = activeVoiceTurnToken == turnToken
                     ? activeTurnLastComputerActionResult
                     : nil
@@ -1970,7 +2283,8 @@ final class CompanionManager: ObservableObject {
                             ),
                             transcript: transcript,
                             screenCaptures: capturedContext.screenCaptures,
-                            timing: timing
+                            timing: timing,
+                            turnToken: turnToken
                         )
                     } catch is CancellationError {
                         clearMemorySourceNotice()
@@ -1997,16 +2311,20 @@ final class CompanionManager: ObservableObject {
                             transcript: transcript,
                             contextFrame: retryContext.frame,
                             screenCaptures: retryContext.screenCaptures,
-                            timing: timing
+                            timing: timing,
+                            turnToken: turnToken
                         )
-                        try Task.checkCancellation()
+                        guard self.ownsVoiceTurn(turnToken) else { throw CancellationError() }
                         timing.mark("runtime_restart_complete", reason: "ok")
                         try await presentVoiceResponse(
                             response.text,
-                            transcript: transcript,
-                            screenCaptures: retryContext.screenCaptures,
+                            transcript: response.presentationTranscript,
+                            screenCaptures: response.allowsScreenEffects
+                                ? retryContext.screenCaptures
+                                : [],
                             timing: timing,
-                            speechAlreadyPresented: response.speechAlreadyPresented
+                            speechAlreadyPresented: response.speechAlreadyPresented,
+                            turnToken: turnToken
                         )
                         return
                     } catch is CancellationError {
@@ -2014,6 +2332,12 @@ final class CompanionManager: ObservableObject {
                         responseOverlayManager.hideOverlay()
                         return
                     } catch {
+                        if freshStartAfterRejectedSteerIfNeeded(
+                            error,
+                            turnToken: turnToken
+                        ) {
+                            return
+                        }
                         clearMemorySourceNotice()
                         responseOverlayManager.hideOverlay()
                         timing.mark("runtime_restart_complete", reason: "failed")
@@ -2021,10 +2345,35 @@ final class CompanionManager: ObservableObject {
                 case .surfaceFailure:
                     break
                 }
-                await presentRuntimeFailure()
+                await presentRuntimeFailure(turnToken: turnToken)
             }
 
         }
+    }
+
+    static func rejectedSteerTranscript(from error: Error) -> String? {
+        guard let runtimeError = error as? YishuAgentRuntimeClientError,
+              case let .turnSteerRejected(message, _) = runtimeError else {
+            return nil
+        }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func freshStartAfterRejectedSteerIfNeeded(
+        _ error: Error,
+        turnToken: UUID
+    ) -> Bool {
+        guard ownsVoiceTurn(turnToken),
+              let transcript = Self.rejectedSteerTranscript(from: error) else {
+            return false
+        }
+        clearMemorySourceNotice()
+        responseOverlayManager.hideOverlay()
+        // `runVoiceTurnTask` invalidates/cancels the rejected session and takes
+        // a new ContextFrame before submitting this transcript exactly once.
+        runVoiceTurnTask(transcript: transcript, origin: nil)
+        return true
     }
 
     /// Handles an explicit, visually named click without paying the latency of
@@ -2236,12 +2585,13 @@ final class CompanionManager: ObservableObject {
         transcript: String,
         intentIsDirect: Bool,
         timing: VoiceTurnTiming,
-        traceID: String?
+        traceID: String?,
+        turnToken: UUID
     ) async -> DirectClickFastPathOutcome {
         guard intentIsDirect else {
             return .miss(.intentNotDirect)
         }
-        guard !Task.isCancelled else {
+        guard ownsVoiceTurn(turnToken) else {
             return .miss(.cancelled)
         }
 
@@ -2263,10 +2613,13 @@ final class CompanionManager: ObservableObject {
             do {
                 screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
             } catch {
-                let reason: DirectClickFastPathMissReason = Task.isCancelled ? .cancelled : .screenCaptureFailed
+                let reason: DirectClickFastPathMissReason = ownsVoiceTurn(turnToken)
+                    ? .screenCaptureFailed
+                    : .cancelled
                 timing.mark("screen_capture", reason: reason.rawValue)
                 return .miss(reason)
             }
+            guard ownsVoiceTurn(turnToken) else { return .miss(.cancelled) }
             let sourceDimensions = Self.telemetryDimensions(for: screenCaptures)
             timing.mark("screen_capture", reason: "ok", sourceDimensions: sourceDimensions)
 
@@ -2282,10 +2635,10 @@ final class CompanionManager: ObservableObject {
             if let resolvedMatch = await YishuDirectClickResolver.resolve(
                 utterance: transcript,
                 screens: screens
-            ), !Task.isCancelled {
+            ), ownsVoiceTurn(turnToken) {
                 match = resolvedMatch
                 timing.mark("ocr_resolve", reason: "match", sourceDimensions: sourceDimensions)
-            } else if Task.isCancelled {
+            } else if !ownsVoiceTurn(turnToken) {
                 timing.mark("ocr_resolve", reason: DirectClickFastPathMissReason.cancelled.rawValue, sourceDimensions: sourceDimensions)
                 return .miss(.cancelled)
             } else {
@@ -2296,6 +2649,7 @@ final class CompanionManager: ObservableObject {
         }
 
         let sourceDimensions = Self.telemetryDimensions(for: screenCaptures)
+        guard ownsVoiceTurn(turnToken) else { return .miss(.cancelled) }
 
         let captureFrameID = UUID().uuidString
         let request = YishuComputerActionRequest(
@@ -2316,11 +2670,17 @@ final class CompanionManager: ObservableObject {
         // this state through presentation so a missing POINT tag can never
         // downgrade a completed fast-path attempt into a model retry/failure.
         activeTurnConsumedComputerAction = true
+        activeTurnEffectInFlight = true
         timing.mark("action_dispatch", reason: "ocr_match", sourceDimensions: sourceDimensions)
         let result = await YishuComputerUseActuator.perform(
             request,
-            screenCaptures: screenCaptures
+            screenCaptures: screenCaptures,
+            authorizationFence: { [weak self] in
+                self?.ownsVoiceTurn(turnToken) == true
+            }
         )
+        guard ownsVoiceTurn(turnToken) else { return .handled(result) }
+        activeTurnEffectInFlight = false
         activeTurnLastComputerActionResult = result
         activeTurnLastComputerActionName = request.action
         timing.mark(
@@ -2348,16 +2708,14 @@ final class CompanionManager: ObservableObject {
                 + "method=\(result.method.rawValue) "
                 + "code=\(result.code.rawValue)"
         )
-        responseOverlayManager.showOverlayAndBeginStreaming()
-        responseOverlayManager.updateStreamingText(confirmation)
-        responseOverlayManager.finishStreaming()
-        voiceState = .responding
+        guard ownsVoiceTurn(turnToken) else { return .handled(result) }
         do {
             try await presentVoiceResponse(
                 confirmation,
                 transcript: transcript,
                 screenCaptures: screenCaptures,
-                timing: timing
+                timing: timing,
+                turnToken: turnToken
             )
         } catch is CancellationError {
             responseOverlayManager.hideOverlay()
@@ -2397,8 +2755,10 @@ final class CompanionManager: ObservableObject {
         transcript: String,
         contextFrame: YishuContextFrame,
         screenCaptures: [CompanionScreenCapture],
-        timing: VoiceTurnTiming? = nil
+        timing: VoiceTurnTiming? = nil,
+        turnToken: UUID
     ) async throws -> YishuRuntimeVoiceResponse {
+        guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
         try contextFrame.validate()
         if !yishuAgentRuntimeClient.isRunning {
             runtimeVisualPhase = .connecting
@@ -2423,26 +2783,31 @@ final class CompanionManager: ObservableObject {
             model: selectedModel
         )
         activeRuntimeRequestId = turn.requestId
+        activeRuntimePresentationTranscript = transcript
         responseOverlayManager.showOverlayAndBeginStreaming()
 
         defer {
             if activeRuntimeRequestId == turn.requestId {
                 activeRuntimeRequestId = nil
+                activeRuntimePresentationTranscript = nil
+                activeTurnEffectInFlight = false
             }
         }
 
-        var accumulatedText = ""
-        var completedText: String?
+        var presentationReducer = YishuRuntimePresentationReducer()
         var usedMemories: [YishuMemoryUsedItem] = []
-        let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
+        var isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
+        var presentationTranscript = transcript
         var didStartStreamingSpeech = false
-        let sentenceSpeechPipeline: YishuSentenceSpeechPipeline? = {
-            guard YishuSentenceSpeechPolicy.allowsStreaming(for: transcript) else {
+        func makeSentenceSpeechPipeline(for utterance: String) -> YishuSentenceSpeechPipeline? {
+            guard YishuSentenceSpeechPolicy.allowsStreaming(for: utterance) else {
                 return nil
             }
             let pipeline = YishuSentenceSpeechPipeline(
                 speaker: { [weak self] sentence in
-                    guard let self else { throw CancellationError() }
+                    guard let self, self.ownsVoiceTurn(turnToken) else {
+                        throw CancellationError()
+                    }
                     let ttsText = Self.speechText(from: sentence)
                     guard !ttsText.isEmpty else { throw CancellationError() }
                     try await self.elevenLabsTTSClient.speakText(
@@ -2456,7 +2821,8 @@ final class CompanionManager: ObservableObject {
             )
             activeSentenceSpeechPipeline = pipeline
             return pipeline
-        }()
+        }
+        var sentenceSpeechPipeline = makeSentenceSpeechPipeline(for: transcript)
         defer {
             if let sentenceSpeechPipeline,
                activeSentenceSpeechPipeline === sentenceSpeechPipeline {
@@ -2468,20 +2834,52 @@ final class CompanionManager: ObservableObject {
         clearMemorySourceNotice()
         try await withTaskCancellationHandler {
             for try await event in turn.events {
+                guard activeRuntimeRequestId == turn.requestId,
+                      ownsVoiceTurn(turnToken) else {
+                    continue
+                }
+                let eventGeneration = event.generation
+                let presentationAdvance = presentationReducer.advancePresentation(
+                    to: eventGeneration
+                )
+                guard presentationAdvance != .stale else { continue }
+                if presentationAdvance == .advanced {
+                    sentenceSpeechPipeline?.cancel()
+                    if let sentenceSpeechPipeline,
+                       activeSentenceSpeechPipeline === sentenceSpeechPipeline {
+                        activeSentenceSpeechPipeline = nil
+                    }
+                    usedMemories = []
+                    presentationTranscript = activeRuntimePresentationTranscript ?? transcript
+                    isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(
+                        presentationTranscript
+                    )
+                    didStartStreamingSpeech = false
+                    activeTurnConsumedComputerAction = false
+                    activeTurnLastComputerActionResult = nil
+                    activeTurnLastComputerActionName = nil
+                    activeTurnEffectInFlight = false
+                    clearMemorySourceNotice()
+                    responseOverlayManager.showOverlayAndBeginStreaming()
+                    sentenceSpeechPipeline = makeSentenceSpeechPipeline(
+                        for: presentationTranscript
+                    )
+                }
                 switch event {
-                case .started:
+                case let .started(generation):
+                    guard generation == presentationReducer.generation else { continue }
                     updateTurnVisualPhase(for: event)
                 case .toolStarted:
                     updateTurnVisualPhase(for: event)
                 case .toolCompleted:
                     updateTurnVisualPhase(for: event)
-                case let .memoryUsed(items):
+                case let .memoryUsed(items, _):
                     updateTurnVisualPhase(for: event)
                     usedMemories = items
                     applyMemorySourceNotice(Self.formatMemorySourceNotice(items))
-                case let .computerActionRequested(request):
+                case let .computerActionRequested(request, _):
                     guard activeRuntimeRequestId == turn.requestId,
-                          !Task.isCancelled else {
+                          ownsVoiceTurn(turnToken) else {
                         continue
                     }
                     // Once a desktop effect enters the turn, stop speculative
@@ -2495,6 +2893,7 @@ final class CompanionManager: ObservableObject {
                     // Consume the runtime action before awaiting the actuator;
                     // the final model text must not replay it via a POINT tag.
                     activeTurnConsumedComputerAction = true
+                    activeTurnEffectInFlight = true
                     updateTurnVisualPhase(for: event)
                     timing?.mark(
                         "pi_action_arrival",
@@ -2508,9 +2907,16 @@ final class CompanionManager: ObservableObject {
                     )
                     let result = await YishuComputerUseActuator.perform(
                         request,
-                        screenCaptures: screenCaptures
+                        screenCaptures: screenCaptures,
+                        authorizationFence: { [weak self] in
+                            self?.activeRuntimeRequestId == turn.requestId
+                                && self?.ownsVoiceTurn(turnToken) == true
+                        }
                     )
-                    if activeRuntimeRequestId == turn.requestId {
+                    let stillOwned = activeRuntimeRequestId == turn.requestId
+                        && ownsVoiceTurn(turnToken)
+                    if stillOwned {
+                        activeTurnEffectInFlight = false
                         activeTurnLastComputerActionResult = result
                         activeTurnLastComputerActionName = request.action
                     }
@@ -2526,16 +2932,20 @@ final class CompanionManager: ObservableObject {
                         result: result,
                         sourceCapture: Self.sourceCapture(for: request, in: screenCaptures)
                     )
+                    // A committed/attempted receipt still belongs to the old
+                    // Runtime port even if foreground ownership changed while
+                    // read-back was pending. UI/TTS below remain token-fenced.
                     try yishuAgentRuntimeClient.completeComputerAction(request, result: result)
-                case let .responseDelta(delta):
+                    guard stillOwned else { continue }
+                case let .responseDelta(delta, _):
                     updateTurnVisualPhase(for: event)
-                    accumulatedText += delta
+                    presentationReducer.appendCurrentDelta(delta)
                     // Direct-click turns stay buffered until the action/result
                     // decision is known; this prevents model tool markup from
                     // flashing in the overlay before `presentVoiceResponse`.
                     if !isDirectClickTurn {
                         responseOverlayManager.updateStreamingText(
-                            Self.scrubToolMarkup(from: accumulatedText)
+                            Self.scrubToolMarkup(from: presentationReducer.accumulatedText)
                         )
                     }
                     if let sentenceSpeechPipeline,
@@ -2547,9 +2957,9 @@ final class CompanionManager: ObservableObject {
                         voiceState = .responding
                         timing?.mark("tts_start", reason: "streaming_sentence")
                     }
-                case let .completed(text, _):
+                case let .completed(text, _, _):
                     updateTurnVisualPhase(for: event)
-                    completedText = text
+                    presentationReducer.completeCurrent(with: text)
                 case .cancelled:
                     updateTurnVisualPhase(for: event)
                     throw CancellationError()
@@ -2558,11 +2968,7 @@ final class CompanionManager: ObservableObject {
         } onCancel: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                if let sentenceSpeechPipeline,
-                   self.activeSentenceSpeechPipeline === sentenceSpeechPipeline {
-                    sentenceSpeechPipeline.cancel()
-                    self.activeSentenceSpeechPipeline = nil
-                }
+                self.cancelActiveSentenceSpeechPipeline()
                 guard self.activeRuntimeRequestId == turn.requestId else { return }
                 try? self.yishuAgentRuntimeClient.cancelTurn(
                     requestId: turn.requestId,
@@ -2573,7 +2979,7 @@ final class CompanionManager: ObservableObject {
 
         try Task.checkCancellation()
         let finalText = Self.scrubToolMarkup(
-            from: (completedText ?? accumulatedText)
+            from: presentationReducer.authoritativeText
         )
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !finalText.isEmpty else {
@@ -2612,7 +3018,9 @@ final class CompanionManager: ObservableObject {
         }
         return YishuRuntimeVoiceResponse(
             text: finalText,
-            speechAlreadyPresented: speechAlreadyPresented
+            speechAlreadyPresented: speechAlreadyPresented,
+            presentationTranscript: presentationTranscript,
+            allowsScreenEffects: presentationTranscript == transcript
         )
     }
 
@@ -2639,12 +3047,14 @@ final class CompanionManager: ObservableObject {
 
     /// Pi is the only product brain. A failed Runtime turn is surfaced
     /// honestly instead of silently forking the conversation through a second model loop.
-    private func presentRuntimeFailure() async {
+    private func presentRuntimeFailure(turnToken: UUID) async {
+        guard ownsVoiceTurn(turnToken) else { return }
         let message = "这轮没有完成。我保留了已有记录，你可以直接重试。"
         turnVisualPhase = .shapingOutput
         voiceState = .responding
         ensureOverlayVisibleForVoiceFeedback()
         responseOverlayManager.showStaticMessage(message, autoHideAfter: 10)
+        guard ownsVoiceTurn(turnToken) else { return }
         do {
             try await elevenLabsTTSClient.speakText(message, speed: speechSpeed)
         } catch {
@@ -2657,9 +3067,10 @@ final class CompanionManager: ObservableObject {
         transcript: String,
         screenCaptures: [CompanionScreenCapture],
         timing: VoiceTurnTiming? = nil,
-        speechAlreadyPresented: Bool = false
+        speechAlreadyPresented: Bool = false,
+        turnToken: UUID
     ) async throws {
-        try Task.checkCancellation()
+        guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
 
         // Visual surfaces and history consume the same scrubbed text. TTS
         // derives a separate readable version later so links remain visible
@@ -2701,6 +3112,7 @@ final class CompanionManager: ObservableObject {
                   !activeTurnConsumedComputerAction,
                   let pointCoordinate = parseResult.coordinate {
             activeTurnConsumedComputerAction = true
+            activeTurnEffectInFlight = true
             turnVisualPhase = .performingAction
             let request = YishuComputerActionRequest(
                 requestId: UUID(),
@@ -2719,8 +3131,13 @@ final class CompanionManager: ObservableObject {
             )
             let result = await YishuComputerUseActuator.perform(
                 request,
-                screenCaptures: screenCaptures
+                screenCaptures: screenCaptures,
+                authorizationFence: { [weak self] in
+                    self?.ownsVoiceTurn(turnToken) == true
+                }
             )
+            guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
+            activeTurnEffectInFlight = false
             turnVisualPhase = .confirmingToolResult
             activeTurnLastComputerActionResult = result
             activeTurnLastComputerActionName = request.action
@@ -2760,6 +3177,7 @@ final class CompanionManager: ObservableObject {
 
         // Runtime/local streaming may have been buffered for a direct click;
         // publish only the scrubbed final state before history and speech.
+        guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
         responseOverlayManager.updateStreamingText(spokenText)
         turnVisualPhase = .shapingOutput
         responseOverlayManager.finishStreaming()
@@ -2779,16 +3197,21 @@ final class CompanionManager: ObservableObject {
             // `response.completed` reconciled and drained the sentence queue;
             // replaying this final text would speak every sentence twice.
         } else if !ttsText.isEmpty {
+            guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
             timing?.mark("tts_start", reason: "speech")
             do {
                 try await elevenLabsTTSClient.speakText(
                     ttsText,
                     speed: speechSpeed
                 )
+                guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
                 turnVisualPhase = .shapingOutput
                 voiceState = .responding
                 timing?.mark("tts_complete", reason: "ok")
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
+                guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
                 timing?.mark("tts_complete", reason: "error")
                 ClickyAnalytics.trackTTSError(error: error.localizedDescription)
                 print("⚠️ MiniMax TTS failed")
@@ -3181,8 +3604,11 @@ final class CompanionManager: ObservableObject {
 
     private func cancelActiveRuntimeTurn(reason: String) {
         cancelActiveSentenceSpeechPipeline()
+        clearBargeInAttempt()
         guard let requestId = activeRuntimeRequestId else { return }
         activeRuntimeRequestId = nil
+        activeRuntimePresentationTranscript = nil
+        activeTurnEffectInFlight = false
         turnVisualPhase = .idle
         try? yishuAgentRuntimeClient.cancelTurn(requestId: requestId, reason: reason)
     }

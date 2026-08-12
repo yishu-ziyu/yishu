@@ -36,6 +36,35 @@ async function exerciseLedger(store: YishuStorePort): Promise<void> {
   assert.deepEqual(await store.getConversationTurn(started.id), started)
   assert.equal(await store.getConversationTurn("missing-turn"), null)
 
+  assert.equal(await store.replaceOpenConversationTurnInput({
+    conversationId: "CONVERSATION-1",
+    turnId: started.id,
+    traceId: "trace-1",
+    userInput: "不应跨 identity 写入",
+  }), false)
+  assert.equal(await store.replaceOpenConversationTurnInput({
+    conversationId: conversation.id,
+    turnId: "wrong-turn",
+    traceId: "trace-1",
+    userInput: "不应写入错误 turn",
+  }), false)
+  assert.equal(await store.replaceOpenConversationTurnInput({
+    conversationId: conversation.id,
+    turnId: started.id,
+    traceId: "wrong-trace",
+    userInput: "不应写入错误 trace",
+  }), false)
+  assert.equal(await store.replaceOpenConversationTurnInput({
+    conversationId: conversation.id,
+    turnId: started.id,
+    traceId: "trace-1",
+    userInput: "记住我的项目偏好，并且只用于这个项目",
+  }), true)
+  assert.equal(
+    (await store.getConversationTurn(started.id))?.userInput,
+    "记住我的项目偏好，并且只用于这个项目",
+  )
+
   const firstEvent = await store.appendConversationEvent({
     id: "event-1",
     conversationId: conversation.id,
@@ -88,6 +117,12 @@ async function exerciseLedger(store: YishuStorePort): Promise<void> {
   })
   assert.equal(completed.status, "completed")
   assert.equal(completed.assistantOutput, "已记住。")
+  assert.equal(await store.replaceOpenConversationTurnInput({
+    conversationId: conversation.id,
+    turnId: started.id,
+    traceId: "trace-1",
+    userInput: "终态后不得重写",
+  }), false)
   assert.deepEqual(
     await store.upsertConversationTurn({
       id: started.id,
@@ -290,6 +325,10 @@ describe("conversation ledger", () => {
     const reopened = new YishuStore(dir)
     assert.equal((await reopened.getConversation("conversation-1"))?.id, "conversation-1")
     assert.equal((await reopened.getConversationTurn("request-1"))?.traceId, "trace-1")
+    assert.equal(
+      (await reopened.getConversationTurn("request-1"))?.userInput,
+      "记住我的项目偏好，并且只用于这个项目",
+    )
     assert.equal((await reopened.listConversationTurns("conversation-1"))[0]?.traceId, "trace-1")
     assert.equal((await reopened.listConversationEvents("conversation-1")).length, 2)
   })
@@ -304,6 +343,10 @@ describe("conversation ledger", () => {
     const reopened = new SqliteYishuStore(dbPath)
     assert.equal((await reopened.getConversation("conversation-1"))?.id, "conversation-1")
     assert.equal((await reopened.getConversationTurn("request-1"))?.traceId, "trace-1")
+    assert.equal(
+      (await reopened.getConversationTurn("request-1"))?.userInput,
+      "记住我的项目偏好，并且只用于这个项目",
+    )
     assert.equal((await reopened.listConversationTurns("conversation-1"))[0]?.traceId, "trace-1")
     assert.equal((await reopened.listConversationEvents("conversation-1")).length, 2)
     reopened.close()

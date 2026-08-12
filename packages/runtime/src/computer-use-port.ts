@@ -15,6 +15,8 @@ const DESKTOP_RESOURCE = "desktop";
 export interface ComputerActionContext {
   requestId: string;
   traceId: string;
+  /** Runtime-owned assistant generation that authorized this dispatch. */
+  generation?: number;
   /** Stable product intent across attempts in one logical turn. */
   intentId?: string;
   /** Fresh product attempt identifier for this dispatch. */
@@ -172,6 +174,7 @@ export class StdioComputerUsePort implements ComputerUsePort {
           intentId,
           attemptId,
           ...(context.basisFrameId === undefined ? {} : { basisFrameId: context.basisFrameId }),
+          ...(context.generation === undefined ? {} : { generation: context.generation }),
           effectClass,
         }));
       } catch (error) {

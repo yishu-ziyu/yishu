@@ -13,6 +13,7 @@ import {
   runtimeEvent,
   type RuntimeEvent,
   type TurnCancelCommand,
+  type TurnInterruptCommand,
   type TurnStartCommand,
   type TurnSteerCommand,
 } from "../src/protocol.js";
@@ -128,19 +129,20 @@ test("project turns overwrite ambient global memory scope and stay isolated", as
   assert.deepEqual((await kernel.store.getConversation(commandB.payload.conversationId))?.sessionScope, projectB);
 });
 
-test("duplicate product-action request ids are rejected before a second write", async () => {
+test("same-trace product-action retries are idempotent before a second write", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
   const command = makeCommand("记住：同一个 request 只能写一次");
-  const first = runtime.startTurn(command, () => undefined);
-  const duplicateEvents: RuntimeEvent[] = [];
+  const firstEvents: RuntimeEvent[] = [];
+  const first = runtime.startTurn(command, (event) => firstEvents.push(event));
+  const retryEvents: RuntimeEvent[] = [];
 
-  await runtime.startTurn(command, (event) => duplicateEvents.push(event));
+  await runtime.startTurn(command, (event) => retryEvents.push(event));
   await first;
 
-  assert.equal(duplicateEvents[0]?.type, "turn.failed");
-  assert.equal(duplicateEvents[0]?.payload.code, "duplicate_request");
-  assert.equal(duplicateEvents[0]?.conversationId, command.payload.conversationId ?? command.requestId);
+  assert.deepEqual(retryEvents, []);
+  assert.equal(firstEvents.filter((event) => event.type === "response.completed").length, 1);
+  assert.equal((await kernel.store.getConversationTurn(command.requestId))?.status, "completed");
   assert.equal((await kernel.store.searchMemory("只能写一次")).length, 1);
 });
 
@@ -504,9 +506,11 @@ test("cancelled TaskTruth is not overwritten by a late runtime failure", async (
   await inner.executionStarted;
 
   const duplicateEvents: RuntimeEvent[] = [];
-  await runtime.startTurn(command, (event) => duplicateEvents.push(event));
+  const conflictingTraceId = randomUUID();
+  await runtime.startTurn({ ...command, traceId: conflictingTraceId }, (event) => duplicateEvents.push(event));
   assert.equal(duplicateEvents[0]?.type, "turn.failed");
   assert.equal(duplicateEvents[0]?.payload.code, "duplicate_request");
+  assert.equal(duplicateEvents[0]?.traceId, conflictingTraceId);
 
   await runtime.cancelTurn({
     schemaVersion: PROTOCOL_VERSION,
@@ -673,6 +677,183 @@ test("pre-execution cancellation blocks delayed events from manufacturing a task
   assert.deepEqual(await kernel.store.listTasks(), []);
   const cancelledTurn = (await kernel.store.getConversationTurn(command.requestId));
   assert.ok(cancelledTurn === null || cancelledTurn.status === "cancelled");
+});
+
+test("active cancellation requires the exact turn trace", async () => {
+  class TraceBoundRuntime implements AgentRuntime {
+    starts = 0;
+    cancels = 0;
+    private release!: () => void;
+    private readonly gate = new Promise<void>((resolve) => { this.release = resolve; });
+    private markReady!: () => void;
+    readonly ready = new Promise<void>((resolve) => { this.markReady = resolve; });
+
+    async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+      this.starts += 1;
+      emit(runtimeEvent("turn.started", command.requestId, command.traceId, {
+        runtime: "trace-bound",
+        generation: 1,
+      }));
+      this.markReady();
+      await this.gate;
+    }
+    async interruptTurn(): Promise<void> {}
+    async steerTurn(): Promise<void> {}
+    async cancelTurn(): Promise<void> {
+      this.cancels += 1;
+      this.release();
+    }
+    async dispose(): Promise<void> { this.release(); }
+  }
+
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new TraceBoundRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("trace 必须精确匹配");
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await inner.ready;
+
+  const retryVisible: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => retryVisible.push(event));
+  assert.equal(inner.starts, 1);
+  assert.deepEqual(retryVisible, []);
+  assert.equal(visible.some((event) => event.type === "turn.cancelled"), false);
+
+  await runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { reason: "wrong_trace" },
+  }, () => undefined);
+  assert.equal(inner.cancels, 0);
+  assert.equal(visible.some((event) => event.type === "turn.cancelled"), false);
+  assert.equal((await kernel.store.getConversationTurn(command.requestId))?.status, "open");
+
+  await runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "correct_trace" },
+  }, () => undefined);
+  await start;
+
+  assert.equal(inner.cancels, 1);
+  assert.equal(inner.starts, 1);
+  assert.deepEqual(retryVisible, []);
+  assert.equal(visible.filter((event) => event.type === "turn.cancelled").length, 1);
+  assert.equal((await kernel.store.getConversationTurn(command.requestId))?.status, "cancelled");
+});
+
+test("cancel tombstones a replacement still waiting for conversation admission", async () => {
+  class AdmissionRuntime implements AgentRuntime {
+    readonly starts: string[] = [];
+    private firstRequestId?: string;
+    private releaseFirst!: () => void;
+    private readonly firstGate = new Promise<void>((resolve) => { this.releaseFirst = resolve; });
+    private markFirstStarted!: () => void;
+    readonly firstStarted = new Promise<void>((resolve) => { this.markFirstStarted = resolve; });
+    private markFirstCancel!: () => void;
+    readonly firstCancelStarted = new Promise<void>((resolve) => { this.markFirstCancel = resolve; });
+
+    async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+      this.starts.push(command.requestId);
+      emit(runtimeEvent("turn.started", command.requestId, command.traceId, {
+        runtime: "admission",
+        generation: 1,
+      }));
+      if (this.firstRequestId === undefined) {
+        this.firstRequestId = command.requestId;
+        this.markFirstStarted();
+        await this.firstGate;
+        return;
+      }
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "replacement completed",
+        verified: false,
+        generation: 1,
+      }));
+    }
+
+    async interruptTurn(): Promise<void> {}
+    async steerTurn(): Promise<void> {}
+    async cancelTurn(command: TurnCancelCommand): Promise<void> {
+      if (command.requestId === this.firstRequestId) {
+        this.markFirstCancel();
+        await this.firstGate;
+      }
+    }
+    release(): void { this.releaseFirst(); }
+    async dispose(): Promise<void> { this.releaseFirst(); }
+  }
+
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new AdmissionRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const conversationId = randomUUID();
+  const first = makeCommand("第一轮");
+  first.payload.conversationId = conversationId;
+  const replacement = makeCommand("替换第一轮");
+  replacement.payload.conversationId = conversationId;
+  const cancelledReplacement = makeCommand("取消这个等待中的替换");
+  cancelledReplacement.payload.conversationId = conversationId;
+  const cancelledVisible: RuntimeEvent[] = [];
+
+  const firstRun = runtime.startTurn(first, () => undefined);
+  await inner.firstStarted;
+  const replacementRun = runtime.startTurn(replacement, () => undefined);
+  await inner.firstCancelStarted;
+  const cancelledRun = runtime.startTurn(cancelledReplacement, (event) => cancelledVisible.push(event));
+  const retryPendingVisible: RuntimeEvent[] = [];
+  await runtime.startTurn(cancelledReplacement, (event) => retryPendingVisible.push(event));
+  assert.deepEqual(retryPendingVisible, []);
+  assert.equal(inner.starts.includes(cancelledReplacement.requestId), false);
+
+  const duplicatePending = {
+    ...cancelledReplacement,
+    traceId: randomUUID(),
+    payload: {
+      ...cancelledReplacement.payload,
+      conversationId: randomUUID(),
+    },
+  };
+  const duplicateVisible: RuntimeEvent[] = [];
+  await runtime.startTurn(duplicatePending, (event) => duplicateVisible.push(event));
+  assert.equal(duplicateVisible[0]?.type, "turn.failed");
+  assert.equal(duplicateVisible[0]?.payload.code, "duplicate_request");
+
+  await resolvesWithin(runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: cancelledReplacement.requestId,
+    traceId: duplicatePending.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "wrong_trace" },
+  }, () => undefined), 500, "wrong-trace pending cancellation ignored");
+  assert.equal(inner.starts.includes(cancelledReplacement.requestId), false);
+  assert.equal(await kernel.store.getConversationTurn(cancelledReplacement.requestId), null);
+
+  await resolvesWithin(runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: cancelledReplacement.requestId,
+    traceId: cancelledReplacement.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined), 500, "pending replacement tombstone");
+  inner.release();
+  await Promise.all([firstRun, replacementRun, cancelledRun]);
+
+  assert.equal(inner.starts.includes(cancelledReplacement.requestId), false);
+  assert.equal(
+    (await kernel.store.getConversationTurn(cancelledReplacement.requestId))?.status,
+    "cancelled",
+  );
+  assert.equal(cancelledVisible.filter((event) => event.type === "turn.cancelled").length, 1);
 });
 
 class DisposeSettledRuntime implements AgentRuntime {
@@ -1086,7 +1267,7 @@ test("terminal live events allowlist failure code and sanitize visible completio
   assert.doesNotMatch(JSON.stringify(failedVisible), /SECRET_VISIBLE|private diagnosis|selectedText|message/);
   assert.deepEqual(
     failedVisible.find((event) => event.type === "turn.failed")?.payload,
-    { code: "runtime_operation_failed" },
+    { code: "runtime_operation_failed", generation: 1 },
   );
 
   const completedRuntime = new ProductKernelRuntime(new MaliciousTerminalRuntime(false), kernel);
@@ -1098,7 +1279,7 @@ test("terminal live events allowlist failure code and sanitize visible completio
   assert.ok(completed);
   assert.doesNotMatch(JSON.stringify(completed), /SECRET_VISIBLE|private verifier|selectedText|details/);
   assert.match(String(completed.payload.text), /\[redacted\]/);
-  assert.deepEqual(Object.keys(completed.payload).sort(), ["text", "verified"]);
+  assert.deepEqual(Object.keys(completed.payload).sort(), ["generation", "text", "verified"]);
 });
 
 test("cancelling a product action closes the gate before a slow registry result can speak success", async () => {
@@ -1403,7 +1584,11 @@ test("terminal replay latches before a concurrent steer can append input or call
     requestId: command.requestId,
     traceId: command.traceId,
     sentAt: new Date().toISOString(),
-    payload: { message: "late steer" },
+    payload: {
+      message: "late steer",
+      nextGeneration: 2,
+      interactionClass: "conversation",
+    },
   }, () => undefined);
 
   releaseEvents();
@@ -1541,15 +1726,32 @@ test("steer is recorded as a user-visible event on the same turn", async () => {
     private release!: () => void;
     private readonly gate = new Promise<void>((resolve) => { this.release = resolve; });
     async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
-      emit(runtimeEvent("turn.started", command.requestId, command.traceId, { runtime: "waiting" }));
+      emit(runtimeEvent("turn.started", command.requestId, command.traceId, {
+        runtime: "waiting",
+        generation: 1,
+      }));
       await this.gate;
+      emit(runtimeEvent("response.delta", command.requestId, command.traceId, {
+        text: "收到转向",
+        generation: 2,
+      }));
       emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
         text: "收到转向",
         verified: false,
+        generation: 2,
+      }));
+    }
+    async interruptTurn(command: TurnInterruptCommand, emit: RuntimeEventSink): Promise<void> {
+      emit(runtimeEvent("turn.interrupt.accepted", command.requestId, command.traceId, {
+        interruptedGeneration: 1,
+        nextGeneration: 2,
       }));
     }
     async steerTurn(command: TurnSteerCommand, emit: RuntimeEventSink): Promise<void> {
-      emit(runtimeEvent("runtime.status", command.requestId, command.traceId, { status: "steering_received" }));
+      emit(runtimeEvent("runtime.status", command.requestId, command.traceId, {
+        status: "steering_received",
+        generation: 2,
+      }));
       this.release();
     }
     async cancelTurn(_command: TurnCancelCommand, _emit: RuntimeEventSink): Promise<void> {}
@@ -1558,22 +1760,430 @@ test("steer is recorded as a user-visible event on the same turn", async () => {
 
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const runtime = new ProductKernelRuntime(new WaitingRuntime(), kernel);
-  const command = makeCommand("先做第一步");
+  const command = makeCommand("先解释第一步是什么");
   command.payload.conversationId = randomUUID();
   const start = runtime.startTurn(command, () => undefined);
   await new Promise((resolve) => setTimeout(resolve, 0));
+  const interruptEvents: RuntimeEvent[] = [];
+  await runtime.interruptTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.interrupt",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { expectedGeneration: 1, reason: "user_barge_in" },
+  }, (event) => interruptEvents.push(event));
+  assert.equal(interruptEvents[0]?.type, "turn.interrupt.accepted");
   await runtime.steerTurn({
     schemaVersion: PROTOCOL_VERSION,
     type: "turn.steer",
     requestId: command.requestId,
     traceId: command.traceId,
     sentAt: new Date().toISOString(),
-    payload: { message: "改成第二步" },
+    payload: {
+      message: "改成解释第二步",
+      nextGeneration: 2,
+      interactionClass: "conversation",
+    },
   }, () => undefined);
   await start;
 
   const ledgerEvents = await kernel.store.listConversationEvents(command.payload.conversationId);
   assert.ok(ledgerEvents.some((event) => event.type === "turn.user_input" && event.payload.channel === "steer"));
+  assert.equal(
+    (await kernel.store.getConversationTurn(command.requestId))?.userInput,
+    "改成解释第二步",
+  );
+});
+
+class FencedBargeInRuntime implements AgentRuntime {
+  readonly ready: Promise<void>;
+  private markReady!: () => void;
+  private readonly finished: Promise<void>;
+  protected finish!: () => void;
+  protected turnEmit?: RuntimeEventSink;
+  private command?: TurnStartCommand;
+  generation = 1;
+  effectDispatches = 0;
+  steers = 0;
+
+  constructor(private readonly completeOnGeneration: number = 2) {
+    this.ready = new Promise<void>((resolve) => { this.markReady = resolve; });
+    this.finished = new Promise<void>((resolve) => { this.finish = resolve; });
+  }
+
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    this.command = command;
+    this.turnEmit = emit;
+    emit(runtimeEvent("turn.started", command.requestId, command.traceId, {
+      runtime: "fenced-barge-in",
+      generation: 1,
+    }));
+    this.markReady();
+    await this.finished;
+  }
+
+  async interruptTurn(command: TurnInterruptCommand, emit: RuntimeEventSink): Promise<void> {
+    if (this.effectDispatches > 0) {
+      emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
+        generation: this.generation,
+        code: "effect_already_dispatched",
+      }));
+      return;
+    }
+    if (command.payload.expectedGeneration !== this.generation) {
+      emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
+        generation: this.generation,
+        code: "generation_mismatch",
+      }));
+      return;
+    }
+    const interruptedGeneration = this.generation;
+    this.generation += 1;
+    emit(runtimeEvent("turn.interrupt.accepted", command.requestId, command.traceId, {
+      interruptedGeneration,
+      nextGeneration: this.generation,
+    }));
+  }
+
+  emitOldGenerationAfterFloor(): void {
+    if (!this.command || !this.turnEmit) throw new Error("turn not ready");
+    this.turnEmit(runtimeEvent("response.delta", this.command.requestId, this.command.traceId, {
+      text: "OLD_DELTA",
+      generation: 1,
+    }));
+    this.turnEmit(runtimeEvent("tool.started", this.command.requestId, this.command.traceId, {
+      toolName: "delegate_task",
+      generation: 1,
+    }));
+    this.turnEmit(runtimeEvent("computer.action.requested", this.command.requestId, this.command.traceId, {
+      actionId: randomUUID(),
+      action: "left_click",
+      x: 10,
+      y: 10,
+      generation: 1,
+    }));
+    this.turnEmit(runtimeEvent("response.completed", this.command.requestId, this.command.traceId, {
+      text: "OLD_FINAL",
+      verified: false,
+      generation: 1,
+    }));
+  }
+
+  tryDispatchEffect(): void {
+    // Mirrors the Pi pre-dispatch floor: replacement conversational
+    // generations never inherit desktop-effect authority.
+    if (this.generation !== 1 || !this.command || !this.turnEmit) return;
+    this.effectDispatches += 1;
+    this.turnEmit(runtimeEvent("tool.started", this.command.requestId, this.command.traceId, {
+      toolName: "computer_control",
+      generation: 1,
+    }));
+  }
+
+  async steerTurn(command: TurnSteerCommand, emit: RuntimeEventSink): Promise<void> {
+    this.steers += 1;
+    emit(runtimeEvent("runtime.status", command.requestId, command.traceId, {
+      status: "steering_received",
+      generation: command.payload.nextGeneration,
+    }));
+    this.turnEmit?.(runtimeEvent("response.delta", command.requestId, command.traceId, {
+      text: `NEW_${command.payload.nextGeneration}`,
+      generation: command.payload.nextGeneration,
+    }));
+    if (command.payload.nextGeneration === this.completeOnGeneration) {
+      this.turnEmit?.(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: `NEW_FINAL_${command.payload.nextGeneration}`,
+        verified: false,
+        generation: command.payload.nextGeneration,
+      }));
+      this.finish();
+    }
+  }
+
+  async cancelTurn(): Promise<void> { this.finish(); }
+  async dispose(): Promise<void> { this.finish(); }
+}
+
+function interruptCommand(command: TurnStartCommand, generation: number): TurnInterruptCommand {
+  return {
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.interrupt",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { expectedGeneration: generation, reason: "user_barge_in" },
+  };
+}
+
+function steerCommand(command: TurnStartCommand, generation: number, message: string): TurnSteerCommand {
+  return {
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.steer",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { message, nextGeneration: generation, interactionClass: "conversation" },
+  };
+}
+
+test("accepted barge-in drops every old generation output and admits one durable steer", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new FencedBargeInRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("先解释旧问题");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await inner.ready;
+
+  const acknowledgements: RuntimeEvent[] = [];
+  await runtime.interruptTurn(interruptCommand(command, 1), (event) => acknowledgements.push(event));
+  inner.emitOldGenerationAfterFloor();
+  await Promise.all([
+    runtime.steerTurn(steerCommand(command, 2, "解释新问题"), () => undefined),
+    runtime.steerTurn(steerCommand(command, 2, "重复新问题"), (event) => acknowledgements.push(event)),
+  ]);
+  await start;
+
+  assert.equal(acknowledgements[0]?.type, "turn.interrupt.accepted");
+  assert.ok(acknowledgements.some((event) =>
+    event.type === "turn.interrupt.rejected" && event.payload.code === "duplicate_steer"));
+  assert.equal(inner.steers, 1);
+  assert.equal(inner.effectDispatches, 0);
+  assert.doesNotMatch(JSON.stringify(visible), /OLD_DELTA|OLD_FINAL|computer\.action\.requested|delegate_task/);
+  assert.equal(visible.find((event) => event.type === "response.completed")?.payload.text, "NEW_FINAL_2");
+  const ledgerEvents = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(ledgerEvents.filter((event) =>
+    event.type === "turn.user_input" && event.payload.channel === "steer").length, 1);
+  assert.equal((await kernel.store.getConversationTurn(command.requestId))?.userInput, "解释新问题");
+});
+
+test("replacement failure before assistant start keeps its safe code and current generation", async () => {
+  class ReplacementFailureRuntime extends FencedBargeInRuntime {
+    override async steerTurn(command: TurnSteerCommand): Promise<void> {
+      // Pi owns this terminal on the original startTurn sink. It deliberately
+      // contains hostile provider text to prove Product only forwards the
+      // controlled code and current generation.
+      this.turnEmit?.(runtimeEvent("turn.failed", command.requestId, command.traceId, {
+        code: "steer_replacement_failed_before_start",
+        message: "provider transcript SECRET must not cross",
+        generation: command.payload.nextGeneration,
+      }));
+      this.finish();
+    }
+  }
+
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new ReplacementFailureRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("问题 A");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await inner.ready;
+  await runtime.interruptTurn(interruptCommand(command, 1), () => undefined);
+  await runtime.steerTurn(steerCommand(command, 2, "问题 B"), () => undefined);
+  await start;
+
+  const failure = visible.find((event) => event.type === "turn.failed");
+  assert.deepEqual(failure?.payload, {
+    code: "steer_replacement_failed_before_start",
+    generation: 2,
+  });
+  assert.doesNotMatch(JSON.stringify(visible), /SECRET|provider transcript/);
+  assert.equal((await kernel.store.getConversationTurn(command.requestId))?.status, "failed");
+  const ledgerEvents = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(ledgerEvents.filter((event) => event.type === "turn.failed").length, 1);
+  assert.equal(
+    ledgerEvents.find((event) => event.type === "turn.failed")?.payload.code,
+    "steer_replacement_failed_before_start",
+  );
+  assert.equal(inner.steers, 0, "Product must not retry the failed replacement");
+});
+
+test("effect dispatch and interrupt race has exactly one safe winner", async () => {
+  const actionFirstKernel = createYishuKernel({ storeBackend: "memory" });
+  const actionFirstInner = new FencedBargeInRuntime();
+  const actionFirst = new ProductKernelRuntime(actionFirstInner, actionFirstKernel);
+  const actionCommand = makeCommand("解释一下，然后也许继续");
+  const actionStart = actionFirst.startTurn(actionCommand, () => undefined);
+  await actionFirstInner.ready;
+  actionFirstInner.tryDispatchEffect();
+  const rejected: RuntimeEvent[] = [];
+  await actionFirst.interruptTurn(interruptCommand(actionCommand, 1), (event) => rejected.push(event));
+  assert.equal(actionFirstInner.effectDispatches, 1);
+  assert.equal(rejected[0]?.payload.code, "effect_started");
+  await actionFirst.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: actionCommand.requestId,
+    traceId: actionCommand.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "test_cleanup" },
+  }, () => undefined);
+  await actionStart;
+
+  const interruptFirstKernel = createYishuKernel({ storeBackend: "memory" });
+  const interruptFirstInner = new FencedBargeInRuntime();
+  const interruptFirst = new ProductKernelRuntime(interruptFirstInner, interruptFirstKernel);
+  const interruptCommandInput = makeCommand("继续解释另一个问题");
+  const interruptStart = interruptFirst.startTurn(interruptCommandInput, () => undefined);
+  await interruptFirstInner.ready;
+  const accepted: RuntimeEvent[] = [];
+  await interruptFirst.interruptTurn(interruptCommand(interruptCommandInput, 1), (event) => accepted.push(event));
+  interruptFirstInner.tryDispatchEffect();
+  assert.equal(accepted[0]?.type, "turn.interrupt.accepted");
+  assert.equal(interruptFirstInner.effectDispatches, 0);
+  await interruptFirst.steerTurn(steerCommand(interruptCommandInput, 2, "安全的新问题"), () => undefined);
+  await interruptStart;
+});
+
+test("one Product turn supports consecutive generation 1 to 2 to 3 barge-ins", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new FencedBargeInRuntime(3);
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("问题一");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await inner.ready;
+  const acks: RuntimeEvent[] = [];
+  await runtime.interruptTurn(interruptCommand(command, 1), (event) => acks.push(event));
+  await runtime.steerTurn(steerCommand(command, 2, "问题二"), () => undefined);
+  await runtime.interruptTurn(interruptCommand(command, 2), (event) => acks.push(event));
+  await runtime.steerTurn(steerCommand(command, 3, "问题三"), () => undefined);
+  await start;
+
+  assert.deepEqual(acks.map((event) => event.payload.nextGeneration), [2, 3]);
+  assert.equal(inner.steers, 2);
+  assert.equal(visible.find((event) => event.type === "response.completed")?.payload.generation, 3);
+  assert.equal((await kernel.store.getConversationTurn(command.requestId))?.userInput, "问题三");
+
+  const capturing = new CapturingRuntime();
+  const restarted = new ProductKernelRuntime(capturing, kernel);
+  const followup = makeCommand("问题四");
+  followup.payload.conversationId = command.payload.conversationId;
+  await restarted.startTurn(followup, () => undefined);
+  const attached = capturing.lastCommand as ContinuityAttachedCommand;
+  assert.deepEqual(attached.payload.__yishuConversationHistory?.map((turn) => turn.userInput), [
+    "问题三",
+  ]);
+});
+
+class SupersedeAwaitingSteerRuntime implements AgentRuntime {
+  readonly starts: string[] = [];
+  maxConcurrentStarts = 0;
+  private concurrentStarts = 0;
+  private firstRequestId?: string;
+  private releaseFirst!: () => void;
+  private readonly firstGate = new Promise<void>((resolve) => { this.releaseFirst = resolve; });
+  private markFirstReady!: () => void;
+  readonly firstReady = new Promise<void>((resolve) => { this.markFirstReady = resolve; });
+  private markFirstFinished!: () => void;
+  private readonly firstFinished = new Promise<void>((resolve) => { this.markFirstFinished = resolve; });
+
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    this.starts.push(command.requestId);
+    this.concurrentStarts += 1;
+    this.maxConcurrentStarts = Math.max(this.maxConcurrentStarts, this.concurrentStarts);
+    emit(runtimeEvent("turn.started", command.requestId, command.traceId, {
+      runtime: "supersede-awaiting-steer",
+      generation: 1,
+    }));
+    try {
+      if (this.firstRequestId === undefined) {
+        this.firstRequestId = command.requestId;
+        this.markFirstReady();
+        await this.firstGate;
+        return;
+      }
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "replacement only",
+        verified: false,
+        generation: 1,
+      }));
+    } finally {
+      this.concurrentStarts -= 1;
+      if (command.requestId === this.firstRequestId) this.markFirstFinished();
+    }
+  }
+
+  async interruptTurn(command: TurnInterruptCommand, emit: RuntimeEventSink): Promise<void> {
+    emit(runtimeEvent("turn.interrupt.accepted", command.requestId, command.traceId, {
+      interruptedGeneration: 1,
+      nextGeneration: 2,
+    }));
+  }
+
+  async steerTurn(): Promise<void> {}
+
+  async cancelTurn(command: TurnCancelCommand): Promise<void> {
+    if (command.requestId !== this.firstRequestId) return;
+    this.releaseFirst();
+    await this.firstFinished;
+  }
+
+  async dispose(): Promise<void> { this.releaseFirst(); }
+}
+
+test("supersede closes an accepted turn that is still awaiting steer", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new SupersedeAwaitingSteerRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const conversationId = randomUUID();
+  const first = makeCommand("问题 A");
+  first.payload.conversationId = conversationId;
+  const replacement = makeCommand("问题 B");
+  replacement.payload.conversationId = conversationId;
+  const firstVisible: RuntimeEvent[] = [];
+  const replacementVisible: RuntimeEvent[] = [];
+
+  const firstRun = runtime.startTurn(first, (event) => firstVisible.push(event));
+  await inner.firstReady;
+  const interruptEvents: RuntimeEvent[] = [];
+  await runtime.interruptTurn(interruptCommand(first, 1), (event) => interruptEvents.push(event));
+  assert.equal(interruptEvents[0]?.type, "turn.interrupt.accepted");
+
+  const replacementRun = runtime.startTurn(replacement, (event) => replacementVisible.push(event));
+  await Promise.all([firstRun, replacementRun]);
+
+  assert.equal((await kernel.store.getConversationTurn(first.requestId))?.status, "cancelled");
+  assert.equal((await kernel.store.getConversationTurn(replacement.requestId))?.status, "completed");
+  assert.equal(firstVisible.filter((event) => event.type === "turn.cancelled").length, 1);
+  assert.equal(replacementVisible.filter((event) => event.type === "response.completed").length, 1);
+  assert.deepEqual(inner.starts, [first.requestId, replacement.requestId]);
+  assert.equal(inner.maxConcurrentStarts, 1);
+
+  // Replaying A proves its active gate was removed and cannot start inner a
+  // second time after the supersede terminal became durable.
+  await runtime.startTurn(first, () => undefined);
+  assert.deepEqual(inner.starts, [first.requestId, replacement.requestId]);
+});
+
+test("watchdog cancellation closes an accepted turn that never receives steer", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner = new SupersedeAwaitingSteerRuntime();
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("等待语音转录");
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await inner.firstReady;
+  await runtime.interruptTurn(interruptCommand(command, 1), () => undefined);
+
+  await resolvesWithin(runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "interrupt_steer_timeout" },
+  }, () => undefined), 500, "watchdog cancellation while awaiting steer");
+  await start;
+
+  assert.equal((await kernel.store.getConversationTurn(command.requestId))?.status, "cancelled");
+  assert.equal(visible.filter((event) => event.type === "turn.cancelled").length, 1);
+  assert.equal(visible.some((event) => event.type === "response.completed"), false);
 });
 
 test("legacy turns fall back to request id as conversation id and enrich events", async () => {
