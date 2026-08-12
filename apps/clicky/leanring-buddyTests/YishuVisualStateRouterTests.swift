@@ -17,7 +17,7 @@ struct YishuVisualStateRouterTests {
             runtimePhase: .connecting
         )) == .connecting)
         #expect(YishuVisualStateRouter.route(runtimeEvent: .ready(mode: "pi")) == .idle)
-        #expect(YishuVisualStateRouter.route(runtimeEvent: .stopped(exitCode: 1)) == .connecting)
+        #expect(YishuVisualStateRouter.route(runtimeEvent: .stopped(exitCode: 1)) == .idle)
     }
 
     @Test func turnPhasesRouteWithoutLocalizedStatusText() {
@@ -74,11 +74,13 @@ struct YishuVisualStateRouterTests {
     @Test func delegatedRunningTasksRouteToWeavingAndTerminalTasksDoNot() {
         let now = Date()
         let running = delegatedTask(status: .running, updatedAt: now)
+        let pending = delegatedTask(status: .pending, updatedAt: now)
         let done = delegatedTask(status: .done, updatedAt: now, resultKind: .succeeded, summary: "完成")
 
         #expect(YishuVisualStateRouter.route(delegatedTasks: []) == .idle)
         #expect(YishuVisualStateRouter.route(delegatedTasks: [done]) == .idle)
         #expect(YishuVisualStateRouter.route(delegatedTasks: [done, running]) == .activeWorkerCount(1))
+        #expect(YishuVisualStateRouter.route(delegatedTasks: [pending, running]) == .activeWorkerCount(2))
         #expect(YishuVisualStateRouter.route(YishuVisualStateInputs(
             delegatedPresence: .activeWorkerCount(2)
         )) == .weaving)
@@ -155,7 +157,8 @@ struct YishuVisualStateRouterTests {
             provider: "openai",
             model: "gpt-5.6-sol",
             resultKind: resultKind,
-            summary: summary
+            summary: summary,
+            sourceEventId: UUID()
         )
     }
 }

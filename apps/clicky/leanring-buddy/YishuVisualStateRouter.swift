@@ -155,7 +155,7 @@ enum YishuVisualStateRouter {
         case .ready:
             return .idle
         case .stopped:
-            return .connecting
+            return .idle
         }
     }
 
@@ -181,7 +181,7 @@ enum YishuVisualStateRouter {
     }
 
     static func route(delegatedTasks tasks: [YishuDelegatedTaskPresenceEvent]) -> YishuDelegatedPresenceVisualPhase {
-        let activeCount = tasks.filter { $0.status == .running }.count
+        let activeCount = tasks.filter { $0.status == .pending || $0.status == .running }.count
         return activeCount > 0 ? .activeWorkerCount(activeCount) : .idle
     }
 

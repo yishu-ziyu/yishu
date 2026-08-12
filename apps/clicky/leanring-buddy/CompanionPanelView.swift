@@ -39,6 +39,13 @@ struct CompanionPanelView: View {
                         .padding(.horizontal, 16)
                 }
 
+                if companionManager.voiceProxyAvailability.isReady,
+                   companionManager.agentRuntimeAvailability != .ready {
+                    agentRuntimeStatusSection
+                        .padding(.top, 12)
+                        .padding(.horizontal, 16)
+                }
+
                 if !companionManager.allPermissionsGranted {
                     Spacer()
                         .frame(height: 16)
@@ -1334,6 +1341,11 @@ struct CompanionPanelView: View {
                 return Color.orange
             }
         }
+        if companionManager.agentRuntimeAvailability != .ready {
+            return companionManager.agentRuntimeAvailability == .starting
+                ? DS.Colors.blue400
+                : Color.orange
+        }
         if !companionManager.isOverlayVisible {
             return DS.Colors.textTertiary
         }
@@ -1351,6 +1363,14 @@ struct CompanionPanelView: View {
         if !companionManager.voiceProxyAvailability.isReady {
             return companionManager.voiceProxyAvailability.statusChip
         }
+        switch companionManager.agentRuntimeAvailability {
+        case .starting:
+            return "Runtime 连接中"
+        case .stopped:
+            return "Runtime 离线"
+        case .ready:
+            break
+        }
         if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
             return "设置中"
         }
@@ -1367,6 +1387,44 @@ struct CompanionPanelView: View {
         case .responding:
             return "在说"
         }
+    }
+
+    @ViewBuilder
+    private var agentRuntimeStatusSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(
+                companionManager.agentRuntimeAvailability == .starting
+                    ? "正在连接 Pi Runtime…"
+                    : "Pi Runtime 已停止。后台任务会标记为已中断。"
+            )
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(DS.Colors.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if companionManager.agentRuntimeAvailability == .stopped {
+                Button(action: {
+                    companionManager.retryAgentRuntime()
+                }) {
+                    Text("重连 Runtime")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(DS.Colors.blue400)
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
     }
 
     @ViewBuilder

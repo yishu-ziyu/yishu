@@ -70,6 +70,12 @@ struct YishuRuntimeTurn {
     let events: AsyncThrowingStream<YishuRuntimeTurnEvent, Error>
 }
 
+struct YishuDelegatedTaskCancelAcceptance: Equatable {
+    let requestId: UUID
+    let taskId: UUID
+    let mainConversationId: UUID
+}
+
 struct YishuAuthRequest {
     let requestId: UUID
     let events: AsyncThrowingStream<YishuAuthEvent, Error>
@@ -92,6 +98,12 @@ enum YishuAgentRuntimeClientError: LocalizedError {
     case memoryFailed(String)
     case memoryTimedOut
     case invalidMemoryEvent
+    case taskListFailed(String)
+    case taskListTimedOut
+    case invalidTaskListEvent
+    case taskCancelFailed(String)
+    case taskCancelTimedOut
+    case invalidTaskCancelEvent
 
     var errorDescription: String? {
         switch self {
@@ -111,6 +123,12 @@ enum YishuAgentRuntimeClientError: LocalizedError {
         case let .memoryFailed(message): return message
         case .memoryTimedOut: return "读取记忆超时。"
         case .invalidMemoryEvent: return "记忆协议无效。"
+        case let .taskListFailed(message): return message
+        case .taskListTimedOut: return "读取后台任务超时。"
+        case .invalidTaskListEvent: return "后台任务快照协议无效。"
+        case let .taskCancelFailed(message): return message
+        case .taskCancelTimedOut: return "停止后台任务超时。"
+        case .invalidTaskCancelEvent: return "停止后台任务的运行时回执无效。"
         }
     }
 }
@@ -261,6 +279,24 @@ final class YishuAgentRuntimeClient {
     }
 
     private var historyContinuations: [UUID: PendingHistoryRequest] = [:]
+
+    private struct PendingTaskListRequest {
+        let traceId: UUID
+        let mainConversationId: UUID
+        let continuation: CheckedContinuation<[YishuDelegatedTaskPresenceEvent], Error>
+        var timeoutTask: Task<Void, Never>?
+    }
+
+    private struct PendingTaskCancelRequest {
+        let traceId: UUID
+        let taskId: UUID
+        let mainConversationId: UUID
+        let continuation: CheckedContinuation<YishuDelegatedTaskCancelAcceptance, Error>
+        var timeoutTask: Task<Void, Never>?
+    }
+
+    private var taskListContinuations: [UUID: PendingTaskListRequest] = [:]
+    private var taskCancelContinuations: [UUID: PendingTaskCancelRequest] = [:]
 
     var isRunning: Bool { process?.isRunning == true }
 
@@ -851,23 +887,92 @@ final class YishuAgentRuntimeClient {
         }
     }
 
+    func listDelegatedTasks(
+        mainConversationId: UUID? = nil
+    ) async throws -> [YishuDelegatedTaskPresenceEvent] {
+        let conversationId = mainConversationId ?? currentConversationId
+        let requestId = UUID()
+        let traceId = UUID()
+        return try await withCheckedThrowingContinuation { continuation in
+            taskListContinuations[requestId] = PendingTaskListRequest(
+                traceId: traceId,
+                mainConversationId: conversationId,
+                continuation: continuation,
+                timeoutTask: nil
+            )
+            let timeoutTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                } catch {
+                    return
+                }
+                self?.failTaskListRequest(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.taskListTimedOut
+                )
+            }
+            taskListContinuations[requestId]?.timeoutTask = timeoutTask
+            do {
+                try send(YishuDelegatedTaskListCommand(
+                    schemaVersion: yishuRuntimeProtocolVersion,
+                    type: "task.list",
+                    requestId: requestId,
+                    traceId: traceId,
+                    sentAt: Date(),
+                    payload: YishuDelegatedTaskListPayload(
+                        mainConversationId: conversationId
+                    )
+                ))
+            } catch {
+                failTaskListRequest(requestId, error: error)
+            }
+        }
+    }
+
     func cancelDelegatedTask(
         taskId: UUID,
         mainConversationId: UUID,
         reason: String = "user_cancelled"
-    ) throws {
-        try send(YishuDelegatedTaskCancelCommand(
-            schemaVersion: yishuRuntimeProtocolVersion,
-            type: "task.cancel",
-            requestId: UUID(),
-            traceId: UUID(),
-            sentAt: Date(),
-            payload: YishuDelegatedTaskCancelPayload(
+    ) async throws -> YishuDelegatedTaskCancelAcceptance {
+        let requestId = UUID()
+        let traceId = UUID()
+        return try await withCheckedThrowingContinuation { continuation in
+            taskCancelContinuations[requestId] = PendingTaskCancelRequest(
+                traceId: traceId,
                 taskId: taskId,
                 mainConversationId: mainConversationId,
-                reason: reason
+                continuation: continuation,
+                timeoutTask: nil
             )
-        ))
+            let timeoutTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                } catch {
+                    return
+                }
+                self?.failTaskCancelRequest(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.taskCancelTimedOut
+                )
+            }
+            taskCancelContinuations[requestId]?.timeoutTask = timeoutTask
+            do {
+                try send(YishuDelegatedTaskCancelCommand(
+                    schemaVersion: yishuRuntimeProtocolVersion,
+                    type: "task.cancel",
+                    requestId: requestId,
+                    traceId: traceId,
+                    sentAt: Date(),
+                    payload: YishuDelegatedTaskCancelPayload(
+                        taskId: taskId,
+                        mainConversationId: mainConversationId,
+                        reason: reason
+                    )
+                ))
+            } catch {
+                failTaskCancelRequest(requestId, error: error)
+            }
+        }
     }
 
     /// Append a frame into the product ContextTrail without starting a Pi turn.
@@ -930,6 +1035,8 @@ final class YishuAgentRuntimeClient {
         finishAllTurns(throwing: error)
         finishAllAuthRequests(throwing: error)
         finishAllHistoryRequests(throwing: error)
+        finishAllTaskListRequests(throwing: error)
+        finishAllTaskCancelRequests(throwing: error)
     }
 
     /// Test hook: park one history.list wait without talking to Node.
@@ -977,6 +1084,53 @@ final class YishuAgentRuntimeClient {
         historyContinuations.count
     }
 
+    func parkDelegatedTaskRPCWaitsForTests() async -> (
+        list: Task<Void, Error>,
+        cancel: Task<Void, Error>
+    ) {
+        let listRequestId = UUID()
+        let cancelRequestId = UUID()
+        let conversationId = UUID()
+        let taskId = UUID()
+        let (readyStream, readyContinuation) = AsyncStream<Void>.makeStream()
+        let list = Task { @MainActor in
+            let _: [YishuDelegatedTaskPresenceEvent] = try await withCheckedThrowingContinuation {
+                continuation in
+                taskListContinuations[listRequestId] = PendingTaskListRequest(
+                    traceId: UUID(),
+                    mainConversationId: conversationId,
+                    continuation: continuation,
+                    timeoutTask: nil
+                )
+                readyContinuation.yield(())
+            }
+        }
+        let cancel = Task { @MainActor in
+            let _: YishuDelegatedTaskCancelAcceptance = try await withCheckedThrowingContinuation {
+                continuation in
+                taskCancelContinuations[cancelRequestId] = PendingTaskCancelRequest(
+                    traceId: UUID(),
+                    taskId: taskId,
+                    mainConversationId: conversationId,
+                    continuation: continuation,
+                    timeoutTask: nil
+                )
+                readyContinuation.yield(())
+            }
+        }
+        var readyCount = 0
+        for await _ in readyStream {
+            readyCount += 1
+            if readyCount == 2 { break }
+        }
+        readyContinuation.finish()
+        return (list, cancel)
+    }
+
+    var pendingDelegatedTaskRPCCountForTests: Int {
+        taskListContinuations.count + taskCancelContinuations.count
+    }
+
     /// Test hook for spontaneous events that do not belong to a turn stream.
     func dispatchRuntimeEventForTests(_ raw: [String: Any]) {
         dispatch(raw)
@@ -1000,6 +1154,70 @@ final class YishuAgentRuntimeClient {
         error: YishuAgentRuntimeClientError
     ) {
         failHistoryRequest(requestId, error: error)
+    }
+
+    static func decodeDelegatedTaskSnapshot(
+        _ raw: [String: Any],
+        expectedRequestId: UUID,
+        expectedTraceId: UUID,
+        expectedConversationId: UUID
+    ) -> [YishuDelegatedTaskPresenceEvent]? {
+        guard raw["type"] as? String == "task.listed",
+              isValidSchemaVersionValue(raw["schemaVersion"]),
+              let sourceEventId = (raw["eventId"] as? String).flatMap(UUID.init(uuidString:)),
+              (raw["requestId"] as? String).flatMap(UUID.init(uuidString:)) == expectedRequestId,
+              (raw["traceId"] as? String).flatMap(UUID.init(uuidString:)) == expectedTraceId,
+              (raw["conversationId"] as? String).flatMap(UUID.init(uuidString:))
+                == expectedConversationId,
+              let payload = raw["payload"] as? [String: Any],
+              let rows = payload["tasks"] as? [[String: Any]],
+              rows.count <= 64 else {
+            return nil
+        }
+        let tasks = rows.compactMap {
+            YishuDelegatedTaskPresenceEvent.decodeSnapshotItem(
+                $0,
+                expectedConversationId: expectedConversationId,
+                sourceEventId: sourceEventId
+            )
+        }
+        guard tasks.count == rows.count,
+              Set(tasks.map(\.id)).count == tasks.count else {
+            return nil
+        }
+        return tasks
+    }
+
+    static func decodeDelegatedTaskCancelAcceptance(
+        _ raw: [String: Any],
+        expectedRequestId: UUID,
+        expectedTraceId: UUID,
+        expectedTaskId: UUID,
+        expectedConversationId: UUID
+    ) -> YishuDelegatedTaskCancelAcceptance? {
+        guard raw["type"] as? String == "task.cancel.accepted",
+              isValidSchemaVersionValue(raw["schemaVersion"]),
+              (raw["eventId"] as? String).flatMap(UUID.init(uuidString:)) != nil,
+              (raw["requestId"] as? String).flatMap(UUID.init(uuidString:)) == expectedRequestId,
+              (raw["traceId"] as? String).flatMap(UUID.init(uuidString:)) == expectedTraceId,
+              (raw["conversationId"] as? String).flatMap(UUID.init(uuidString:))
+                == expectedConversationId,
+              let payload = raw["payload"] as? [String: Any],
+              (payload["taskId"] as? String).flatMap(UUID.init(uuidString:)) == expectedTaskId,
+              (payload["mainConversationId"] as? String).flatMap(UUID.init(uuidString:))
+                == expectedConversationId,
+              payload["accepted"] == nil || payload["accepted"] as? Bool == true else {
+            return nil
+        }
+        return YishuDelegatedTaskCancelAcceptance(
+            requestId: expectedRequestId,
+            taskId: expectedTaskId,
+            mainConversationId: expectedConversationId
+        )
+    }
+
+    private static func runtimeErrorMessage(from payload: [String: Any]) -> String? {
+        YishuDelegatedTaskPresenceEvent.boundedOptionalString(payload["message"], maximum: 180)
     }
 
     private func send<Command: Encodable>(_ command: Command) throws {
@@ -1042,6 +1260,81 @@ final class YishuAgentRuntimeClient {
             guard let event = YishuDelegatedTaskPresenceEvent.decode(raw) else { return }
             onDelegatedTaskPresenceEvent?(event)
             return
+        }
+
+        if type == "task.listed" {
+            guard let requestId, let pending = taskListContinuations[requestId] else { return }
+            guard let tasks = Self.decodeDelegatedTaskSnapshot(
+                raw,
+                expectedRequestId: requestId,
+                expectedTraceId: pending.traceId,
+                expectedConversationId: pending.mainConversationId
+            ) else {
+                failTaskListRequest(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.invalidTaskListEvent
+                )
+                return
+            }
+            finishTaskListRequest(requestId, value: tasks)
+            return
+        }
+
+        if type == "task.cancel.accepted" {
+            guard let requestId, let pending = taskCancelContinuations[requestId] else { return }
+            guard let acceptance = Self.decodeDelegatedTaskCancelAcceptance(
+                raw,
+                expectedRequestId: requestId,
+                expectedTraceId: pending.traceId,
+                expectedTaskId: pending.taskId,
+                expectedConversationId: pending.mainConversationId
+            ) else {
+                failTaskCancelRequest(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.invalidTaskCancelEvent
+                )
+                return
+            }
+            finishTaskCancelRequest(requestId, value: acceptance)
+            return
+        }
+
+        if type == "runtime.error", let requestId {
+            let message = Self.runtimeErrorMessage(from: payload)
+            if let pending = taskListContinuations[requestId] {
+                guard Self.isValidSchemaVersionValue(raw["schemaVersion"]),
+                      traceId == pending.traceId else {
+                    failTaskListRequest(
+                        requestId,
+                        error: YishuAgentRuntimeClientError.invalidTaskListEvent
+                    )
+                    return
+                }
+                failTaskListRequest(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.taskListFailed(
+                        message ?? "暂时无法读取后台任务。"
+                    )
+                )
+                return
+            }
+            if let pending = taskCancelContinuations[requestId] {
+                guard Self.isValidSchemaVersionValue(raw["schemaVersion"]),
+                      traceId == pending.traceId else {
+                    failTaskCancelRequest(
+                        requestId,
+                        error: YishuAgentRuntimeClientError.invalidTaskCancelEvent
+                    )
+                    return
+                }
+                failTaskCancelRequest(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.taskCancelFailed(
+                        message ?? "暂时无法停止后台任务。"
+                    )
+                )
+                return
+            }
         }
 
         // Auth events use their own continuation map and strict envelope
@@ -1445,6 +1738,54 @@ final class YishuAgentRuntimeClient {
         }
     }
 
+    private func finishTaskListRequest(
+        _ requestId: UUID,
+        value: [YishuDelegatedTaskPresenceEvent]
+    ) {
+        guard let pending = taskListContinuations.removeValue(forKey: requestId) else { return }
+        pending.timeoutTask?.cancel()
+        pending.continuation.resume(returning: value)
+    }
+
+    private func failTaskListRequest(_ requestId: UUID, error: Error) {
+        guard let pending = taskListContinuations.removeValue(forKey: requestId) else { return }
+        pending.timeoutTask?.cancel()
+        pending.continuation.resume(throwing: error)
+    }
+
+    private func finishAllTaskListRequests(throwing error: Error) {
+        let pending = taskListContinuations
+        taskListContinuations.removeAll()
+        for request in pending.values {
+            request.timeoutTask?.cancel()
+            request.continuation.resume(throwing: error)
+        }
+    }
+
+    private func finishTaskCancelRequest(
+        _ requestId: UUID,
+        value: YishuDelegatedTaskCancelAcceptance
+    ) {
+        guard let pending = taskCancelContinuations.removeValue(forKey: requestId) else { return }
+        pending.timeoutTask?.cancel()
+        pending.continuation.resume(returning: value)
+    }
+
+    private func failTaskCancelRequest(_ requestId: UUID, error: Error) {
+        guard let pending = taskCancelContinuations.removeValue(forKey: requestId) else { return }
+        pending.timeoutTask?.cancel()
+        pending.continuation.resume(throwing: error)
+    }
+
+    private func finishAllTaskCancelRequests(throwing error: Error) {
+        let pending = taskCancelContinuations
+        taskCancelContinuations.removeAll()
+        for request in pending.values {
+            request.timeoutTask?.cancel()
+            request.continuation.resume(throwing: error)
+        }
+    }
+
     private static func parseISO8601(_ value: String?) -> Date? {
         guard let value, !value.isEmpty else { return nil }
         let withFractional = ISO8601DateFormatter()
@@ -1777,6 +2118,19 @@ private struct YishuDelegatedTaskCancelCommand: Encodable {
     let traceId: UUID
     let sentAt: Date
     let payload: YishuDelegatedTaskCancelPayload
+}
+
+private struct YishuDelegatedTaskListCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuDelegatedTaskListPayload
+}
+
+private struct YishuDelegatedTaskListPayload: Encodable {
+    let mainConversationId: UUID
 }
 
 private struct YishuDelegatedTaskCancelPayload: Encodable {
