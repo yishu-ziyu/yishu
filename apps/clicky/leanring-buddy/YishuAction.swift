@@ -8,6 +8,7 @@ enum YishuActionStatus: String, Codable, Equatable, Sendable {
     case verified
     case delivered
     case unverified
+    case blocked
     case failed
 }
 
@@ -99,6 +100,8 @@ struct YishuComputerActionRequest: Equatable, Sendable {
     let screen: Int?
     let label: String?
     let text: String?
+    let title: String?
+    let content: String?
     let targetBundleId: String?
     let targetPid: pid_t?
     let intentId: String?
@@ -116,6 +119,8 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         screen: Int? = nil,
         label: String? = nil,
         text: String? = nil,
+        title: String? = nil,
+        content: String? = nil,
         targetBundleId: String? = nil,
         targetPid: pid_t? = nil,
         intentId: String? = nil,
@@ -132,6 +137,8 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         self.screen = screen
         self.label = label
         self.text = text
+        self.title = title
+        self.content = content
         self.targetBundleId = targetBundleId
         self.targetPid = targetPid
         self.intentId = intentId

@@ -11,7 +11,8 @@ export type ProductActionName =
   | "record_learning"
   | "run_skill"
   | "watch_app_return"
-  | "finder_history_back";
+  | "finder_history_back"
+  | "create_note";
 
 export interface ProductUtteranceRoute {
   action: ProductActionName;
@@ -30,6 +31,19 @@ export function routeProductUtterance(
   const text = utterance.trim();
   if (text.length === 0) return null;
   const lower = text.toLowerCase();
+
+  const note = parseCreateNote(text);
+  if (note) {
+    return {
+      action: "create_note",
+      input: {
+        content: note.content,
+        title: note.title,
+        targetBundleId: "com.apple.Notes",
+      },
+      confidence: 0.99,
+    };
+  }
 
   // This is deliberately narrow: only a direct back-button imperative while
   // Finder is the observed foreground app may bypass Pi. The product runtime
@@ -172,6 +186,14 @@ export function formatProductActionSpeech(
   status: string,
   output: unknown,
 ): string {
+  if (action === "create_note") {
+    const result = output as { succeeded?: boolean; verified?: boolean } | null;
+    if (result?.verified) return "已新建并确认一条备忘录。";
+    if (result?.succeeded) {
+      return "备忘录可能已经新建，但我没能读回来确认；我不会重复创建。";
+    }
+    return "这次没有新建备忘录。";
+  }
   if (action === "finder_history_back") {
     const result = output as { succeeded?: boolean; verified?: boolean } | null;
     if (result?.verified) return "已经回到刚才的位置。";
@@ -266,6 +288,76 @@ export function formatProductActionSpeech(
     default:
       return "好，处理好了。";
   }
+}
+
+function parseCreateNote(text: string): { content: string; title: string } | null {
+  const quoted = extractPairedQuote(text);
+  const directContent = quoted
+    ? quoted.content
+    : extractDirectSpokenNoteContent(text);
+  if (directContent === null) return null;
+  const shell = quoted
+    ? `${text.slice(0, quoted.start)}Q${text.slice(quoted.end)}`.trim()
+    : text.replace(directContent, "Q").trim();
+  // Authorization comes only from the command around the quote. Words such
+  // as “不要” or “删除” inside the requested note are content, not control.
+  if (
+    /[？?]\s*$/u.test(shell)
+    || /(?:不要|别|不用|无需|别再|不要再)/u.test(shell)
+    || /\b(?:do\s+not|don't|dont)\b/iu.test(shell)
+    || /(?:编辑|修改|删除|追加|补充|覆盖|替换)/u.test(shell)
+    || /\b(?:edit|update|delete|append|replace)\b/iu.test(shell)
+  ) {
+    return null;
+  }
+  const direct = [
+    /^(?:奕枢[，,\s]*)?(?:(?:请|帮我|麻烦)\s*)?把\s*Q\s*写进(?:我的)?备忘录[。！!\s]*$/u,
+    /^(?:奕枢[，,\s]*)?(?:(?:请|帮我|麻烦)\s*)?在(?:我的)?备忘录(?:里|中)?\s*记下\s*Q[。！!\s]*$/u,
+    /^(?:奕枢[，,\s]*)?(?:(?:请|帮我|麻烦)\s*)?(?:新建|创建)(?:一条|一个)?备忘录[：:\s]*Q[。！!\s]*$/u,
+  ].some((pattern) => pattern.test(shell));
+  if (!direct) return null;
+
+  const content = directContent.trim();
+  if (content.length === 0 || content.length > 5_000) return null;
+  if (/^(?:刚才(?:的)?(?:那|这)?一?段|上一段|前一段|那一?段|这一?段|这个|那个|它|其)$/u.test(content)) {
+    return null;
+  }
+  const firstLine = content.split(/\r?\n/u).find((line) => line.trim().length > 0)?.trim();
+  if (!firstLine) return null;
+  const title = Array.from(firstLine).slice(0, 60).join("");
+  return { content, title };
+}
+
+function extractDirectSpokenNoteContent(text: string): string | null {
+  const patterns = [
+    /^(?:奕枢[，,\s]*)?(?:(?:请|帮我|麻烦)\s*)?把\s*(.{1,5000}?)\s*写进(?:我的)?备忘录[。！!\s]*$/u,
+    /^(?:奕枢[，,\s]*)?(?:(?:请|帮我|麻烦)\s*)?在(?:我的)?备忘录(?:里|中)?\s*记下\s*(.{1,5000}?)[。！!\s]*$/u,
+    /^(?:奕枢[，,\s]*)?(?:(?:请|帮我|麻烦)\s*)?(?:新建|创建)(?:一条|一个)?备忘录[：:\s]+(.{1,5000}?)[。！!\s]*$/u,
+  ];
+  for (const pattern of patterns) {
+    const content = text.match(pattern)?.[1]?.trim();
+    if (content) return content;
+  }
+  return null;
+}
+
+function extractPairedQuote(
+  text: string,
+): { content: string; start: number; end: number } | null {
+  const pairs = [["「", "」"], ["“", "”"], ["『", "』"], ['"', '"']] as const;
+  for (const [open, close] of pairs) {
+    const start = text.indexOf(open);
+    if (start < 0) continue;
+    const closeAt = text.indexOf(close, start + open.length);
+    if (closeAt < 0) continue;
+    if (text.indexOf(open, closeAt + close.length) >= 0) return null;
+    return {
+      content: text.slice(start + open.length, closeAt),
+      start,
+      end: closeAt + close.length,
+    };
+  }
+  return null;
 }
 
 function parseAppReturnReminder(text: string): string | null {

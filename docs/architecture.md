@@ -161,8 +161,10 @@ and presentation switch immediately. The physical PTT path still requires
 human acceptance.
 
 The shipping action set includes verified `left_click`, a Finder-only typed
-`finder_history_back`, and `set_text` on the currently focused writable AX
-element. Finder and text actions re-read the live frontmost PID/bundle before
+`finder_history_back`, `set_text` on the currently focused writable AX
+element, and create-only Apple Notes insertion. Notes creation is admitted only
+from an explicit utterance, creates one new note, and is complete only after
+the exact returned note is read back; unknown delivery is never retried. Finder and text actions re-read the live frontmost PID/bundle before
 execution; secure or non-writable fields fail closed. Text receipts contain
 only bounded length/role/match evidence, never the entered text.
 

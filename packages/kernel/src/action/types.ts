@@ -100,6 +100,37 @@ export interface FinderHistoryBackExecutor {
   ): Promise<FinderHistoryBackResult>;
 }
 
+/** Create-only Notes request bound to one product intent and current frame. */
+export interface CreateNoteRequest {
+  content: string;
+  title: string;
+  targetBundleId: "com.apple.Notes";
+  intentId: string;
+  attemptId: string;
+  basisFrameId: string;
+}
+
+/** Content-free receipt returned after creating and reading back one note. */
+export interface CreateNoteResult {
+  succeeded: boolean;
+  verified: boolean;
+  message: string;
+  evidence?: string;
+  status?: string;
+  code?: string;
+  method?: string;
+  receiptId?: string;
+  attemptId?: string;
+}
+
+/** Narrow host capability injected only for the create-note action. */
+export interface CreateNoteExecutor {
+  perform(
+    request: CreateNoteRequest,
+    signal?: AbortSignal,
+  ): Promise<CreateNoteResult>;
+}
+
 /** Post-run observation of the visible or external effect. */
 export interface ActionVerification {
   verified: boolean;
@@ -255,6 +286,7 @@ export interface InvokeOptions {
 export interface ActionInvokeDeps {
   mandates?: StandingMandate[];
   finderHistoryBack?: FinderHistoryBackExecutor;
+  createNote?: CreateNoteExecutor;
 }
 
 /** Result of authority evaluation before `run`. */

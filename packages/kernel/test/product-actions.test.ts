@@ -344,12 +344,13 @@ describe("product actions via createYishuKernel", () => {
     assert.equal((await store.listLearnings()).length, 1);
   });
 
-  it("registers the default product actions including Finder Back and delegate", () => {
+  it("registers the default product actions including Notes, Finder Back and delegate", () => {
     const { defaultActionNames } = createYishuKernel();
     assert.deepEqual(
       [...defaultActionNames].sort(),
       [
         "delegate",
+        "create_note",
         "finder_history_back",
         "forget",
         "learn_mind_from_pattern",

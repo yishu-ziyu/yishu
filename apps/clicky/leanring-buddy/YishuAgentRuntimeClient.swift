@@ -2495,6 +2495,43 @@ final class YishuAgentRuntimeClient {
                 basisFrameId: basisFrameId,
                 effectClass: common.effectClass
             )
+        case "create_note":
+            guard doubleValue(payload["x"]) == 0,
+                  doubleValue(payload["y"]) == 0,
+                  let rawTitle = payload["title"] as? String,
+                  let rawContent = payload["content"] as? String,
+                  payload["targetBundleId"] as? String == "com.apple.Notes",
+                  payload["targetPid"] == nil,
+                  let intentId = common.intentId,
+                  UUID(uuidString: intentId) != nil,
+                  let attemptId = common.attemptId,
+                  UUID(uuidString: attemptId) != nil,
+                  let basisFrameId = common.basisFrameId,
+                  UUID(uuidString: basisFrameId) != nil,
+                  common.effectClass == "write" else {
+                return nil
+            }
+            let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard (1...120).contains(title.count),
+                  (1...5_000).contains(content.count) else {
+                return nil
+            }
+            return YishuComputerActionRequest(
+                requestId: requestId,
+                traceId: traceId,
+                actionId: actionId,
+                action: action,
+                x: 0,
+                y: 0,
+                title: title,
+                content: content,
+                targetBundleId: "com.apple.Notes",
+                intentId: intentId,
+                attemptId: attemptId,
+                basisFrameId: basisFrameId,
+                effectClass: "write"
+            )
         default:
             return nil
         }

@@ -10,6 +10,22 @@ import Foundation
 enum YishuComputerUseActuator {
     typealias AuthorizationFence = @MainActor () -> Bool
 
+    enum NotesExecutionOutcome: Equatable, Sendable {
+        case created(noteId: String, title: String, plaintext: String)
+        case blockedBeforeSubmission
+        case permissionDenied
+        case unavailable
+        case unknownAfterSubmission
+        case timedOut
+    }
+
+    typealias NotesExecutor = @MainActor (
+        _ title: String,
+        _ htmlBody: String,
+        _ expectedPlaintext: String,
+        _ authorizationFence: AuthorizationFence
+    ) async -> NotesExecutionOutcome
+
     /// One reusable commit point for AXSet/AXPress/CGEvent. Keeping the fence
     /// adjacent to the irreversible call makes cancellation testable without
     /// manufacturing real Accessibility elements in unit tests.
@@ -20,6 +36,7 @@ enum YishuComputerUseActuator {
         guard authorizationFence() else { return nil }
         return operation()
     }
+
     /// Finder chrome navigation is two distinct actions. Back needs browse
     /// history (toolbar/menu 返回). Up is hierarchy (上层文件夹 / Enclosing).
     /// Never silent-substitute one for the other.
@@ -747,10 +764,20 @@ enum YishuComputerUseActuator {
     static func perform(
         _ request: YishuComputerActionRequest,
         screenCaptures: [CompanionScreenCapture],
-        authorizationFence: @escaping AuthorizationFence = { true }
+        authorizationFence: @escaping AuthorizationFence = { true },
+        notesExecutor: NotesExecutor? = nil
     ) async -> YishuComputerActionResult {
         let receiptId = UUID().uuidString
         let attemptId = request.attemptId ?? UUID().uuidString
+        if request.action == "create_note" {
+            return await performCreateNote(
+                request,
+                receiptId: receiptId,
+                attemptId: attemptId,
+                authorizationFence: authorizationFence,
+                notesExecutor: notesExecutor ?? executeNotesCreate
+            )
+        }
         if request.action == "finder_history_back" {
             return await performFinderHistoryBack(
                 request,
@@ -916,6 +943,223 @@ enum YishuComputerUseActuator {
             attemptId: attemptId,
             authorizationFence: authorizationFence
         )
+    }
+
+    private static func performCreateNote(
+        _ request: YishuComputerActionRequest,
+        receiptId: String,
+        attemptId: String,
+        authorizationFence: @escaping AuthorizationFence,
+        notesExecutor: NotesExecutor
+    ) async -> YishuComputerActionResult {
+        guard request.targetBundleId == "com.apple.Notes",
+              request.effectClass == "write",
+              request.intentId.flatMap(UUID.init(uuidString:)) != nil,
+              request.attemptId.flatMap(UUID.init(uuidString:)) != nil,
+              request.basisFrameId.flatMap(UUID.init(uuidString:)) != nil,
+              let title = request.title,
+              let content = request.content else {
+            return failed(
+                "The note request is incomplete.",
+                code: .runtimeError,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        let htmlBody = notesHTMLBody(for: content)
+
+        switch await notesExecutor(title, htmlBody, content, authorizationFence) {
+        case .blockedBeforeSubmission:
+            return YishuComputerActionResult(
+                succeeded: false,
+                verified: false,
+                message: "Note creation was blocked before submission.",
+                evidence: "method=none;code=permission_denied;submitted=false",
+                status: .blocked,
+                method: .unknown,
+                code: .permissionDenied,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case let .created(noteId, readTitle, plaintext):
+            guard !noteId.isEmpty,
+                  readTitle == title,
+                  plaintext == content else {
+                return YishuComputerActionResult(
+                    succeeded: true,
+                    verified: false,
+                    message: "The note was created, but exact read-back was not confirmed.",
+                    evidence: "method=native_command;code=runtime_error;submitted=true;readback=not_exact",
+                    status: .unverified,
+                    method: .nativeCommand,
+                    code: .runtimeError,
+                    receiptId: receiptId,
+                    attemptId: attemptId
+                )
+            }
+            return YishuComputerActionResult(
+                succeeded: true,
+                verified: true,
+                message: "The new note was verified by exact read-back.",
+                evidence: "method=native_command;code=verified_accessibility;submitted=true;readback=exact",
+                status: .verified,
+                method: .nativeCommand,
+                code: .verifiedAccessibility,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .permissionDenied:
+            return YishuComputerActionResult(
+                succeeded: false,
+                verified: false,
+                message: "Automation permission for Notes was denied.",
+                evidence: "method=native_command;code=permission_denied;submitted=true",
+                status: .blocked,
+                method: .nativeCommand,
+                code: .permissionDenied,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .unavailable:
+            return failed(
+                "Note automation is unavailable.",
+                code: .runtimeError,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .unknownAfterSubmission:
+            return YishuComputerActionResult(
+                succeeded: true,
+                verified: false,
+                message: "Note creation was submitted, but its result is unknown.",
+                evidence: "method=native_command;code=runtime_error;submitted=true;readback=unknown",
+                status: .unverified,
+                method: .nativeCommand,
+                code: .runtimeError,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .timedOut:
+            return YishuComputerActionResult(
+                succeeded: true,
+                verified: false,
+                message: "Note creation timed out after submission.",
+                evidence: "method=native_command;code=timeout;submitted=true;readback=unknown",
+                status: .unverified,
+                method: .nativeCommand,
+                code: .timeout,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+    }
+
+    static func notesHTMLBody(for content: String) -> String {
+        content
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+            .replacingOccurrences(of: "\n", with: "<br>")
+    }
+
+    private static func executeNotesCreate(
+        title: String,
+        htmlBody: String,
+        expectedPlaintext: String,
+        authorizationFence: AuthorizationFence
+    ) async -> NotesExecutionOutcome {
+        guard let prepared = prepareNotesCreate(
+            title: title,
+            htmlBody: htmlBody,
+            expectedPlaintext: expectedPlaintext
+        ) else {
+            return .unavailable
+        }
+        // NSAppleScript is main-thread-bound. Preparation is complete before
+        // this fresh fence, and no suspension occurs before executeAppleEvent.
+        return authorizedCommit(authorizationFence) {
+            submitPreparedNotesCreate(prepared)
+        } ?? .blockedBeforeSubmission
+    }
+
+    private struct PreparedNotesCreate {
+        let script: NSAppleScript
+        let event: NSAppleEventDescriptor
+    }
+
+    private static func prepareNotesCreate(
+        title: String,
+        htmlBody: String,
+        expectedPlaintext: String
+    ) -> PreparedNotesCreate? {
+        let source = """
+        using terms from application "Notes"
+            on createYishuNote(noteTitle, noteBody, expectedText)
+                with timeout of 6 seconds
+                    tell application "Notes"
+                        set targetFolder to default folder of default account
+                        set createdNote to make new note at targetFolder with properties {name:noteTitle, body:noteBody}
+                        set createdID to id of createdNote
+                        set readTitle to ""
+                        set readText to ""
+                        repeat 12 times
+                            try
+                                set liveNote to note id createdID
+                                set readTitle to name of liveNote
+                                set readText to plaintext of liveNote
+                                if readTitle is noteTitle and readText is expectedText then exit repeat
+                            end try
+                            delay 0.1
+                        end repeat
+                        return {createdID, readTitle, readText}
+                    end tell
+                end timeout
+            end createYishuNote
+        end using terms from
+        """
+        guard let script = NSAppleScript(source: source) else { return nil }
+        var compileError: NSDictionary?
+        guard script.compileAndReturnError(&compileError) else { return nil }
+
+        let event = NSAppleEventDescriptor(
+            eventClass: AEEventClass(0x61736372), // 'ascr'
+            eventID: AEEventID(0x70736272), // 'psbr'
+            targetDescriptor: nil,
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID)
+        )
+        event.setParam(
+            NSAppleEventDescriptor(string: "createYishuNote"),
+            forKeyword: AEKeyword(0x736e616d) // 'snam'
+        )
+        let arguments = NSAppleEventDescriptor.list()
+        arguments.insert(NSAppleEventDescriptor(string: title), at: 1)
+        arguments.insert(NSAppleEventDescriptor(string: htmlBody), at: 2)
+        arguments.insert(NSAppleEventDescriptor(string: expectedPlaintext), at: 3)
+        event.setParam(arguments, forKeyword: AEKeyword(keyDirectObject))
+        return PreparedNotesCreate(script: script, event: event)
+    }
+
+    private static func submitPreparedNotesCreate(
+        _ prepared: PreparedNotesCreate
+    ) -> NotesExecutionOutcome {
+        var executionError: NSDictionary?
+        let reply = prepared.script.executeAppleEvent(prepared.event, error: &executionError)
+        if executionError != nil {
+            let number = executionError?[NSAppleScript.errorNumber] as? Int
+            if number == -1743 || number == -10004 { return .permissionDenied }
+            if number == -1712 { return .timedOut }
+            return .unknownAfterSubmission
+        }
+        guard reply.numberOfItems == 3,
+              let noteId = reply.atIndex(1)?.stringValue,
+              let readTitle = reply.atIndex(2)?.stringValue,
+              let plaintext = reply.atIndex(3)?.stringValue else {
+            return .unknownAfterSubmission
+        }
+        return .created(noteId: noteId, title: readTitle, plaintext: plaintext)
     }
 
     private static func performFinderHistoryBack(

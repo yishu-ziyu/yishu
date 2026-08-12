@@ -38,6 +38,29 @@ describe("routeProductUtterance", () => {
     assert.equal(r?.action, "record_learning");
   });
 
+  it("routes only explicit create-only Notes commands", () => {
+    const content = "周五演示只讲插话和主动回访";
+    const route = routeProductUtterance(`奕枢，把「${content}」写进备忘录。`);
+    assert.equal(route?.action, "create_note");
+    assert.deepEqual(route?.input, {
+      content,
+      title: content,
+      targetBundleId: "com.apple.Notes",
+    });
+    assert.equal(routeProductUtterance(`不要把「${content}」写进备忘录。`), null);
+    assert.equal(routeProductUtterance(`能把「${content}」写进备忘录吗？`), null);
+    assert.equal(routeProductUtterance("把刚才那段写进备忘录。"), null);
+    assert.equal(routeProductUtterance(`把「${content}」追加到备忘录。`), null);
+    assert.equal(
+      routeProductUtterance("把「不要忘记删除旧草稿」写进备忘录。")?.action,
+      "create_note",
+    );
+    assert.equal(
+      routeProductUtterance(`奕枢，把${content}写进备忘录。`)?.input.content,
+      content,
+    );
+  });
+
   it("leaves ordinary questions for Pi", () => {
     assert.equal(routeProductUtterance("这个按钮为什么是灰色的？"), null);
     assert.equal(routeProductUtterance("刚才那个可以给 Agent 读视频链接的东西在哪？"), null);

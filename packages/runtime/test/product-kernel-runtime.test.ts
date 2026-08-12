@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { createYishuKernel } from "@yishu/kernel";
 import { MockAgentRuntime } from "../src/mock-runtime.js";
 import { ProductKernelRuntime } from "../src/product-kernel-runtime.js";
-import type { ComputerUsePort } from "../src/computer-use-port.js";
+import { ComputerActionError, type ComputerUsePort } from "../src/computer-use-port.js";
 import {
   PROTOCOL_VERSION,
   runtimeEvent,
@@ -272,6 +272,164 @@ test("unverified Finder Back is reported without a second dispatch or completion
   assert.equal(productReceipt?.payload.succeeded, true);
   assert.equal(productReceipt?.payload.verified, false);
   assert.equal("evidence" in (productReceipt?.payload ?? {}), false);
+});
+
+test("an explicit Notes request creates once, requires read-back, and never starts Pi", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const actions: Array<{ action: unknown; context: unknown }> = [];
+  const port: ComputerUsePort = {
+    async perform(action, context) {
+      actions.push({ action, context });
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: "native_command",
+        message: "The exact created note was read back.",
+        evidence: "created_note_read_back=true",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  let innerStarts = 0;
+  const inner: AgentRuntime = {
+    async startTurn() { innerStarts += 1; },
+    async steerTurn() {},
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const runtime = new ProductKernelRuntime(inner, kernel, port);
+  const content = "周五演示只讲插话和主动回访";
+  const command = makeCommand(`奕枢，把「${content}」写进备忘录。`);
+  const events: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(innerStarts, 0);
+  assert.equal(actions.length, 1);
+  assert.deepEqual(actions[0]?.action, {
+    action: "create_note",
+    x: 0,
+    y: 0,
+    content,
+    title: content,
+    targetBundleId: "com.apple.Notes",
+  });
+  const context = actions[0]?.context as {
+    requestId?: string;
+    traceId?: string;
+    intentId?: string;
+    attemptId?: string;
+    basisFrameId?: string;
+    effectClass?: string;
+  };
+  assert.equal(context.requestId, command.requestId);
+  assert.equal(context.traceId, command.traceId);
+  assert.equal(context.basisFrameId, command.payload.contextFrame.frameId);
+  assert.equal(context.effectClass, "write");
+  assert.ok(context.intentId);
+  assert.ok(context.attemptId);
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed?.payload.verified, true);
+  assert.match(String(completed?.payload.text), /备忘录/);
+  const safeReceipt = events.find((event) => event.type === "product.action.completed");
+  assert.equal(safeReceipt?.payload.status, "verified");
+  assert.equal(JSON.stringify(safeReceipt?.payload).includes(content), false);
+});
+
+test("a Notes delivery timeout is treated as possibly committed and is never retried", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  let dispatches = 0;
+  const port: ComputerUsePort = {
+    async perform(_action, context) {
+      dispatches += 1;
+      throw new ComputerActionError("Timed out after dispatch.", {
+        status: "failed",
+        code: "timeout",
+        method: "unknown",
+        attemptId: context.attemptId,
+      });
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel, port);
+  const content = "只写一次";
+  const command = makeCommand(`把「${content}」写进备忘录`);
+  const events: RuntimeEvent[] = [];
+
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(dispatches, 1);
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed?.payload.verified, false);
+  assert.match(String(completed?.payload.text), /可能已经新建/);
+  assert.match(String(completed?.payload.text), /不会重复/);
+  const safeReceipt = events.find((event) => event.type === "product.action.completed");
+  assert.equal(safeReceipt?.payload.status, "failed");
+  assert.equal(safeReceipt?.payload.succeeded, true);
+  assert.equal(safeReceipt?.payload.code, "timeout");
+  assert.equal(JSON.stringify(safeReceipt?.payload).includes(content), false);
+});
+
+test("cancelling after a Notes dispatch waits for one receipt and records a committed effect", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  let dispatches = 0;
+  let release!: () => void;
+  let markDispatched!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+  const port: ComputerUsePort = {
+    async perform(_action, _context, signal) {
+      dispatches += 1;
+      assert.equal(signal, undefined);
+      markDispatched();
+      await gate;
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: "native_command",
+        message: "The exact created note was read back.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel, port);
+  const command = makeCommand("把「取消后也只能写一次」写进备忘录");
+  command.payload.conversationId = randomUUID();
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await dispatched;
+
+  await runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined);
+  release();
+  await start;
+
+  assert.equal(dispatches, 1);
+  const turns = await kernel.store.listConversationTurns(command.payload.conversationId);
+  assert.equal(turns[0]?.status, "failed");
+  const events = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(events.filter((event) => event.type === "action.completed").length, 1);
+  assert.ok(events.some((event) =>
+    event.type === "turn.failed"
+      && event.payload.code === "action_committed_after_cancel"));
+  assert.ok(!events.some((event) => event.type === "turn.cancelled"));
+  assert.ok(!visible.some((event) => event.type === "response.completed"));
 });
 
 class ScriptedExecutionRuntime implements AgentRuntime {
