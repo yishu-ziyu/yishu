@@ -7,7 +7,10 @@ import {
   type ComputerActionResultCommand,
   type ComputerActionStatus,
 } from "./protocol.js";
+import { processResourceLease } from "./resource-lease.js";
 import type { RuntimeEventSink } from "./runtime-port.js";
+
+const DESKTOP_RESOURCE = "desktop";
 
 export interface ComputerActionContext {
   requestId: string;
@@ -82,11 +85,14 @@ interface PendingAction {
   resolve: (result: ComputerActionResult) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
+  leaseToken: string;
+  leaseEpoch: number;
   removeAbortListener?: () => void;
 }
 
 export class StdioComputerUsePort implements ComputerUsePort {
   private readonly pending = new Map<string, PendingAction>();
+  private readonly resourceLease = processResourceLease;
 
   constructor(
     private readonly emit: RuntimeEventSink,
@@ -110,6 +116,19 @@ export class StdioComputerUsePort implements ComputerUsePort {
     }
 
     const actionId = randomUUID();
+    const lease = this.resourceLease.acquire(DESKTOP_RESOURCE, actionId);
+    if (!lease.granted) {
+      return Promise.resolve({
+        succeeded: false,
+        verified: false,
+        status: "blocked",
+        code: "runtime_error",
+        method: "unknown",
+        attemptId,
+        message: "Desktop is busy with another computer action.",
+      });
+    }
+
     return new Promise<ComputerActionResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.finish(actionId, new ComputerActionError(
@@ -125,6 +144,8 @@ export class StdioComputerUsePort implements ComputerUsePort {
         resolve,
         reject,
         timeout,
+        leaseToken: lease.token,
+        leaseEpoch: lease.epoch,
       };
       if (signal) {
         const abort = () => this.finish(actionId, new ComputerActionError(
@@ -136,14 +157,26 @@ export class StdioComputerUsePort implements ComputerUsePort {
       }
       this.pending.set(actionId, pendingAction);
 
-      this.emit(runtimeEvent("computer.action.requested", context.requestId, context.traceId, {
-        actionId,
-        ...action,
-        intentId,
-        attemptId,
-        ...(context.basisFrameId === undefined ? {} : { basisFrameId: context.basisFrameId }),
-        effectClass,
-      }));
+      if (signal?.aborted) {
+        this.finish(actionId, new ComputerActionError(
+          "Computer action was cancelled.",
+          { status: "cancelled", code: "cancelled", method: "unknown", attemptId },
+        ));
+        return;
+      }
+
+      try {
+        this.emit(runtimeEvent("computer.action.requested", context.requestId, context.traceId, {
+          actionId,
+          ...action,
+          intentId,
+          attemptId,
+          ...(context.basisFrameId === undefined ? {} : { basisFrameId: context.basisFrameId }),
+          effectClass,
+        }));
+      } catch (error) {
+        this.finish(actionId, error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -157,10 +190,9 @@ export class StdioComputerUsePort implements ComputerUsePort {
     if (command.payload.attemptId !== undefined
       && command.payload.attemptId !== pendingAction.attemptId) return false;
 
-    this.pending.delete(command.payload.actionId);
-    clearTimeout(pendingAction.timeout);
-    pendingAction.removeAbortListener?.();
-    pendingAction.resolve({
+    const settledAction = this.takePending(command.payload.actionId);
+    if (!settledAction) return false;
+    settledAction.resolve({
       succeeded: command.payload.succeeded,
       verified: command.payload.verified,
       message: command.payload.message,
@@ -202,12 +234,23 @@ export class StdioComputerUsePort implements ComputerUsePort {
   }
 
   private finish(actionId: string, error: Error): void {
-    const pendingAction = this.pending.get(actionId);
+    const pendingAction = this.takePending(actionId);
     if (!pendingAction) return;
+    pendingAction.reject(error);
+  }
+
+  private takePending(actionId: string): PendingAction | undefined {
+    const pendingAction = this.pending.get(actionId);
+    if (!pendingAction) return undefined;
     this.pending.delete(actionId);
     clearTimeout(pendingAction.timeout);
     pendingAction.removeAbortListener?.();
-    pendingAction.reject(error);
+    this.resourceLease.release(
+      DESKTOP_RESOURCE,
+      pendingAction.leaseToken,
+      pendingAction.leaseEpoch,
+    );
+    return pendingAction;
   }
 }
 
