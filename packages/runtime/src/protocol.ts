@@ -111,6 +111,28 @@ const createNoteComputerActionSchema = z.object({
   content: z.string().trim().min(1).max(5_000),
   title: z.string().trim().min(1).max(120),
   targetBundleId: z.literal("com.apple.Notes"),
+  sourceBundleId: z.string().trim().min(1).max(255).optional(),
+  sourcePid: z.number().int().positive().optional(),
+  sourceWindowNumber: z.number().int().positive().optional(),
+  sourceWindowTitle: z.string().trim().min(1).max(240).optional(),
+  sourceWindowBounds: z.object({
+    x: z.number().finite(),
+    y: z.number().finite(),
+    width: z.number().finite().positive(),
+    height: z.number().finite().positive(),
+  }).strict().optional(),
+}).superRefine((action, ctx) => {
+  const values = [
+    action.sourceBundleId,
+    action.sourcePid,
+    action.sourceWindowNumber,
+    action.sourceWindowTitle,
+    action.sourceWindowBounds,
+  ];
+  const count = values.filter((value) => value !== undefined).length;
+  if (count !== 0 && count !== values.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Note source identity must be complete or absent." });
+  }
 });
 
 /** One system-owned relative reminder. The body travels only to macOS. */
@@ -255,6 +277,7 @@ export const windowContextSchema = z.object({
   title: z.string().nullable(),
   ownerName: z.string().min(1),
   processIdentifier: z.number().int().positive(),
+  windowNumber: z.number().int().positive().optional(),
   bounds: z.object({
     x: z.number(),
     y: z.number(),
@@ -273,6 +296,8 @@ export const accessibilityElementSchema = z.object({
 
 export const screenshotSchema = z.object({
   label: z.string().min(1),
+  /** Optional source-window binding for an image captured from one window. */
+  sourceWindowNumber: z.number().int().positive().optional(),
   mediaType: z.literal("image/jpeg"),
   base64Data: z.string().min(1),
   displayWidthPoints: z.number().int().positive(),

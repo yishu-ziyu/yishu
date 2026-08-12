@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import YishuContext
 
 /// Executes product-authorized desktop actions. Accessibility is preferred;
 /// self-drawn controls fall back to a pointer-preserving Quartz click after
@@ -13,6 +14,7 @@ enum YishuComputerUseActuator {
     enum NotesExecutionOutcome: Equatable, Sendable {
         case created(noteId: String, title: String, plaintext: String)
         case blockedBeforeSubmission
+        case targetStaleBeforeSubmission
         case permissionDenied
         case unavailable
         case unknownAfterSubmission
@@ -25,6 +27,8 @@ enum YishuComputerUseActuator {
         _ expectedPlaintext: String,
         _ authorizationFence: AuthorizationFence
     ) async -> NotesExecutionOutcome
+
+    typealias SourceWindowValidator = @MainActor (YishuSourceWindowTarget) -> Bool
 
     typealias TimeReminderExecutor = @MainActor (
         _ reminderId: String,
@@ -773,6 +777,7 @@ enum YishuComputerUseActuator {
         screenCaptures: [CompanionScreenCapture],
         authorizationFence: @escaping AuthorizationFence = { true },
         notesExecutor: NotesExecutor? = nil,
+        sourceWindowValidator: @escaping SourceWindowValidator = sourceWindowStillMatches,
         timeReminderExecutor: TimeReminderExecutor? = nil
     ) async -> YishuComputerActionResult {
         let receiptId = UUID().uuidString
@@ -783,6 +788,7 @@ enum YishuComputerUseActuator {
                 receiptId: receiptId,
                 attemptId: attemptId,
                 authorizationFence: authorizationFence,
+                sourceWindowValidator: sourceWindowValidator,
                 notesExecutor: notesExecutor ?? executeNotesCreate
             )
         }
@@ -974,6 +980,7 @@ enum YishuComputerUseActuator {
         receiptId: String,
         attemptId: String,
         authorizationFence: @escaping AuthorizationFence,
+        sourceWindowValidator: @escaping SourceWindowValidator,
         notesExecutor: NotesExecutor
     ) async -> YishuComputerActionResult {
         guard request.targetBundleId == "com.apple.Notes",
@@ -990,10 +997,38 @@ enum YishuComputerUseActuator {
                 attemptId: attemptId
             )
         }
+        guard !request.hasAnySourceWindowField || request.sourceWindowTarget != nil else {
+            return failed(
+                "The page source pin is incomplete.",
+                code: .runtimeError,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
         let htmlBody = notesHTMLBody(for: content)
 
-        switch await notesExecutor(title, htmlBody, content, authorizationFence) {
+        // This closure is invoked inside executeNotesCreate's final synchronous
+        // commit gate, immediately before the Apple event is sent. Keep source
+        // freshness and the turn authorization inseparable at that point.
+        var sourceChangedAtCommit = false
+        let submissionFence: AuthorizationFence = {
+            guard authorizationFence() else { return false }
+            guard let source = request.sourceWindowTarget else { return true }
+            let matches = sourceWindowValidator(source)
+            sourceChangedAtCommit = !matches
+            return matches
+        }
+
+        switch await notesExecutor(title, htmlBody, content, submissionFence) {
         case .blockedBeforeSubmission:
+            if sourceChangedAtCommit {
+                return failed(
+                    "The observed page changed before the note was created.",
+                    code: .targetStale,
+                    receiptId: receiptId,
+                    attemptId: attemptId
+                )
+            }
             return YishuComputerActionResult(
                 succeeded: false,
                 verified: false,
@@ -1002,6 +1037,13 @@ enum YishuComputerUseActuator {
                 status: .blocked,
                 method: .unknown,
                 code: .permissionDenied,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .targetStaleBeforeSubmission:
+            return failed(
+                "The observed page changed before the note was created.",
+                code: .targetStale,
                 receiptId: receiptId,
                 attemptId: attemptId
             )
@@ -1175,6 +1217,65 @@ enum YishuComputerUseActuator {
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&#39;")
             .replacingOccurrences(of: "\n", with: "<br>")
+    }
+
+    /// Reads the same frontmost layer-0 window shape the context collector
+    /// uses. A different tab, window, move, resize, or frontmost app fails
+    /// closed; source text is never included in receipts or logs.
+    static func sourceWindowStillMatches(_ expected: YishuSourceWindowTarget) -> Bool {
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              isMatchingFrontmostTarget(
+                expectedPid: expected.processIdentifier,
+                expectedBundleId: expected.bundleId,
+                livePid: frontmost.processIdentifier,
+                liveBundleId: frontmost.bundleIdentifier
+              ),
+              let windows = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements],
+                kCGNullWindowID
+              ) as? [[String: Any]],
+              let window = frontmostLayerZeroWindow(
+                in: windows,
+                ownedBy: expected.processIdentifier
+              ),
+              let windowNumber = window[kCGWindowNumber as String] as? Int,
+              windowNumber == expected.windowNumber,
+              let rawTitle = window[kCGWindowName as String] as? String,
+              canonicalWindowTitle(rawTitle) == expected.title,
+              let rawBounds = window[kCGWindowBounds as String] as? NSDictionary,
+              let liveBounds = CGRect(dictionaryRepresentation: rawBounds),
+              approximatelyEqual(liveBounds.origin.x, expected.bounds.x),
+              approximatelyEqual(liveBounds.origin.y, expected.bounds.y),
+              approximatelyEqual(liveBounds.width, expected.bounds.width),
+              approximatelyEqual(liveBounds.height, expected.bounds.height) else {
+            return false
+        }
+        return true
+    }
+
+    /// CGWindowList is front-to-back. The first layer-0 window owned by the
+    /// frontmost process is therefore its active window; searching all its
+    /// windows would incorrectly accept an old background window after a
+    /// same-app window switch.
+    static func frontmostLayerZeroWindow(
+        in windows: [[String: Any]],
+        ownedBy processIdentifier: pid_t
+    ) -> [String: Any]? {
+        windows.first(where: {
+            ($0[kCGWindowOwnerPID as String] as? pid_t) == processIdentifier
+                && ($0[kCGWindowLayer as String] as? Int) == 0
+        })
+    }
+
+    private static func canonicalWindowTitle(_ rawTitle: String) -> String? {
+        let trimmed = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(240))
+    }
+
+    private static func approximatelyEqual(_ lhs: CGFloat, _ rhs: Double) -> Bool {
+        guard lhs.isFinite, rhs.isFinite else { return false }
+        return abs(Double(lhs) - rhs) <= 0.5
     }
 
     private static func executeNotesCreate(

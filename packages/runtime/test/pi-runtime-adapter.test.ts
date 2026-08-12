@@ -80,6 +80,8 @@ class FakeAgentSession {
   abortBarrier?: Promise<void>;
   disposed = false;
   disposeCount = 0;
+  activeToolNames = ["read", "web_search", "computer_control", "delegate"];
+  readonly activeToolNameSets: string[][] = [];
   promptHandler: (session: FakeAgentSession, text: string) => Promise<void> = async (session) => {
     session.emitTextDelta("收到。");
   };
@@ -96,6 +98,15 @@ class FakeAgentSession {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  getActiveToolNames(): readonly string[] {
+    return this.activeToolNames;
+  }
+
+  setActiveToolsByName(names: readonly string[]): void {
+    this.activeToolNames = [...names];
+    this.activeToolNameSets.push([...names]);
   }
 
   emitSessionEvent(event: FakeSessionEvent): void {
@@ -825,6 +836,61 @@ test("an accepted interruption fences computer dispatch before the actuator port
   await turn;
 });
 
+test("page-note receipt reconciliation keeps one dispatched macOS receipt through Pi cancellation", async (t) => {
+  const harness = createFakePiHarness();
+  let cancelledPortRequests = 0;
+  const { adapter, workdir } = await makeAdapter(harness, {
+    perform: async () => ({ succeeded: false, verified: false, message: "unused" }),
+    resolve: () => false,
+    cancelRequest: () => { cancelledPortRequests += 1; },
+    dispose: () => {},
+  });
+  cleanupAfter(t, adapter, workdir);
+  harness.configureSession = (session) => {
+    session.promptHandler = (current) => current.waitUntilAborted();
+  };
+  const command = makeCommand();
+  const turn = adapter.startTurn(command, () => undefined);
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+
+  // This is called by the shared port only after it emitted the single macOS
+  // request. Before this point ordinary cancellation still cancels the port.
+  const finishReceipt = adapter.beginPageNoteReceiptReconciliation(command.requestId);
+  await adapter.cancelTurn(makeCancelCommand(command), () => undefined);
+  assert.equal(cancelledPortRequests, 0);
+  finishReceipt();
+  await turn;
+});
+
+test("disposing Pi keeps a dispatched page-note receipt alive, then closes its port once", async (t) => {
+  const harness = createFakePiHarness();
+  let cancelledPortRequests = 0;
+  let disposedPort = 0;
+  const { adapter, workdir } = await makeAdapter(harness, {
+    perform: async () => ({ succeeded: false, verified: false, message: "unused" }),
+    resolve: () => false,
+    cancelRequest: () => { cancelledPortRequests += 1; },
+    dispose: () => { disposedPort += 1; },
+  });
+  t.after(async () => { await rm(workdir, { recursive: true, force: true }); });
+  harness.configureSession = (session) => {
+    session.promptHandler = (current) => current.waitUntilAborted();
+  };
+  const command = makeCommand();
+  const turn = adapter.startTurn(command, () => undefined);
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+
+  const finishReceipt = adapter.beginPageNoteReceiptReconciliation(command.requestId);
+  await adapter.dispose();
+  assert.equal(cancelledPortRequests, 0);
+  assert.equal(disposedPort, 0);
+  finishReceipt();
+  assert.equal(disposedPort, 1);
+  await turn;
+});
+
 test("an accepted interruption fences delegate before its effectful execute", async (t) => {
   const harness = createFakePiHarness();
   const release = deferred();
@@ -871,6 +937,36 @@ test("an accepted interruption fences delegate before its effectful execute", as
   release.resolve();
   await adapter.cancelTurn(makeCancelCommand(command), (event) => events.push(event));
   await turn;
+});
+
+test("current-page Notes tool is active only for its turn without hiding mature tools", async (t) => {
+  const harness = createFakePiHarness();
+  const pageNote = {
+    name: "save_current_page_actions_to_note",
+    label: "Page note",
+    description: "test page note",
+    parameters: {} as never,
+    execute: async () => ({ content: [], details: { dispatched: false, succeeded: false, verified: false } }),
+  } as unknown as FakeTool;
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  adapter.setSessionToolPolicy(() => ({
+    computerControl: true,
+    extraTools: [],
+    registeredExtraTools: [pageNote],
+    activeExtraToolNames: ["save_current_page_actions_to_note"],
+  }));
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(makeCommand(), (event) => events.push(event));
+  const session = harness.sessions[0]!;
+  assert.deepEqual(session.activeToolNameSets[0], [
+    "read",
+    "web_search",
+    "computer_control",
+    "delegate",
+    "save_current_page_actions_to_note",
+  ]);
+  assert.deepEqual(session.activeToolNameSets.at(-1), ["read", "web_search", "computer_control", "delegate"]);
 });
 
 test("an effect already admitted makes the competing interruption reject", async (t) => {

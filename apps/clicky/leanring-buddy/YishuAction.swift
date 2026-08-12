@@ -108,6 +108,11 @@ struct YishuComputerActionRequest: Equatable, Sendable {
     let text: String?
     let title: String?
     let content: String?
+    let sourceBundleId: String?
+    let sourcePid: pid_t?
+    let sourceWindowNumber: Int?
+    let sourceWindowTitle: String?
+    let sourceWindowBounds: YishuWindowBounds?
     let reminderId: String?
     let delaySeconds: Int?
     let reminderBody: String?
@@ -130,6 +135,11 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         text: String? = nil,
         title: String? = nil,
         content: String? = nil,
+        sourceBundleId: String? = nil,
+        sourcePid: pid_t? = nil,
+        sourceWindowNumber: Int? = nil,
+        sourceWindowTitle: String? = nil,
+        sourceWindowBounds: YishuWindowBounds? = nil,
         reminderId: String? = nil,
         delaySeconds: Int? = nil,
         reminderBody: String? = nil,
@@ -151,6 +161,11 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         self.text = text
         self.title = title
         self.content = content
+        self.sourceBundleId = sourceBundleId
+        self.sourcePid = sourcePid
+        self.sourceWindowNumber = sourceWindowNumber
+        self.sourceWindowTitle = sourceWindowTitle
+        self.sourceWindowBounds = sourceWindowBounds
         self.reminderId = reminderId
         self.delaySeconds = delaySeconds
         self.reminderBody = reminderBody
@@ -160,6 +175,41 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         self.attemptId = attemptId
         self.basisFrameId = basisFrameId
         self.effectClass = effectClass
+    }
+}
+
+struct YishuSourceWindowTarget: Equatable, Sendable {
+    let bundleId: String
+    let processIdentifier: pid_t
+    let windowNumber: Int
+    let title: String
+    let bounds: YishuWindowBounds
+}
+
+extension YishuComputerActionRequest {
+    var sourceWindowTarget: YishuSourceWindowTarget? {
+        guard let sourceBundleId,
+              let sourcePid,
+              let sourceWindowNumber,
+              let sourceWindowTitle,
+              let sourceWindowBounds else {
+            return nil
+        }
+        return YishuSourceWindowTarget(
+            bundleId: sourceBundleId,
+            processIdentifier: sourcePid,
+            windowNumber: sourceWindowNumber,
+            title: sourceWindowTitle,
+            bounds: sourceWindowBounds
+        )
+    }
+
+    var hasAnySourceWindowField: Bool {
+        sourceBundleId != nil
+            || sourcePid != nil
+            || sourceWindowNumber != nil
+            || sourceWindowTitle != nil
+            || sourceWindowBounds != nil
     }
 }
 

@@ -20,6 +20,7 @@ import {
   createComputerControlTool,
   type ComputerControlToolAction,
 } from "./computer-control-tool.js";
+import { isCurrentPageActionsNoteUtterance } from "./delegation.js";
 import {
   ComputerActionError,
   UnavailableComputerUsePort,
@@ -651,7 +652,11 @@ export interface PiRuntimeAdapterOptions {
  */
 export interface SessionToolPolicy {
   readonly computerControl: boolean;
+  /** Tools always registered in Main session registry, but not necessarily active this turn. */
+  readonly registeredExtraTools?: readonly ToolDefinition[];
   readonly extraTools: ToolDefinition[];
+  /** Explicit active Main-tool names for this prompt; absent keeps extraTools active. */
+  readonly activeExtraToolNames?: readonly string[];
 }
 
 export const DEFAULT_SESSION_TOOL_POLICY: SessionToolPolicy = {
@@ -671,6 +676,13 @@ export class PiRuntimeAdapter implements AgentRuntime {
   private readonly activeProviderTurns = new Map<string, ActiveProviderTurn>();
   private readonly activeGenerationByRequestId = new Map<string, PiTurnGenerationState>();
   private readonly activeGenerationBySessionKey = new Map<string, PiTurnGenerationState>();
+  /**
+   * A source-bound Notes write has crossed the physical dispatch boundary.
+   * PTT still aborts Pi immediately, but must not discard the one pending
+   * macOS receipt that tells us whether that irreversible write happened.
+   */
+  private readonly pageNoteReceiptReconciliations = new Set<string>();
+  private computerUsePortDisposeDeferred = false;
   private readonly pendingRequestIds = new Set<string>();
   private readonly cancelledRequestIds = new Set<string>();
   private readonly activeTurnOperations = new Set<Promise<void>>();
@@ -727,8 +739,64 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.sessionToolPolicy = policy;
   }
 
+  beginPageNoteReceiptReconciliation(requestId: string): () => void {
+    this.pageNoteReceiptReconciliations.add(requestId);
+    return () => {
+      this.pageNoteReceiptReconciliations.delete(requestId);
+      this.disposeComputerUsePortIfReady();
+    };
+  }
+
+  /**
+   * Product calls this only after it has durably recorded the bounded unknown
+   * outcome.  Until then a dispatched Notes request must keep its real receipt
+   * alive even while the model session is being torn down.
+   */
+  abandonPageNoteReceiptReconciliation(requestId: string): void {
+    if (!this.pageNoteReceiptReconciliations.delete(requestId)) return;
+    this.computerUsePort.cancelRequest(requestId, "page_note_receipt_unknown");
+    this.disposeComputerUsePortIfReady();
+  }
+
+  private disposeComputerUsePortIfReady(): void {
+    if (!this.computerUsePortDisposeDeferred || this.pageNoteReceiptReconciliations.size > 0) return;
+    this.computerUsePortDisposeDeferred = false;
+    this.computerUsePort.dispose();
+  }
+
+  /**
+   * Pi retains a session's complete tool registry for conversation continuity.
+   * This activation list is therefore reset at every prompt boundary: a
+   * current-page Note tool can exist in the registry but remains invisible on
+   * all ordinary turns.
+   */
+  private activateToolsForTurn(
+    session: AgentSession,
+    policy: SessionToolPolicy,
+  ): (() => void) | undefined {
+    const registered = policy.registeredExtraTools ?? [];
+    if (registered.length === 0) return undefined;
+    const controllable = session as AgentSession & {
+      getActiveToolNames?: () => readonly string[];
+      setActiveToolsByName?: (names: readonly string[]) => void;
+    };
+    if (
+      typeof controllable.getActiveToolNames !== "function"
+      || typeof controllable.setActiveToolsByName !== "function"
+    ) {
+      throw new Error("Pi session does not support per-turn tool activation.");
+    }
+    const previous = [...controllable.getActiveToolNames()];
+    const desired = previous.filter((name) => name !== "save_current_page_actions_to_note");
+    if (policy.activeExtraToolNames?.includes("save_current_page_actions_to_note")) {
+      desired.push("save_current_page_actions_to_note");
+    }
+    controllable.setActiveToolsByName(desired);
+    return () => controllable.setActiveToolsByName!(previous);
+  }
+
   private fenceEffectfulExtraTool(tool: ToolDefinition, sessionKey: string): ToolDefinition {
-    if (tool.name !== "delegate") return tool;
+    if (tool.name !== "delegate" && tool.name !== "save_current_page_actions_to_note") return tool;
     const execute = tool.execute.bind(tool);
     return {
       ...tool,
@@ -737,9 +805,21 @@ export class PiRuntimeAdapter implements AgentRuntime {
         const generationState = activeTurn?.generationState
           ?? this.activeGenerationBySessionKey.get(sessionKey);
         if (generationState?.beginEffectDispatch() === undefined) {
-          throw new Error("delegate was blocked because its assistant generation was interrupted.");
+          throw new Error(`${tool.name} was blocked because its assistant generation was interrupted.`);
         }
-        return execute(...args);
+        const result = await execute(...args);
+        if (tool.name === "save_current_page_actions_to_note" && activeTurn) {
+          const details = result !== null && typeof result === "object" && "details" in result
+            ? (result as { details?: unknown }).details
+            : undefined;
+          const dispatched = details !== null && typeof details === "object"
+            && (details as { dispatched?: unknown }).dispatched === true;
+          if (dispatched) {
+            activeTurn.actionCount += 1;
+            activeTurn.allActionsVerified &&= (details as { verified?: unknown }).verified === true;
+          }
+        }
+        return result;
       },
     } as ToolDefinition;
   }
@@ -761,7 +841,9 @@ export class PiRuntimeAdapter implements AgentRuntime {
         this.sessionKeyByRequestId.delete(requestId);
         this.cancelledRequestIds.add(requestId);
         this.activeGenerationByRequestId.delete(requestId);
-        this.computerUsePort.cancelRequest(requestId, "turn_superseded");
+        if (!this.pageNoteReceiptReconciliations.has(requestId)) {
+          this.computerUsePort.cancelRequest(requestId, "turn_superseded");
+        }
       }
       // Detachment is synchronous, so a replacement cannot reuse this Pi
       // session. Provider abort then gets the same bounded cleanup window as
@@ -986,10 +1068,20 @@ export class PiRuntimeAdapter implements AgentRuntime {
       generationState,
     };
     let completedSuccessfully = false;
+    let restoreTools: (() => void) | undefined;
     try {
       await this.activeComputerTurn.run(computerTurn, async () => {
+        restoreTools = this.activateToolsForTurn(
+          session,
+          this.sessionToolPolicy(command.payload.conversationId ?? command.requestId),
+        );
+        const currentPageNoteImageOnly = isCurrentPageActionsNoteUtterance(command.payload.utterance)
+          && command.payload.contextFrame.screenshots.length === 1
+          && command.payload.contextFrame.screenshots[0]?.sourceWindowNumber
+            === command.payload.contextFrame.activeWindow?.value.windowNumber;
         await session.prompt(buildGroundedPrompt(command, {
           includeConversationHistory: sessionCreated,
+          ...(currentPageNoteImageOnly ? { currentPageNoteImageOnly: true } : {}),
         }), {
           preflightResult: (accepted) => {
             if (accepted) generationState.markInitialPromptAdmitted();
@@ -1086,6 +1178,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
         ),
       }));
     } finally {
+      restoreTools?.();
       unsubscribe();
       this.activeSessionByRequestId.delete(command.requestId);
       this.sessionKeyByRequestId.delete(command.requestId);
@@ -1169,7 +1262,9 @@ export class PiRuntimeAdapter implements AgentRuntime {
     if (this.hasActiveRequest(command.requestId)) {
       this.cancelledRequestIds.add(command.requestId);
     }
-    this.computerUsePort.cancelRequest(command.requestId, command.payload.reason);
+    if (!this.pageNoteReceiptReconciliations.has(command.requestId)) {
+      this.computerUsePort.cancelRequest(command.requestId, command.payload.reason);
+    }
     const session = this.activeSessionByRequestId.get(command.requestId);
     if (session) {
       this.activeSessionByRequestId.delete(command.requestId);
@@ -1199,7 +1294,9 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.disposed = true;
     for (const requestId of this.pendingRequestIds) {
       this.cancelledRequestIds.add(requestId);
-      this.computerUsePort.cancelRequest(requestId, "runtime_disposed");
+      if (!this.pageNoteReceiptReconciliations.has(requestId)) {
+        this.computerUsePort.cancelRequest(requestId, "runtime_disposed");
+      }
     }
     const active = [...this.activeProviderTurns.values()];
     await Promise.all(active.map((turn) => turn.cancel()));
@@ -1207,7 +1304,9 @@ export class PiRuntimeAdapter implements AgentRuntime {
     for (const session of this.activeSessionByRequestId.values()) {
       await session.abort().catch(() => undefined);
     }
-    await Promise.allSettled([...this.activeTurnOperations]);
+    if (this.pageNoteReceiptReconciliations.size === 0) {
+      await Promise.allSettled([...this.activeTurnOperations]);
+    }
     for (const session of this.sessions.values()) {
       session.dispose();
     }
@@ -1221,7 +1320,8 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.cancelledRequestIds.clear();
     this.activeTurnOperations.clear();
     this.providerTransitions.clear();
-    this.computerUsePort.dispose();
+    if (this.pageNoteReceiptReconciliations.size === 0) this.computerUsePort.dispose();
+    else this.computerUsePortDisposeDeferred = true;
   }
 
   private async performComputerAction(
@@ -1495,7 +1595,8 @@ export class PiRuntimeAdapter implements AgentRuntime {
               this.performComputerAction(action, signal)
             )) as unknown as ToolDefinition]
           : []),
-        ...toolPolicy.extraTools.map((tool) => this.fenceEffectfulExtraTool(tool, sessionKey)),
+        ...[...toolPolicy.extraTools, ...(toolPolicy.registeredExtraTools ?? [])]
+          .map((tool) => this.fenceEffectfulExtraTool(tool, sessionKey)),
       ],
       ...capabilityConfiguration,
     });

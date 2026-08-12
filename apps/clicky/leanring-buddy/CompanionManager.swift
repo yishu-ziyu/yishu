@@ -2295,7 +2295,9 @@ final class CompanionManager: ObservableObject {
                 timing.mark("runtime_fallback_start", reason: reason.rawValue)
             }
             turnVisualPhase = .observingContext
-            let capturedContext = await yishuContextFrameCollector.capture()
+            let capturedContext = await yishuContextFrameCollector.capture(
+                activeWindowOnly: Self.requiresCurrentPageNoteWindow(transcript)
+            )
             timing.mark(
                 "context_capture",
                 reason: "ok",
@@ -2376,7 +2378,9 @@ final class CompanionManager: ObservableObject {
                     responseOverlayManager.hideOverlay()
                     timing.mark("runtime_restart", reason: "sidecar_not_running")
                     do {
-                        let retryContext = await yishuContextFrameCollector.capture()
+                        let retryContext = await yishuContextFrameCollector.capture(
+                            activeWindowOnly: Self.requiresCurrentPageNoteWindow(transcript)
+                        )
                         timing.mark(
                             "context_capture",
                             reason: "runtime_restart",
@@ -3635,6 +3639,24 @@ final class CompanionManager: ObservableObject {
             return .useActionReceipt
         }
         return runtimeIsRunning ? .surfaceFailure : .restartRuntime
+    }
+
+    /// Mirrors the Runtime's intentionally narrow page-to-note boundary only
+    /// to choose evidence shape. Runtime remains the authority that permits
+    /// the Notes action, so uncertainty here fails closed to normal displays.
+    static func requiresCurrentPageNoteWindow(_ transcript: String) -> Bool {
+        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.count <= 240,
+              text.range(of: "[？?]", options: .regularExpression) == nil,
+              text.range(of: "(?:吗|么|能不能|可不可以|是否|要不要)\\s*$", options: .regularExpression) == nil,
+              text.range(of: "(?:不要|别|取消|不必|不用|不是|并非)", options: .regularExpression) == nil else {
+            return false
+        }
+        let currentPage = text.range(of: "(?:当前(?:页面|页|窗口)|这个页面)", options: .regularExpression) != nil
+        let actionItems = text.range(of: "(?:三件事|三条|3\\s*条|最多\\s*(?:三|3)\\s*条)", options: .regularExpression) != nil
+        let organize = text.range(of: "(?:整理|列成|提炼)", options: .regularExpression) != nil
+        let note = text.range(of: "(?:备忘录|备忘|notes?)", options: [.regularExpression, .caseInsensitive]) != nil
+        return currentPage && actionItems && organize && note
     }
 
     static func directActionConfirmation(

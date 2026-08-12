@@ -85,12 +85,22 @@ public struct WindowContext: Codable, Equatable, Sendable {
     public let title: String?
     public let ownerName: String
     public let processIdentifier: Int
+    /// Quartz window identity. Optional so frames produced before this was
+    /// captured remain wire-compatible.
+    public let windowNumber: Int?
     public let bounds: WindowBounds?
 
-    public init(title: String?, ownerName: String, processIdentifier: Int, bounds: WindowBounds?) {
+    public init(
+        title: String?,
+        ownerName: String,
+        processIdentifier: Int,
+        windowNumber: Int? = nil,
+        bounds: WindowBounds?
+    ) {
         self.title = title
         self.ownerName = ownerName
         self.processIdentifier = processIdentifier
+        self.windowNumber = windowNumber
         self.bounds = bounds
     }
 }
@@ -130,6 +140,10 @@ public struct ScreenshotContext: Codable, Equatable, Sendable {
     /// added remain decodable.
     public let displayOriginXPoints: Double?
     public let displayOriginYPoints: Double?
+    /// Present only for an exact frontmost-window capture. Display captures
+    /// keep the legacy shape so click-coordinate consumers cannot mistake
+    /// this image for a whole display.
+    public let sourceWindowNumber: Int?
 
     public init(
         label: String,
@@ -140,7 +154,8 @@ public struct ScreenshotContext: Codable, Equatable, Sendable {
         screenshotWidthPixels: Int,
         screenshotHeightPixels: Int,
         displayOriginXPoints: Double? = nil,
-        displayOriginYPoints: Double? = nil
+        displayOriginYPoints: Double? = nil,
+        sourceWindowNumber: Int? = nil
     ) {
         self.label = label
         self.mediaType = mediaType
@@ -151,6 +166,7 @@ public struct ScreenshotContext: Codable, Equatable, Sendable {
         self.screenshotHeightPixels = screenshotHeightPixels
         self.displayOriginXPoints = displayOriginXPoints
         self.displayOriginYPoints = displayOriginYPoints
+        self.sourceWindowNumber = sourceWindowNumber
     }
 }
 
@@ -227,11 +243,16 @@ public struct ContextFrame: Codable, Sendable {
                 screenshot.displayHeightPoints > 0 &&
                 screenshot.screenshotWidthPixels > 0 &&
                 screenshot.screenshotHeightPixels > 0 &&
-                originIsValid
+                originIsValid &&
+                screenshotIdentityIsValid(screenshot)
         }) else {
             throw ContextFrameValidationError.invalidScreenshot
         }
     }
+}
+
+private func screenshotIdentityIsValid(_ screenshot: ScreenshotContext) -> Bool {
+    screenshot.sourceWindowNumber == nil || screenshot.sourceWindowNumber! > 0
 }
 
 public enum ContextFrameValidationError: Error, Equatable {
@@ -266,6 +287,7 @@ extension WindowContext {
         case title
         case ownerName
         case processIdentifier
+        case windowNumber
         case bounds
     }
 
@@ -278,11 +300,41 @@ extension WindowContext {
         }
         try container.encode(ownerName, forKey: .ownerName)
         try container.encode(processIdentifier, forKey: .processIdentifier)
+        try container.encodeIfPresent(windowNumber, forKey: .windowNumber)
         if let bounds {
             try container.encode(bounds, forKey: .bounds)
         } else {
             try container.encodeNil(forKey: .bounds)
         }
+    }
+}
+
+extension ScreenshotContext {
+    private enum CodingKeys: String, CodingKey {
+        case label
+        case mediaType
+        case base64Data
+        case displayWidthPoints
+        case displayHeightPoints
+        case screenshotWidthPixels
+        case screenshotHeightPixels
+        case displayOriginXPoints
+        case displayOriginYPoints
+        case sourceWindowNumber
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(label, forKey: .label)
+        try container.encode(mediaType, forKey: .mediaType)
+        try container.encode(base64Data, forKey: .base64Data)
+        try container.encode(displayWidthPoints, forKey: .displayWidthPoints)
+        try container.encode(displayHeightPoints, forKey: .displayHeightPoints)
+        try container.encode(screenshotWidthPixels, forKey: .screenshotWidthPixels)
+        try container.encode(screenshotHeightPixels, forKey: .screenshotHeightPixels)
+        try container.encodeIfPresent(displayOriginXPoints, forKey: .displayOriginXPoints)
+        try container.encodeIfPresent(displayOriginYPoints, forKey: .displayOriginYPoints)
+        try container.encodeIfPresent(sourceWindowNumber, forKey: .sourceWindowNumber)
     }
 }
 

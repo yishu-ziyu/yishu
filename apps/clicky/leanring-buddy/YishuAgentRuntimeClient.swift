@@ -2517,6 +2517,7 @@ final class YishuAgentRuntimeClient {
                   (1...5_000).contains(content.count) else {
                 return nil
             }
+            guard let source = sourceWindowTarget(from: payload) else { return nil }
             return YishuComputerActionRequest(
                 requestId: requestId,
                 traceId: traceId,
@@ -2526,6 +2527,11 @@ final class YishuAgentRuntimeClient {
                 y: 0,
                 title: title,
                 content: content,
+                sourceBundleId: source?.bundleId,
+                sourcePid: source?.processIdentifier,
+                sourceWindowNumber: source?.windowNumber,
+                sourceWindowTitle: source?.title,
+                sourceWindowBounds: source?.bounds,
                 targetBundleId: "com.apple.Notes",
                 intentId: intentId,
                 attemptId: attemptId,
@@ -2626,6 +2632,63 @@ final class YishuAgentRuntimeClient {
             && doubleValue >= 1
     }
 
+    private struct SourceWindowTarget {
+        let bundleId: String
+        let processIdentifier: pid_t
+        let windowNumber: Int
+        let title: String
+        let bounds: YishuWindowBounds
+    }
+
+    /// The source pin is deliberately all-or-none: ordinary explicitly
+    /// authored notes carry no source fields, while page-derived notes need a
+    /// complete target to be revalidated at the physical commit point.
+    private static func sourceWindowTarget(
+        from payload: [String: Any]
+    ) -> SourceWindowTarget?? {
+        let keys = [
+            "sourceBundleId",
+            "sourcePid",
+            "sourceWindowNumber",
+            "sourceWindowTitle",
+            "sourceWindowBounds",
+        ]
+        let present = keys.map { payload[$0] != nil }
+        guard present.allSatisfy({ $0 }) || present.allSatisfy({ !$0 }) else { return nil }
+        guard present.first == true else { return .some(nil) }
+
+        guard let bundleId = boundedProtocolString(payload["sourceBundleId"], maximum: 255),
+              bundleId == (payload["sourceBundleId"] as? String),
+              let processIdentifier = positiveProcessIdentifier(payload["sourcePid"]),
+              let windowNumber = positiveInt(payload["sourceWindowNumber"]),
+              let title = payload["sourceWindowTitle"] as? String,
+              title == title.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty,
+              title.count <= 240,
+              let bounds = sourceWindowBounds(payload["sourceWindowBounds"]) else {
+            return nil
+        }
+        return .some(SourceWindowTarget(
+            bundleId: bundleId,
+            processIdentifier: processIdentifier,
+            windowNumber: windowNumber,
+            title: title,
+            bounds: bounds
+        ))
+    }
+
+    private static func sourceWindowBounds(_ value: Any?) -> YishuWindowBounds? {
+        guard let dictionary = value as? [String: Any],
+              Set(dictionary.keys) == ["x", "y", "width", "height"],
+              let x = doubleValue(dictionary["x"]), x.isFinite,
+              let y = doubleValue(dictionary["y"]), y.isFinite,
+              let width = doubleValue(dictionary["width"]), width.isFinite, width > 0,
+              let height = doubleValue(dictionary["height"]), height.isFinite, height > 0 else {
+            return nil
+        }
+        return YishuWindowBounds(x: x, y: y, width: width, height: height)
+    }
+
     private static func nonBooleanNumber(_ value: Any?) -> NSNumber? {
         guard let number = value as? NSNumber,
               CFGetTypeID(number) != CFBooleanGetTypeID() else {
@@ -2643,6 +2706,17 @@ final class YishuAgentRuntimeClient {
             return nil
         }
         return processIdentifier
+    }
+
+    private static func positiveInt(_ value: Any?) -> Int? {
+        guard let number = nonBooleanNumber(value),
+              number.doubleValue.isFinite,
+              number.doubleValue.rounded() == number.doubleValue,
+              let integer = Int(exactly: number.int64Value),
+              integer > 0 else {
+            return nil
+        }
+        return integer
     }
 
     private static func isValidOptionalUUIDPayloadValue(_ value: Any?) -> Bool {

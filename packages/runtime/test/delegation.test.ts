@@ -16,6 +16,7 @@ import {
 import {
   DelegationCoordinator,
   ResultInbox,
+  isCurrentPageActionsNoteUtterance,
   type DelegatedResult,
   type DelegatedTaskPresenceUpdate,
   type MainTurnHandle,
@@ -142,6 +143,24 @@ function makeMainTurn(overrides: Partial<MainTurnHandle> = {}): MainTurnHandle {
     ...overrides,
   };
 }
+
+test("current-page Notes request is narrow and rejects questions or negation", () => {
+  assert.equal(
+    isCurrentPageActionsNoteUtterance("把当前页面需要我做的三件事整理成一条备忘录"),
+    true,
+  );
+  assert.equal(
+    isCurrentPageActionsNoteUtterance("把当前页面整理成最多三条，存到备忘录"),
+    true,
+  );
+  for (const utterance of [
+    "能把当前页面三条行动项整理成备忘录吗？",
+    "我不是让你把当前页面三条行动项整理成备忘录",
+    "总结当前页面，存到备忘录",
+  ]) {
+    assert.equal(isCurrentPageActionsNoteUtterance(utterance), false);
+  }
+});
 
 function delegateToolFor(
   coordinator: DelegationCoordinator,

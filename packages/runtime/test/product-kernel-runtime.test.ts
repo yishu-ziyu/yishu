@@ -40,6 +40,14 @@ function makeCommand(utterance: string, overrides?: Partial<TurnStartCommand["pa
   };
 }
 
+function screenshotForWindow(windowNumber: number, base64Data = "c2NyZWVu"): TurnStartCommand["payload"]["contextFrame"]["screenshots"][number] {
+  return {
+    ...makeTurnStartCommand().payload.contextFrame.screenshots[0]!,
+    sourceWindowNumber: windowNumber,
+    base64Data,
+  };
+}
+
 function waitForGateOrAbort(gate: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
   if (signal?.aborted) return Promise.resolve();
   return new Promise<void>((resolve, reject) => {
@@ -97,6 +105,449 @@ test("product kernel short-circuits remember on voice utterance", async () => {
   const completed = events.find((e) => e.type === "response.completed");
   assert.match(String((completed?.payload as { text?: string })?.text ?? ""), /记住/);
   assert.equal((await kernel.store.searchMemory("Pi")).length, 1);
+});
+
+test("source-bound Notes request reaches the actuator but not the durable conversation record", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const inner: AgentRuntime = {
+    async startTurn(command, emit) {
+      emit(runtimeEvent("turn.started", command.requestId, command.traceId, { runtime: "test", generation: 1 }));
+      emit(runtimeEvent("computer.action.requested", command.requestId, command.traceId, {
+        actionId: randomUUID(),
+        action: "create_note",
+        x: 0,
+        y: 0,
+        content: "1. 完成演示",
+        title: "当前任务",
+        targetBundleId: "com.apple.Notes",
+        sourceBundleId: "com.apple.Safari",
+        sourcePid: 42,
+        sourceWindowNumber: 7,
+        sourceWindowTitle: "今天的工作",
+        sourceWindowBounds: { x: 10, y: 20, width: 800, height: 600 },
+        generation: 1,
+      }));
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "完成。", verified: false, generation: 1,
+      }));
+    },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("解释当前页面");
+  const events: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  const action = events.find((event) => event.type === "computer.action.requested");
+  assert.equal(action?.payload.sourceWindowTitle, "今天的工作");
+  assert.equal(action?.payload.sourceWindowNumber, 7);
+  const ledger = await kernel.store.listConversationEvents(command.payload.conversationId ?? command.requestId);
+  const persisted = ledger.find((event) => event.type === "action.requested");
+  assert.deepEqual(persisted?.payload, {
+    actionId: action?.payload.actionId,
+    generation: 1,
+  });
+});
+
+test("page-to-note turn never streams or persists model copies of page content", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const secret = "SECRET_PAGE_ACTION_9e75";
+  const inner: AgentRuntime = {
+    async startTurn(command, emit) {
+      emit(runtimeEvent("turn.started", command.requestId, command.traceId, { runtime: "test", generation: 1 }));
+      emit(runtimeEvent("response.delta", command.requestId, command.traceId, {
+        text: `before ${secret}`, generation: 1,
+      }));
+      emit(runtimeEvent("response.delta", command.requestId, command.traceId, {
+        text: `after ${secret}`, generation: 1,
+      }));
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: `final ${secret}`, verified: false, generation: 1,
+      }));
+    },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const runtime = new ProductKernelRuntime(inner, kernel);
+  const command = makeCommand("把当前页面需要我做的三件事整理成一条备忘录", {
+    activeWindow: {
+      ...makeTurnStartCommand().payload.contextFrame.activeWindow!,
+      value: {
+        ...makeTurnStartCommand().payload.contextFrame.activeWindow!.value,
+        windowNumber: 7,
+      },
+    },
+  });
+  const events: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(events.some((event) => String(event.payload.text ?? "").includes(secret)), false);
+  assert.equal(events.filter((event) => event.type === "response.delta").length, 0);
+  assert.equal(
+    events.find((event) => event.type === "response.completed")?.payload.text,
+    "这次没有创建备忘录。",
+  );
+  const ledger = await kernel.store.listConversationEvents(command.payload.conversationId ?? command.requestId);
+  assert.equal(JSON.stringify(ledger).includes(secret), false);
+});
+
+test("expired page evidence never enables the Notes-writing tool", async () => {
+  let policyForConversation:
+    | ((conversationId: string) => { activeExtraToolNames?: readonly string[] })
+    | undefined;
+  const inner: AgentRuntime & {
+    setSessionToolPolicy?: (policy: (conversationId: string) => { activeExtraToolNames?: readonly string[] }) => void;
+  } = {
+    setSessionToolPolicy(policy) {
+      policyForConversation = policy;
+    },
+    async startTurn(command, emit) {
+      assert.deepEqual(policyForConversation?.(command.payload.conversationId ?? command.requestId).activeExtraToolNames, ["delegate"]);
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "ignored", verified: false, generation: 1,
+      }));
+    },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const command = makeCommand("把当前页面需要我做的三件事整理成一条备忘录", {
+    activeWindow: {
+      ...makeTurnStartCommand().payload.contextFrame.activeWindow!,
+      value: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!.value, windowNumber: 7 },
+    },
+    screenshots: [screenshotForWindow(7)],
+    expiresAt: new Date(Date.now() - 1_000).toISOString(),
+  });
+  const runtime = new ProductKernelRuntime(inner, createYishuKernel({ storeBackend: "memory" }));
+  await runtime.startTurn(command, () => undefined);
+});
+
+test("page-to-note tool dispatches Notes once even when Pi calls it twice", async () => {
+  let policyForConversation: ((conversationId: string) => any) | undefined;
+  let physicalDispatches = 0;
+  const secret = "SECRET_NOTE_ITEM_b711";
+  const inner: AgentRuntime & { setSessionToolPolicy?: (policy: (conversationId: string) => any) => void } = {
+    setSessionToolPolicy(policy) { policyForConversation = policy; },
+    async startTurn(command, emit) {
+      const tool = policyForConversation?.(command.payload.conversationId ?? command.requestId)
+        .registeredExtraTools[0];
+      await tool.execute("first", { title: "当前任务", items: [secret] });
+      await assert.rejects(() => tool.execute("second", { title: "当前任务", items: [secret] }));
+      emit(runtimeEvent("response.delta", command.requestId, command.traceId, { text: secret, generation: 1 }));
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: secret, verified: true, generation: 1,
+      }));
+    },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const port: ComputerUsePort = {
+    async perform(_action, _context, signal) {
+      assert.equal(signal, undefined, "page-note reconciliation must not inherit Pi tool cancellation");
+      physicalDispatches += 1;
+      return {
+        succeeded: true, verified: true, status: "verified", code: "verified_accessibility",
+        method: "native_command", message: "ok",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const command = makeCommand("把当前页面需要我做的三件事整理成一条备忘录", {
+    activeWindow: {
+      ...makeTurnStartCommand().payload.contextFrame.activeWindow!,
+      value: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!.value, windowNumber: 7 },
+    },
+    screenshots: [screenshotForWindow(7)],
+  });
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(inner, kernel, port);
+  const events: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(physicalDispatches, 1);
+  assert.equal(events.some((event) => String(event.payload.text ?? "").includes(secret)), false);
+  assert.equal(events.find((event) => event.type === "response.completed")?.payload.text, "已经整理成一条备忘录，并确认写入。");
+  assert.equal(JSON.stringify(await kernel.store.listConversationEvents(command.payload.conversationId ?? command.requestId)).includes(secret), false);
+});
+
+test("cancel after page-note dispatch waits for one receipt, records it, and never presents success", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  let policyForConversation: ((conversationId: string) => any) | undefined;
+  let releaseReceipt!: () => void;
+  let markDispatched!: () => void;
+  const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+  const receiptGate = new Promise<void>((resolve) => { releaseReceipt = resolve; });
+  let innerCancelled = 0;
+  const inner: AgentRuntime & { setSessionToolPolicy?: (policy: (conversationId: string) => any) => void } = {
+    setSessionToolPolicy(policy) { policyForConversation = policy; },
+    async startTurn(command, emit) {
+      const tool = policyForConversation?.(command.payload.conversationId ?? command.requestId)
+        .registeredExtraTools[0];
+      await tool.execute("page-note", { title: "当前任务", items: ["行动项"] });
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+        text: "model success must not escape", verified: true, generation: 1,
+      }));
+    },
+    async cancelTurn() { innerCancelled += 1; },
+    async dispose() {},
+  };
+  const port: ComputerUsePort = {
+    async perform(action, context) {
+      assert.equal(action.action, "create_note");
+      if (action.action === "create_note") assert.equal(action.sourceWindowNumber, 7);
+      assert.equal(typeof context.onDispatched, "function");
+      context.onDispatched?.();
+      markDispatched();
+      await receiptGate;
+      return {
+        succeeded: true, verified: true, status: "verified", code: "verified_accessibility",
+        method: "native_command", message: "ok",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => { throw new Error("page-note receipt must not be cancelled after dispatch"); },
+    dispose: () => {},
+  };
+  const command = makeCommand("把当前页面需要我做的三件事整理成一条备忘录", {
+    activeWindow: {
+      ...makeTurnStartCommand().payload.contextFrame.activeWindow!,
+      value: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!.value, windowNumber: 7 },
+    },
+    screenshots: [screenshotForWindow(7)],
+  });
+  command.payload.conversationId = randomUUID();
+  const runtime = new ProductKernelRuntime(inner, kernel, port);
+  const visible: RuntimeEvent[] = [];
+  const start = runtime.startTurn(command, (event) => visible.push(event));
+  await dispatched;
+  assert.equal((runtime as any).activeTurns.get(command.requestId).currentPageNoteDispatched, true);
+  assert.equal((runtime as any).activeTurns.get(command.requestId).currentPageNoteReceiptInFlight, true);
+  await runtime.cancelTurn({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "turn.cancel",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: { reason: "user_cancelled" },
+  }, () => undefined);
+  assert.equal(innerCancelled, 1);
+  assert.equal((runtime as any).activeTurns.get(command.requestId).currentPageNoteCancelRequested, true);
+  releaseReceipt();
+  await start;
+
+  const ledger = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(ledger.filter((event) => event.type === "action.completed").length, 1);
+  assert.ok(
+    ledger.some((event) => event.type === "turn.failed" && event.payload.code === "action_committed_after_cancel"),
+    JSON.stringify(ledger),
+  );
+  assert.equal(visible.some((event) => event.type === "response.completed"), false);
+});
+
+test("disposing after page-note dispatch records the verified receipt before ending silently", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  let policyForConversation: ((conversationId: string) => any) | undefined;
+  let releaseReceipt!: () => void;
+  let markDispatched!: () => void;
+  const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+  const receiptGate = new Promise<void>((resolve) => { releaseReceipt = resolve; });
+  const inner: AgentRuntime & { setSessionToolPolicy?: (policy: (conversationId: string) => any) => void } = {
+    setSessionToolPolicy(policy) { policyForConversation = policy; },
+    async startTurn(command) {
+      const tool = policyForConversation?.(command.payload.conversationId ?? command.requestId).registeredExtraTools[0];
+      await tool.execute("page-note", { title: "当前任务", items: ["行动项"] });
+    },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const port: ComputerUsePort = {
+    async perform(_action, context) {
+      context.onDispatched?.();
+      markDispatched();
+      await receiptGate;
+      return { succeeded: true, verified: true, status: "verified", code: "verified_accessibility", method: "native_command", message: "ok" };
+    },
+    resolve: () => false,
+    cancelRequest: () => { throw new Error("real receipt must remain live during dispose"); },
+    dispose: () => {},
+  };
+  const command = makeCommand("把当前页面需要我做的三件事整理成一条备忘录", {
+    activeWindow: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!, value: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!.value, windowNumber: 7 } },
+    screenshots: [screenshotForWindow(7)],
+  });
+  command.payload.conversationId = randomUUID();
+  const runtime = new ProductKernelRuntime(inner, kernel, port);
+  const visible: RuntimeEvent[] = [];
+  void runtime.startTurn(command, (event) => visible.push(event));
+  await dispatched;
+  const disposing = runtime.dispose();
+  releaseReceipt();
+  await disposing;
+  const ledger = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(ledger.filter((event) => event.type === "action.completed").length, 1);
+  assert.ok(ledger.some((event) => event.type === "turn.failed" && event.payload.code === "action_committed_after_cancel"));
+  assert.equal(visible.some((event) => event.type === "response.completed"), false);
+});
+
+test("disposing a page-note with no receipt records one unknown outcome", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  let policyForConversation: ((conversationId: string) => any) | undefined;
+  let markDispatched!: () => void;
+  const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+  const inner: AgentRuntime & { setSessionToolPolicy?: (policy: (conversationId: string) => any) => void } = {
+    setSessionToolPolicy(policy) { policyForConversation = policy; },
+    async startTurn(command) {
+      const tool = policyForConversation?.(command.payload.conversationId ?? command.requestId).registeredExtraTools[0];
+      await tool.execute("page-note", { title: "当前任务", items: ["行动项"] });
+    },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const port: ComputerUsePort = {
+    async perform(_action, context) {
+      context.onDispatched?.();
+      markDispatched();
+      return await new Promise<never>(() => undefined);
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const command = makeCommand("把当前页面需要我做的三件事整理成一条备忘录", {
+    activeWindow: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!, value: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!.value, windowNumber: 7 } },
+    screenshots: [screenshotForWindow(7)],
+  });
+  command.payload.conversationId = randomUUID();
+  const runtime = new ProductKernelRuntime(inner, kernel, port);
+  void runtime.startTurn(command, () => undefined);
+  await dispatched;
+  await runtime.dispose();
+  const ledger = await kernel.store.listConversationEvents(command.payload.conversationId);
+  assert.equal(ledger.filter((event) => event.type === "action.completed").length, 1);
+  assert.ok(ledger.some((event) => event.type === "turn.failed" && event.payload.code === "action_outcome_unknown"));
+});
+
+test("page change before the one allowed dispatch creates no Note", async () => {
+  let policyForConversation: ((conversationId: string) => any) | undefined;
+  let physicalDispatches = 0;
+  const inner: AgentRuntime & { setSessionToolPolicy?: (policy: (conversationId: string) => any) => void } = {
+    setSessionToolPolicy(policy) { policyForConversation = policy; },
+    async startTurn(innerCommand, emit) {
+      const tool = policyForConversation?.(innerCommand.payload.conversationId ?? innerCommand.requestId)
+        .registeredExtraTools[0];
+      (runtime as any).activeTurns.get(innerCommand.requestId).command.payload.contextFrame.expiresAt = new Date(Date.now() - 1_000).toISOString();
+      await assert.rejects(() => tool.execute("stale", { title: "当前任务", items: ["行动项"] }));
+      emit(runtimeEvent("response.completed", innerCommand.requestId, innerCommand.traceId, {
+        text: "ignored", verified: false, generation: 1,
+      }));
+    },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const port: ComputerUsePort = {
+    async perform() { physicalDispatches += 1; return { succeeded: false, verified: false, message: "unexpected" }; },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const command = makeCommand("把当前页面需要我做的三件事整理成一条备忘录", {
+    activeWindow: {
+      ...makeTurnStartCommand().payload.contextFrame.activeWindow!,
+      value: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!.value, windowNumber: 7 },
+    },
+    screenshots: [screenshotForWindow(7)],
+  });
+  const runtime = new ProductKernelRuntime(inner, createYishuKernel({ storeBackend: "memory" }), port);
+  const events: RuntimeEvent[] = [];
+  await runtime.startTurn(command, (event) => events.push(event));
+  assert.equal(physicalDispatches, 0);
+  assert.equal(events.find((event) => event.type === "response.completed")?.payload.text, "页面已变化，这次没有创建备忘录。");
+});
+
+test("page-to-note sends Pi only the uniquely matching window screenshot", async () => {
+  let policyForConversation: ((conversationId: string) => any) | undefined;
+  const inner: AgentRuntime & { setSessionToolPolicy?: (policy: (conversationId: string) => any) => void } = {
+    setSessionToolPolicy(policy) { policyForConversation = policy; },
+    async startTurn(command, emit) {
+      assert.deepEqual(policyForConversation?.(command.payload.conversationId ?? command.requestId).activeExtraToolNames, [
+        "delegate", "save_current_page_actions_to_note",
+      ]);
+      assert.deepEqual(command.payload.contextFrame.screenshots.map((screenshot) => screenshot.label), ["main-window"]);
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, { text: "ignored", verified: false, generation: 1 }));
+    },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const command = makeCommand("把当前页面需要我做的三件事整理成一条备忘录", {
+    activeWindow: {
+      ...makeTurnStartCommand().payload.contextFrame.activeWindow!,
+      value: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!.value, windowNumber: 7 },
+    },
+    screenshots: [
+      { ...screenshotForWindow(7), label: "main-window" },
+      { ...screenshotForWindow(8), label: "SECRET_SECONDARY_WINDOW" },
+    ],
+  });
+  await new ProductKernelRuntime(inner, createYishuKernel({ storeBackend: "memory" })).startTurn(command, () => undefined);
+});
+
+test("missing or duplicate page screenshot disables Notes before any dispatch", async () => {
+  for (const screenshots of [
+    [{ ...screenshotForWindow(8), label: "other-window" }],
+    [
+      { ...screenshotForWindow(7), label: "one" },
+      { ...screenshotForWindow(7), label: "two" },
+    ],
+  ]) {
+    let policyForConversation: ((conversationId: string) => any) | undefined;
+    let physicalDispatches = 0;
+    const inner: AgentRuntime & { setSessionToolPolicy?: (policy: (conversationId: string) => any) => void } = {
+      setSessionToolPolicy(policy) { policyForConversation = policy; },
+      async startTurn(command, emit) {
+        assert.deepEqual(policyForConversation?.(command.payload.conversationId ?? command.requestId).activeExtraToolNames, ["delegate"]);
+        assert.equal(command.payload.contextFrame.screenshots.length, 0);
+        emit(runtimeEvent("response.completed", command.requestId, command.traceId, { text: "ignored", verified: false, generation: 1 }));
+      },
+      async cancelTurn() {},
+      async dispose() {},
+    };
+    const port: ComputerUsePort = {
+      async perform() { physicalDispatches += 1; return { succeeded: false, verified: false, message: "unexpected" }; },
+      resolve: () => false,
+      cancelRequest: () => {},
+      dispose: () => {},
+    };
+    const command = makeCommand("把当前页面需要我做的三件事整理成一条备忘录", {
+      activeWindow: {
+        ...makeTurnStartCommand().payload.contextFrame.activeWindow!,
+        value: { ...makeTurnStartCommand().payload.contextFrame.activeWindow!.value, windowNumber: 7 },
+      },
+      screenshots,
+    });
+    await new ProductKernelRuntime(inner, createYishuKernel({ storeBackend: "memory" }), port).startTurn(command, () => undefined);
+    assert.equal(physicalDispatches, 0);
+  }
+});
+
+test("ordinary turns keep every available screenshot", async () => {
+  const inner: AgentRuntime = {
+    async startTurn(command, emit) {
+      assert.deepEqual(command.payload.contextFrame.screenshots.map((screenshot) => screenshot.label), ["one", "two"]);
+      emit(runtimeEvent("response.completed", command.requestId, command.traceId, { text: "ok", verified: false, generation: 1 }));
+    },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const command = makeCommand("解释这两个窗口分别在做什么", {
+    screenshots: [
+      { ...screenshotForWindow(7), label: "one" },
+      { ...screenshotForWindow(8), label: "two" },
+    ],
+  });
+  await new ProductKernelRuntime(inner, createYishuKernel({ storeBackend: "memory" })).startTurn(command, () => undefined);
 });
 
 test("project turns overwrite ambient global memory scope and stay isolated", async () => {

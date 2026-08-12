@@ -11,6 +11,7 @@ import {
   sanitizeVisibleText,
   selectRelevantMindLessons,
   type CreateNoteExecutor,
+  type CreateNoteRequest,
   type ScheduleTimeReminderExecutor,
   type FinderHistoryBackExecutor,
   type ConversationEvent,
@@ -60,8 +61,11 @@ import {
 } from "./context-prompt.js";
 import {
   DelegationCoordinator,
+  isCurrentPageActionsNoteUtterance,
   type DelegatedResult,
   type DelegatedTaskPresenceUpdate,
+  type CurrentPageNoteInput,
+  type CurrentPageNoteResult,
 } from "./delegation.js";
 import { contextFrameToTrailSource } from "./trail-source.js";
 
@@ -122,11 +126,12 @@ function contractForOrdinaryTurn(command: TurnStartCommand): TaskExecutionContra
     .replace(/\s+/gu, " ")
     .trim()
     .slice(0, 160);
-  const externalEffect = COMPUTER_EFFECT_INTENT.test(command.payload.utterance);
+  const currentPageNote = isCurrentPageActionsNoteUtterance(command.payload.utterance);
+  const externalEffect = COMPUTER_EFFECT_INTENT.test(command.payload.utterance) || currentPageNote;
   return createTaskExecutionContract({
     objective: objective || "完成本轮任务",
     successMode: externalEffect ? "external_effect" : "read_only_delivery",
-    authority: externalEffect ? "reversible" : "automatic",
+    authority: currentPageNote ? "explicit_approval" : externalEffect ? "reversible" : "automatic",
     risk: externalEffect ? "medium" : "low",
     maxAttempts: 1,
   });
@@ -140,6 +145,99 @@ function trustedExternalVerification(
   return verified === undefined ? undefined : { source: "action_receipt", verified };
 }
 
+type CurrentPageNoteSource = {
+  sourceBundleId: string;
+  sourcePid: number;
+  sourceWindowNumber: number;
+  sourceWindowTitle: string;
+  sourceWindowBounds: { x: number; y: number; width: number; height: number };
+};
+
+function currentPageNoteScreenshot(
+  frame: ContextFrame,
+): ContextFrame["screenshots"][number] | null {
+  const windowNumber = frame.activeWindow?.value.windowNumber;
+  if (windowNumber === undefined || !Number.isInteger(windowNumber) || windowNumber <= 0) return null;
+  const matching = frame.screenshots.filter(
+    (screenshot) => screenshot.sourceWindowNumber === windowNumber,
+  );
+  return matching.length === 1 ? matching[0]! : null;
+}
+
+function currentPageNoteSource(frame: ContextFrame, now = new Date()): CurrentPageNoteSource | null {
+  const app = frame.frontmostApplication?.value;
+  const window = frame.activeWindow?.value;
+  const bundleId = app?.bundleIdentifier?.trim();
+  const title = window?.title?.trim();
+  const bounds = window?.bounds;
+  const windowNumber = window?.windowNumber;
+  const frameCapturedAt = Date.parse(frame.capturedAt);
+  const frameExpiresAt = Date.parse(frame.expiresAt);
+  const appCapturedAt = Date.parse(frame.frontmostApplication?.capturedAt ?? "");
+  const windowCapturedAt = Date.parse(frame.activeWindow?.capturedAt ?? "");
+  const nowMs = now.getTime();
+  if (
+    !Number.isFinite(frameCapturedAt) || !Number.isFinite(frameExpiresAt)
+    || !Number.isFinite(appCapturedAt) || !Number.isFinite(windowCapturedAt)
+    || frameCapturedAt > nowMs || nowMs >= frameExpiresAt
+    || appCapturedAt > nowMs || windowCapturedAt > nowMs
+    || nowMs - appCapturedAt > 60_000 || nowMs - windowCapturedAt > 60_000
+    || (frame.frontmostApplication?.confidence ?? 0) < 0.8
+    || (frame.activeWindow?.confidence ?? 0) < 0.8
+  ) return null;
+  if (currentPageNoteScreenshot(frame) === null) return null;
+  if (windowNumber === undefined || !Number.isInteger(windowNumber) || windowNumber <= 0) return null;
+  if (
+    !bundleId
+    || !app || app.processIdentifier <= 0
+    || !window || window.processIdentifier !== app.processIdentifier
+    || !title || title.length > 240
+    || !bounds
+    || !Number.isFinite(bounds.x) || !Number.isFinite(bounds.y)
+    || !Number.isFinite(bounds.width) || bounds.width <= 0
+    || !Number.isFinite(bounds.height) || bounds.height <= 0
+  ) return null;
+  return {
+    sourceBundleId: bundleId,
+    sourcePid: app.processIdentifier,
+    sourceWindowNumber: windowNumber,
+    sourceWindowTitle: title,
+    sourceWindowBounds: { ...bounds },
+  };
+}
+
+function pageNoteCommandForInner(command: TurnStartCommand): TurnStartCommand {
+  if (!isCurrentPageActionsNoteUtterance(command.payload.utterance)) return command;
+  const screenshot = currentPageNoteScreenshot(command.payload.contextFrame);
+  return {
+    ...command,
+    payload: {
+      ...command.payload,
+      contextFrame: {
+        ...command.payload.contextFrame,
+        screenshots: screenshot === null ? [] : [screenshot],
+      },
+    },
+  };
+}
+
+function isSourceBoundCreateNoteRequest(request: CreateNoteRequest): request is CreateNoteRequest & CurrentPageNoteSource {
+  const candidate = request as Partial<CurrentPageNoteSource>;
+  return typeof candidate.sourceBundleId === "string"
+    && typeof candidate.sourcePid === "number"
+    && typeof candidate.sourceWindowNumber === "number"
+    && typeof candidate.sourceWindowTitle === "string"
+    && candidate.sourceWindowBounds !== undefined;
+}
+
+function currentPageNoteCompletionText(result: CurrentPageNoteResult | undefined): string {
+  if (result === undefined) return "这次没有创建备忘录。";
+  if (result.verified) return "已经整理成一条备忘录，并确认写入。";
+  if (result.succeeded || result.status === "unverified") return "可能已经创建，但还不能确认；我不会重复。";
+  if (result.code === "target_stale") return "页面已变化，这次没有创建备忘录。";
+  return "这次没有创建备忘录。";
+}
+
 interface TurnLedgerState {
   readonly command: TurnStartCommand;
   readonly conversationId: string;
@@ -150,6 +248,13 @@ interface TurnLedgerState {
   readonly durable: boolean;
   productActionAbortController?: AbortController | undefined;
   productActionCancelRequested: boolean;
+  currentPageNoteAttempted?: boolean;
+  currentPageNoteResult?: CurrentPageNoteResult;
+  currentPageNoteReceiptInFlight?: boolean;
+  currentPageNoteDispatched?: boolean;
+  currentPageNoteCancelRequested?: boolean;
+  currentPageNoteReceiptSettled?: Promise<void>;
+  currentPageNoteReceiptSettle?: () => void;
   readonly interruptEligible: boolean;
   generation: number;
   effectsStarted: boolean;
@@ -995,6 +1100,12 @@ export class ProductKernelRuntime implements AgentRuntime {
       requestId: state.command.requestId,
       sessionScope: state.sessionScope,
       contextFrame: state.command.payload.contextFrame,
+      ...(this.canSaveCurrentPageActionsToNote(state)
+        ? {
+            saveCurrentPageActionsToNote: (input, signal) =>
+              this.saveCurrentPageActionsToNote(state, input, signal),
+          }
+        : {}),
       ...(state.command.payload.modelPreference !== undefined
         ? { modelPreference: state.command.payload.modelPreference }
         : {}),
@@ -1040,7 +1151,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       // Delegated child results re-enter the Main conversation here: one-shot,
       // payload-only, and never into private sessions.
       const delegatedResults = await this.delegatedResultsForOrdinaryTurn(state);
-      let commandForInner: TurnStartCommand = state.command;
+      let commandForInner: TurnStartCommand = pageNoteCommandForInner(state.command);
       commandForInner = attachConversationHistory(commandForInner, conversationHistory);
       commandForInner = attachRecalledMemories(
         commandForInner,
@@ -1412,6 +1523,7 @@ export class ProductKernelRuntime implements AgentRuntime {
             message: "The macOS Notes bridge is unavailable.",
           };
         }
+        let endPageNoteReconciliation: (() => void) | undefined;
         try {
           return await this.computerUsePort.perform({
             action: "create_note",
@@ -1420,6 +1532,15 @@ export class ProductKernelRuntime implements AgentRuntime {
             content: request.content,
             title: request.title,
             targetBundleId: "com.apple.Notes",
+            ...(isSourceBoundCreateNoteRequest(request)
+              ? {
+                  sourceBundleId: request.sourceBundleId,
+                  sourcePid: request.sourcePid,
+                  sourceWindowNumber: request.sourceWindowNumber,
+                  sourceWindowTitle: request.sourceWindowTitle,
+                  sourceWindowBounds: request.sourceWindowBounds,
+                }
+              : {}),
           }, {
             requestId: state.command.requestId,
             traceId: state.traceId,
@@ -1427,6 +1548,21 @@ export class ProductKernelRuntime implements AgentRuntime {
             attemptId: request.attemptId,
             basisFrameId: request.basisFrameId,
             effectClass: "write",
+            ...(isSourceBoundCreateNoteRequest(request)
+              ? {
+                  onDispatched: () => {
+                    state.currentPageNoteDispatched = true;
+                    if (state.currentPageNoteReceiptSettled === undefined) {
+                      state.currentPageNoteReceiptSettled = new Promise<void>((resolve) => {
+                        state.currentPageNoteReceiptSettle = resolve;
+                      });
+                    }
+                    endPageNoteReconciliation = this.beginPageNoteReceiptReconciliation(
+                      state.command.requestId,
+                    );
+                  },
+                }
+              : {}),
           });
         } catch (error) {
           if (error instanceof ComputerActionError && error.code === "timeout") {
@@ -1441,9 +1577,154 @@ export class ProductKernelRuntime implements AgentRuntime {
             };
           }
           throw error;
+        } finally {
+          endPageNoteReconciliation?.();
         }
       },
     };
+  }
+
+  /**
+   * Only the Pi adapter knows how to keep its shared port receipt alive while
+   * cancelling model work. Other inner runtimes simply do not expose this
+   * optional, request-scoped reconciliation fence.
+   */
+  private beginPageNoteReceiptReconciliation(requestId: string): (() => void) | undefined {
+    const inner = this.inner as {
+      beginPageNoteReceiptReconciliation?: (id: string) => () => void;
+    };
+    return inner.beginPageNoteReceiptReconciliation?.(requestId);
+  }
+
+  private canSaveCurrentPageActionsToNote(state: TurnLedgerState): boolean {
+    if (state.sessionScope.kind === "private") return false;
+    if (!isCurrentPageActionsNoteUtterance(state.command.payload.utterance)) return false;
+    return currentPageNoteSource(state.command.payload.contextFrame) !== null;
+  }
+
+  /**
+   * The model may supply only the small, visible outline.  Source identity is
+   * reconstructed solely from the frame that authorized this still-live turn.
+   */
+  private async saveCurrentPageActionsToNote(
+    state: TurnLedgerState,
+    input: CurrentPageNoteInput,
+    signal?: AbortSignal,
+  ): Promise<CurrentPageNoteResult> {
+    const source = currentPageNoteSource(state.command.payload.contextFrame);
+    if (!source || state.terminalKind || state.supersedeRequested || state.sessionScope.kind === "private") {
+      return this.settleCurrentPageNote(state, { dispatched: false, succeeded: false, verified: false, status: "blocked", code: "target_stale" });
+    }
+    // Consume the single product attempt before any await.  Pi may issue a
+    // second sequential tool call after an unknown or failed receipt; a Notes
+    // write must never be retried or duplicated within this turn.
+    if (state.currentPageNoteAttempted) {
+      return { dispatched: false, succeeded: false, verified: false, status: "blocked", code: "runtime_error" };
+    }
+    state.currentPageNoteAttempted = true;
+    state.currentPageNoteReceiptInFlight = true;
+    const content = input.items.map((item, index) => `${index + 1}. ${item}`).join("\n");
+    const intentId = randomUUID();
+    const attemptId = randomUUID();
+    try {
+      const receipt = await this.kernel.registry.invoke("create_note", {
+        caller: "voice",
+        input: {
+          title: input.title,
+          content,
+          targetBundleId: "com.apple.Notes",
+          intentId,
+          attemptId,
+          basisFrameId: state.command.payload.contextFrame.frameId,
+          ...source,
+        },
+        contextFrame: state.command.payload.contextFrame,
+        sessionScope: state.sessionScope,
+        approved: true,
+      }, { createNote: this.createNoteExecutor(state) });
+      const output = receipt.output as {
+        succeeded?: boolean;
+        verified?: boolean;
+        status?: CurrentPageNoteResult["status"];
+        code?: string;
+      } | undefined;
+      const result = this.settleCurrentPageNote(state, {
+        dispatched: true,
+        succeeded: output?.succeeded === true,
+        verified: output?.verified === true,
+        status: output?.status ?? "failed",
+        ...(output?.code === undefined ? {} : { code: output.code }),
+      });
+      await this.reconcileCancelledPageNote(state, receipt, result);
+      return result;
+    } catch (error) {
+      if (error instanceof ComputerActionError && error.code === "timeout") {
+        const result = this.settleCurrentPageNote(state, { dispatched: true, succeeded: true, verified: false, status: "unverified", code: "timeout" });
+        await this.reconcileCancelledPageNote(state, undefined, result);
+        return result;
+      }
+      const result = this.settleCurrentPageNote(state, {
+        dispatched: state.currentPageNoteDispatched === true,
+        succeeded: false,
+        verified: false,
+        status: signal?.aborted ? "cancelled" : "failed",
+        code: signal?.aborted ? "cancelled" : "runtime_error",
+      });
+      await this.reconcileCancelledPageNote(state, undefined, result);
+      return result;
+    } finally {
+      state.currentPageNoteReceiptInFlight = false;
+      state.currentPageNoteReceiptSettle?.();
+      delete state.currentPageNoteReceiptSettle;
+    }
+  }
+
+  private async reconcileCancelledPageNote(
+    state: TurnLedgerState,
+    receipt: Awaited<ReturnType<YishuKernel["registry"]["invoke"]>> | undefined,
+    result: CurrentPageNoteResult,
+  ): Promise<void> {
+    if (!state.currentPageNoteCancelRequested || state.terminalKind) return;
+    // The port receipt is now final. Permit the two content-free durable
+    // events below through the cancellation gate before this tool returns.
+    state.currentPageNoteReceiptInFlight = false;
+    if (receipt !== undefined) this.emitProductActionCompleted(state, receipt);
+    else this.emitCurrentPageNoteOutcome(state, result);
+    this.acceptRuntimeEvent(
+      state,
+      runtimeEvent("turn.failed", state.command.requestId, state.traceId, {
+        code: result.verified ? "action_committed_after_cancel"
+          : state.currentPageNoteDispatched ? "action_outcome_unknown"
+            : "product_action_failed",
+      }),
+    );
+    await this.settleState(state);
+  }
+
+  private emitCurrentPageNoteOutcome(state: TurnLedgerState, result: CurrentPageNoteResult): void {
+    this.acceptRuntimeEvent(
+      state,
+      runtimeEvent("product.action.completed", state.command.requestId, state.traceId, {
+        actionName: "create_note",
+        status: result.verified ? "verified" : "failed",
+        output: {
+          succeeded: result.succeeded,
+          verified: result.verified,
+          status: result.status,
+          ...(result.code === undefined ? {} : { code: result.code }),
+        },
+        receiptId: randomUUID(),
+        auditId: randomUUID(),
+      }),
+    );
+  }
+
+  private settleCurrentPageNote(
+    state: TurnLedgerState,
+    result: CurrentPageNoteResult,
+  ): CurrentPageNoteResult {
+    if (state.currentPageNoteResult === undefined) state.currentPageNoteResult = result;
+    return state.currentPageNoteResult;
   }
 
   /** Schedule once through macOS, then require pending-notification read-back. */
@@ -1843,6 +2124,16 @@ export class ProductKernelRuntime implements AgentRuntime {
       return;
     }
 
+    // The page-to-note action is running inside Pi, but its source-bound
+    // macOS request already crossed the effect boundary. Stop Pi now while
+    // keeping that one port receipt alive; its reconciliation below owns the
+    // durable terminal outcome and never presents a success response.
+    if (state.currentPageNoteReceiptInFlight && state.currentPageNoteDispatched) {
+      state.currentPageNoteCancelRequested = true;
+      await cancelInnerAtMost(() => undefined);
+      return;
+    }
+
     // Close the product gate before waiting for preparation or invoking a
     // potentially slow inner cancellation. A hung store must not keep stdio
     // cancellation open; runTurn owns eventual durable settlement.
@@ -1959,6 +2250,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     // whose turns die with the harness settle as cancelled, deterministically.
     this.delegation.beginDispose();
     const productActionStates = new Set<TurnLedgerState>();
+    const pageNoteReceiptStates = new Set<TurnLedgerState>();
     const ordinarySettlement: Array<Promise<void>> = [];
 
     // Latch ordinary cancellation synchronously so late provider events are
@@ -1971,6 +2263,13 @@ export class ProductKernelRuntime implements AgentRuntime {
         productActionStates.add(state);
         state.productActionCancelRequested = true;
         state.productActionAbortController.abort("runtime_disposed");
+        continue;
+      }
+      if (state.currentPageNoteReceiptInFlight && state.currentPageNoteDispatched) {
+        // The request is already with macOS.  Dispose must stop Pi, but its
+        // receipt remains the only honest source for the durable outcome.
+        state.currentPageNoteCancelRequested = true;
+        pageNoteReceiptStates.add(state);
         continue;
       }
       if (state.terminalKind) continue;
@@ -2001,9 +2300,15 @@ export class ProductKernelRuntime implements AgentRuntime {
       innerDispose,
       ...ordinarySettlement,
       ...this.activeTurnOperations,
+      ...[...pageNoteReceiptStates].map((state) => state.currentPageNoteReceiptSettled ?? Promise.resolve()),
       this.trailObservationTail,
     ]), 750)) {
-      disposeError = new Error("Inner runtime shutdown timed out.");
+      // A source-bound page-note receipt is intentionally still pending here.
+      // Its explicit unknown outcome below is the normal bounded shutdown
+      // result, not an inner-runtime failure.
+      if (pageNoteReceiptStates.size === 0) {
+        disposeError = new Error("Inner runtime shutdown timed out.");
+      }
     }
 
     // A product action that still has no receipt at the deadline is not safely
@@ -2014,6 +2319,37 @@ export class ProductKernelRuntime implements AgentRuntime {
       if (state.terminalKind) continue;
       this.replacePendingWithFailure(state, "action_outcome_unknown");
       unknownActionSettlements.push(this.settleState(state));
+    }
+    for (const state of pageNoteReceiptStates) {
+      if (state.terminalKind) continue;
+      state.currentPageNoteReceiptInFlight = false;
+      const unknown: CurrentPageNoteResult = {
+        dispatched: true,
+        succeeded: true,
+        verified: false,
+        status: "unverified",
+        code: "timeout",
+      };
+      this.settleCurrentPageNote(state, unknown);
+      this.emitCurrentPageNoteOutcome(state, unknown);
+      this.acceptRuntimeEvent(
+        state,
+        runtimeEvent("turn.failed", state.command.requestId, state.traceId, {
+          code: "action_outcome_unknown",
+        }),
+      );
+      unknownActionSettlements.push((async () => {
+        // The product record is the fence: never dismantle the live receipt
+        // before the unknown outcome is durable.
+        await this.settleState(state);
+        if (state.ledgerError !== undefined) {
+          disposeError ??= new Error("Page-note unknown outcome was not durable.");
+          return;
+        }
+        (this.inner as AgentRuntime & {
+          abandonPageNoteReceiptReconciliation?: (requestId: string) => void;
+        }).abandonPageNoteReceiptReconciliation?.(state.command.requestId);
+      })());
     }
     if (!await runBeforeDeadline(
       () => Promise.allSettled(unknownActionSettlements),
@@ -2049,6 +2385,15 @@ export class ProductKernelRuntime implements AgentRuntime {
     if (state.seenEventIds.has(rawEvent.eventId)) return false;
     state.seenEventIds.add(rawEvent.eventId);
 
+    if (state.currentPageNoteCancelRequested
+      && state.currentPageNoteReceiptInFlight
+      && (rawEvent.type === "response.completed"
+        || rawEvent.type === "turn.cancelled"
+        || rawEvent.type === "turn.failed"
+        || rawEvent.type === "runtime.error")) {
+      return true;
+    }
+
     if (GENERATION_EVENT_TYPES.has(rawEvent.type)) {
       const rawGeneration = safeGeneration(rawEvent.payload.generation);
       // Before the first interrupt, v1 inner test doubles may omit generation;
@@ -2078,6 +2423,12 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
     }
 
+    // The page-to-note turn carries visible personal content to the model only
+    // transiently. Do not let a model repeat that title/items before or after
+    // the tool call; the user sees one fixed outcome instead.
+    if (isCurrentPageActionsNoteUtterance(state.command.payload.utterance)
+      && rawEvent.type === "response.delta") return true;
+
     if (rawEvent.type === "tool.started"
       || rawEvent.type === "computer.action.requested"
       || rawEvent.type === "product.action.completed") {
@@ -2085,7 +2436,19 @@ export class ProductKernelRuntime implements AgentRuntime {
       state.effectsStarted = true;
     }
 
-    const event = sanitizeClientEvent(enrichEvent(rawEvent, state));
+    const event = sanitizeClientEvent(enrichEvent(
+      isCurrentPageActionsNoteUtterance(state.command.payload.utterance)
+        && rawEvent.type === "response.completed"
+        ? {
+            ...rawEvent,
+            payload: {
+              ...rawEvent.payload,
+              text: currentPageNoteCompletionText(state.currentPageNoteResult),
+            },
+          }
+        : rawEvent,
+      state,
+    ));
     if (!event) return false;
 
     if (event.type === "response.completed") {
@@ -3138,6 +3501,37 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     result.content = content;
     result.title = title;
     result.targetBundleId = "com.apple.Notes";
+    const sourceValues = [
+      payload.sourceBundleId,
+      payload.sourcePid,
+      payload.sourceWindowNumber,
+      payload.sourceWindowTitle,
+      payload.sourceWindowBounds,
+    ];
+    const sourceCount = sourceValues.filter((value) => value !== undefined).length;
+    if (sourceCount !== 0 && sourceCount !== sourceValues.length) return undefined;
+    if (sourceCount === sourceValues.length) {
+      const sourceBundleId = boundedVisibleString(payload.sourceBundleId, 255);
+      const sourceWindowTitle = typeof payload.sourceWindowTitle === "string"
+        && payload.sourceWindowTitle.trim() === payload.sourceWindowTitle
+        && payload.sourceWindowTitle.length > 0
+        && payload.sourceWindowTitle.length <= 240
+        ? payload.sourceWindowTitle
+        : undefined;
+      const sourceBounds = payload.sourceWindowBounds;
+      if (
+        sourceBundleId === undefined
+        || !Number.isInteger(payload.sourcePid) || (payload.sourcePid as number) <= 0
+        || !Number.isInteger(payload.sourceWindowNumber) || (payload.sourceWindowNumber as number) <= 0
+        || sourceWindowTitle === undefined
+        || !isValidSourceWindowBounds(sourceBounds)
+      ) return undefined;
+      result.sourceBundleId = sourceBundleId;
+      result.sourcePid = payload.sourcePid as number;
+      result.sourceWindowNumber = payload.sourceWindowNumber as number;
+      result.sourceWindowTitle = sourceWindowTitle;
+      result.sourceWindowBounds = sourceBounds as never;
+    }
   } else {
     const reminderId = safeIdentifier(payload.reminderId);
     const delaySeconds = payload.delaySeconds;
@@ -3167,6 +3561,15 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     if (identifier !== undefined) result[key] = identifier;
   }
   return result;
+}
+
+function isValidSourceWindowBounds(value: unknown): value is { x: number; y: number; width: number; height: number } {
+  if (!isRecord(value) || Object.keys(value).length !== 4) return false;
+  const { x, y, width, height } = value;
+  return typeof x === "number" && Number.isFinite(x)
+    && typeof y === "number" && Number.isFinite(y)
+    && typeof width === "number" && Number.isFinite(width) && width > 0
+    && typeof height === "number" && Number.isFinite(height) && height > 0;
 }
 
 function safeRuntimeStatusPayload(payload: Record<string, unknown>): ClientEventPayload {

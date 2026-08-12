@@ -14,6 +14,10 @@ The app keeps the existing Clicky interaction contract:
 - bundled Pi/Yishu runtime with the explicit model allowlist;
 - MiniMax speech output and verified cursor pointing/clicking;
 - verified Finder history-back, focused writable-field text entry, and one-shot Apple Notes creation with exact read-back;
+- an explicit current-page request can turn 1–3 visible action items from the
+  active window into that one new note; it uses one window image, never scrolls
+  or reads other windows, and cannot edit or delete existing notes. A window
+  change blocks creation, and the semantic result still awaits a human demo;
 - a typed delegated-task snapshot restored when Pi becomes ready, with
   acknowledged cancellation and event-backed `SystemSequence` steps;
 - one quiet-window return of a terminal background result beside the cursor,

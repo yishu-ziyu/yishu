@@ -170,7 +170,12 @@ The shipping action set includes verified `left_click`, a Finder-only typed
 `finder_history_back`, `set_text` on the currently focused writable AX
 element, and create-only Apple Notes insertion. Notes creation is admitted only
 from an explicit utterance, creates one new note, and is complete only after
-the exact returned note is read back; unknown delivery is never retried. Finder and text actions re-read the live frontmost PID/bundle before
+the exact returned note is read back; unknown delivery is never retried. The
+narrow current-page variant accepts only the explicit three-action request,
+uses one visible capture of the active window, and rechecks that exact window
+before creating the note. A window change creates nothing. It does not scroll,
+inspect other windows, or edit/delete existing notes; semantic quality still
+requires the human demo. Finder and text actions re-read the live frontmost PID/bundle before
 execution; secure or non-writable fields fail closed. Text receipts contain
 only bounded length/role/match evidence, never the entered text.
 
