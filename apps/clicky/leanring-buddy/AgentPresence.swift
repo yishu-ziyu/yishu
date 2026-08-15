@@ -438,35 +438,51 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
                 return nil
             }
         }
-        let safeTitle = Self.returnExcerpt(from: title, maximum: 48) ?? "后台任务"
+        if looksLikeRelativeTimeReminder {
+            switch status {
+            case .pending, .running, .interrupted:
+                return nil
+            case .done, .blocked, .failed, .cancelled:
+                return "这个提醒没有设上。"
+            }
+        }
+        let safeTitle = Self.returnExcerpt(from: title, maximum: 48) ?? "这件事"
         let subject = "「\(safeTitle)」"
-        let result = summary.flatMap { Self.returnExcerpt(from: $0, maximum: 140) }
-        let conclusion = result.map { "结论：\($0)。" } ?? "详情保留在后台任务里。"
+        let result = summary.flatMap(Self.userFacingResultExcerpt(from:))
+        let detail = result.map { $0.hasSuffix("。") ? $0 : "\($0)。" } ?? ""
         switch resultKind {
         case .succeeded:
-            return "\(subject)已确认完成。\(conclusion)"
+            return detail.isEmpty ? "\(subject)做好了。" : "\(subject)做好了。\(detail)"
         case .completed:
-            return "\(subject)整理完成，未独立核验。\(conclusion)"
+            return detail.isEmpty ? "\(subject)整理好了。" : "\(subject)整理好了。\(detail)"
         case .unverified:
-            return "\(subject)执行结束，结果未独立核验。\(conclusion)"
+            return "\(subject)做完了，但我没法确认。"
         case .failed:
-            return "\(subject)执行失败，没有完成。\(result.map { "原因：\($0)。" } ?? "错误详情保留在后台任务里。")"
+            return detail.isEmpty ? "\(subject)没做成。" : "\(subject)没做成。\(detail)"
         case .cancelled:
-            return "\(subject)已经取消，没有继续执行。已有内容仍保留在后台任务里。"
+            return "\(subject)已经停下。"
         case nil:
             switch status {
             case .done:
-                return "\(subject)整理完成，未独立核验。\(conclusion)"
+                return detail.isEmpty ? "\(subject)整理好了。" : "\(subject)整理好了。\(detail)"
             case .blocked:
-                return "\(subject)遇到了阻塞，目前没有完成。\(result.map { "原因：\($0)。" } ?? "详情保留在后台任务里。")"
+                return detail.isEmpty ? "\(subject)还没做完。" : "\(subject)还没做完。\(detail)"
             case .failed:
-                return "\(subject)执行失败，没有完成。\(result.map { "原因：\($0)。" } ?? "错误详情保留在后台任务里。")"
+                return detail.isEmpty ? "\(subject)没做成。" : "\(subject)没做成。\(detail)"
             case .cancelled:
-                return "\(subject)已经取消，没有继续执行。已有内容仍保留在后台任务里。"
+                return "\(subject)已经停下。"
             case .pending, .running, .interrupted:
                 return nil
             }
         }
+    }
+
+    var presenceCaption: String {
+        Self.returnExcerpt(from: title, maximum: 28) ?? workerLabel
+    }
+
+    private var looksLikeRelativeTimeReminder: Bool {
+        YishuProductUtteranceRouter.looksLikeRelativeTimeReminder(title)
     }
 
     private static func reminderExcerpt(from rawText: String) -> String? {
@@ -493,6 +509,18 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
         case .cancelled:
             return status == .cancelled
         }
+    }
+
+    private static func userFacingResultExcerpt(from rawText: String) -> String? {
+        guard let excerpt = returnExcerpt(from: rawText, maximum: 140) else { return nil }
+        if excerpt.contains("后台任务")
+            || excerpt.contains("未独立核验")
+            || excerpt.contains("详情保留")
+            || excerpt.contains("运行时")
+            || excerpt.contains("执行结束") {
+            return nil
+        }
+        return excerpt
     }
 
     /// ResultInbox keeps the full runtime summary. Proactive speech uses one
@@ -715,10 +743,10 @@ final class AgentPresenceWindowManager: NSObject {
     private var anchorPanel: NSPanel?
     private var pocketPanel: NSPanel?
     private var labelPanel: NSPanel?
-    private var satellitePanels: [UUID: NSPanel] = [:]
     private var tasksCancellable: AnyCancellable?
     private var outsideClickMonitor: Any?
     private var labelHideWorkItem: DispatchWorkItem?
+    private var hidesChipForForeground = false
 
     override init() {
         super.init()
@@ -764,6 +792,28 @@ final class AgentPresenceWindowManager: NSObject {
         viewModel.markCancelFailed(taskId, message: message)
     }
 
+    func setForegroundOccupied(_ occupied: Bool) {
+        guard hidesChipForForeground != occupied else { return }
+        hidesChipForForeground = occupied
+        if occupied {
+            hideLabel()
+            anchorPanel?.ignoresMouseEvents = true
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.14
+                anchorPanel?.animator().alphaValue = 0
+            }
+            return
+        }
+        guard !viewModel.tasks.filter({
+            !YishuProductUtteranceRouter.looksLikeRelativeTimeReminder($0.title)
+        }).isEmpty else { return }
+        anchorPanel?.ignoresMouseEvents = false
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            anchorPanel?.animator().alphaValue = 1
+        }
+    }
+
     func acknowledge(_ taskId: UUID) {
         viewModel.acknowledge(taskId)
     }
@@ -774,40 +824,34 @@ final class AgentPresenceWindowManager: NSObject {
         hideLabel()
         anchorPanel?.orderOut(nil)
         anchorPanel = nil
-        satellitePanels.values.forEach { $0.orderOut(nil) }
-        satellitePanels.removeAll()
         anchorPoint = nil
     }
 
     private func synchronizeWindows(with tasks: [YishuDelegatedTaskPresenceEvent]) {
-        guard !tasks.isEmpty else {
-            returnSatellitesAndHideAnchor()
+        let visible = tasks.filter { !YishuProductUtteranceRouter.looksLikeRelativeTimeReminder($0.title) }
+        guard !visible.isEmpty else {
+            hideAnchor()
             return
         }
         if anchorPoint == nil { anchorPoint = makeAnchorPoint() }
-        showAnchor(taskCount: tasks.count)
-
-        let visibleTasks = Array(tasks.prefix(3))
-        let visibleIDs = Set(visibleTasks.map(\.id))
-        let removedIDs = satellitePanels.keys.filter { !visibleIDs.contains($0) }
-        for taskId in removedIDs {
-            guard let panel = satellitePanels.removeValue(forKey: taskId) else { continue }
-            animateSatelliteHome(panel)
-        }
-        for (index, task) in visibleTasks.enumerated() {
-            showSatellite(for: task, index: index)
-        }
+        showAnchor(tasks: visible)
         if pocketPanel?.isVisible == true { showPocket() }
     }
 
-    private func showAnchor(taskCount: Int) {
+    private func showAnchor(tasks: [YishuDelegatedTaskPresenceEvent]) {
         guard let anchorPoint else { return }
-        let size = CGSize(width: 46, height: 46)
+        let size = CGSize(width: 200, height: 80)
         let panel = anchorPanel ?? makePanel(size: size)
+        let isActive = tasks.contains { $0.status == .pending || $0.status == .running }
         panel.contentView = hostingView(
-            AgentPresenceAnchorButton(taskCount: taskCount) { [weak self] in
-                self?.togglePocket()
-            },
+            AgentPresenceAnchorButton(
+                label: Self.presenceChipLabel(for: tasks),
+                isActive: isActive,
+                action: { [weak self] in self?.togglePocket() },
+                onHover: { [weak self] hovering in
+                    self?.handleChipHover(hovering, tasks: tasks)
+                }
+            ),
             size: size
         )
         panel.setFrameOrigin(NSPoint(x: anchorPoint.x - size.width / 2, y: anchorPoint.y - size.height / 2))
@@ -817,44 +861,12 @@ final class AgentPresenceWindowManager: NSObject {
             panel.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18
-                panel.animator().alphaValue = 1
+                panel.animator().alphaValue = hidesChipForForeground ? 0 : 1
             }
         }
-    }
-
-    private func showSatellite(for task: YishuDelegatedTaskPresenceEvent, index: Int) {
-        guard let anchorPoint else { return }
-        let size = CGSize(width: 34, height: 34)
-        let destination = satelliteCenter(index: index, around: anchorPoint)
-        let isNew = satellitePanels[task.id] == nil
-        let panel = satellitePanels[task.id] ?? makePanel(size: size)
-        panel.contentView = hostingView(
-            AgentPresenceSatelliteButton(
-                task: task,
-                onOpen: { [weak self] in self?.showPocket(selecting: task.id) },
-                onHover: { [weak self] hovering in
-                    self?.handleSatelliteHover(hovering, task: task, center: destination)
-                }
-            ),
-            size: size
-        )
-
-        if isNew {
-            satellitePanels[task.id] = panel
-            panel.setFrameOrigin(NSPoint(x: anchorPoint.x - size.width / 2, y: anchorPoint.y - size.height / 2))
+        panel.ignoresMouseEvents = hidesChipForForeground
+        if hidesChipForForeground {
             panel.alphaValue = 0
-            panel.orderFrontRegardless()
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.48
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                panel.animator().setFrameOrigin(
-                    NSPoint(x: destination.x - size.width / 2, y: destination.y - size.height / 2)
-                )
-                panel.animator().alphaValue = 1
-            }
-            showLabel(for: task, near: destination, autoHideAfter: 1.8)
-        } else {
-            panel.setFrameOrigin(NSPoint(x: destination.x - size.width / 2, y: destination.y - size.height / 2))
         }
     }
 
@@ -862,7 +874,7 @@ final class AgentPresenceWindowManager: NSObject {
         pocketPanel?.isVisible == true ? hidePocket() : showPocket()
     }
 
-    private func showPocket(selecting _: UUID? = nil) {
+    private func showPocket() {
         guard let anchorPoint else { return }
         let tasks = viewModel.tasks
         let width: CGFloat = 344
@@ -911,11 +923,10 @@ final class AgentPresenceWindowManager: NSObject {
         removeOutsideClickMonitor()
     }
 
-    private func returnSatellitesAndHideAnchor() {
+    private func hideAnchor() {
         hidePocket()
+        hideLabel()
         guard anchorPoint != nil else { return }
-        for panel in satellitePanels.values { animateSatelliteHome(panel) }
-        satellitePanels.removeAll()
         let anchorPanel = self.anchorPanel
         self.anchorPanel = nil
         NSAnimationContext.runAnimationGroup({ context in
@@ -927,45 +938,35 @@ final class AgentPresenceWindowManager: NSObject {
         self.anchorPoint = nil
     }
 
-    private func animateSatelliteHome(_ panel: NSPanel) {
-        guard let anchorPoint else {
-            panel.orderOut(nil)
+    private func handleChipHover(
+        _ hovering: Bool,
+        tasks: [YishuDelegatedTaskPresenceEvent]
+    ) {
+        guard let anchorPoint else { return }
+        let caption = tasks.first { $0.status == .pending || $0.status == .running }?.presenceCaption
+            ?? tasks.first { $0.status == .done || $0.status == .blocked }?.presenceCaption
+            ?? tasks.first?.presenceCaption
+        guard let caption else {
+            hideLabel()
             return
         }
-        let size = panel.frame.size
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.28
-            panel.animator().setFrameOrigin(
-                NSPoint(x: anchorPoint.x - size.width / 2, y: anchorPoint.y - size.height / 2)
-            )
-            panel.animator().alphaValue = 0
-        }, completionHandler: {
-            panel.orderOut(nil)
-        })
-    }
-
-    private func handleSatelliteHover(
-        _ hovering: Bool,
-        task: YishuDelegatedTaskPresenceEvent,
-        center: NSPoint
-    ) {
         if hovering {
-            showLabel(for: task, near: center, autoHideAfter: nil)
+            showLabel(text: caption, near: anchorPoint, autoHideAfter: nil)
         } else {
-            showLabel(for: task, near: center, autoHideAfter: 0.18)
+            showLabel(text: caption, near: anchorPoint, autoHideAfter: 0.18)
         }
     }
 
     private func showLabel(
-        for task: YishuDelegatedTaskPresenceEvent,
+        text: String,
         near center: NSPoint,
         autoHideAfter delay: TimeInterval?
     ) {
         labelHideWorkItem?.cancel()
-        let size = CGSize(width: 190, height: 30)
+        let size = CGSize(width: 260, height: 56)
         let panel = labelPanel ?? makePanel(size: size, ignoresMouseEvents: true)
-        panel.contentView = hostingView(AgentPresenceLabel(text: task.workerLabel), size: size)
-        panel.setFrameOrigin(NSPoint(x: center.x - size.width / 2, y: center.y + 22))
+        panel.contentView = hostingView(AgentPresenceLabel(text: text), size: size)
+        panel.setFrameOrigin(NSPoint(x: center.x - size.width / 2, y: center.y + 28))
         labelPanel = panel
         panel.alphaValue = 1
         panel.orderFrontRegardless()
@@ -993,14 +994,16 @@ final class AgentPresenceWindowManager: NSObject {
         )
     }
 
-    private func satelliteCenter(index: Int, around anchor: NSPoint) -> NSPoint {
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(anchor) }) ?? NSScreen.main
-        let frame = screen?.visibleFrame ?? .zero
-        let right = anchor.x + 105 < frame.maxX ? CGFloat(1) : -1
-        let up = anchor.y + 90 < frame.maxY ? CGFloat(1) : -1
-        let offsets = [CGPoint(x: 38, y: 42), CGPoint(x: 72, y: 25), CGPoint(x: 88, y: -9)]
-        let offset = offsets[min(index, offsets.count - 1)]
-        return NSPoint(x: anchor.x + offset.x * right, y: anchor.y + offset.y * up)
+    static func presenceChipLabel(for tasks: [YishuDelegatedTaskPresenceEvent]) -> String {
+        let activeCount = tasks.filter { $0.status == .pending || $0.status == .running }.count
+        if activeCount == 1 { return "还在做" }
+        if activeCount > 1 { return "还在做几件事" }
+        let failedCount = tasks.filter { $0.status == .failed || $0.status == .interrupted }.count
+        if failedCount > 0 { return "没做成" }
+        let readyCount = tasks.filter { $0.status == .done || $0.status == .blocked }.count
+        if readyCount == 1 { return "做好了" }
+        if readyCount > 1 { return "有几件做好了" }
+        return "已经停下"
     }
 
     private func pocketOrigin(size: CGSize, anchor: NSPoint) -> NSPoint {
@@ -1039,6 +1042,8 @@ final class AgentPresenceWindowManager: NSObject {
         hosting.frame = NSRect(origin: .zero, size: size)
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = .clear
+        hosting.clipsToBounds = false
+        hosting.layer?.masksToBounds = false
         return hosting
     }
 
@@ -1064,97 +1069,78 @@ final class AgentPresenceWindowManager: NSObject {
 }
 
 private struct AgentPresenceAnchorButton: View {
-    let taskCount: Int
+    let label: String
+    let isActive: Bool
     let action: () -> Void
+    let onHover: (Bool) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovered = false
+    @State private var breathing = false
 
     var body: some View {
         Button(action: action) {
-            ZStack(alignment: .topTrailing) {
+            HStack(spacing: 7) {
                 Circle()
-                    .fill(DS.Colors.overlayCursorBlue.opacity(hovered ? 0.20 : 0.10))
-                    .frame(width: 38, height: 38)
-                    .blur(radius: hovered ? 1 : 3)
-                Triangle()
-                    .fill(
+                    .fill(DS.Colors.overlayCursorBlue)
+                    .frame(width: 7, height: 7)
+                    .opacity(isActive && breathing ? 1 : 0.7)
+                Text(label)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.86))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background {
+                ZStack {
+                    Capsule().fill(.ultraThinMaterial)
+                    Capsule().fill(
                         LinearGradient(
-                            colors: [Color.white.opacity(0.92), DS.Colors.overlayCursorBlue],
+                            stops: [
+                                .init(color: DS.Colors.overlayResponsePearl.opacity(0.94), location: 0),
+                                .init(color: DS.Colors.overlayResponsePearl.opacity(0.82), location: 0.62),
+                                .init(color: DS.Colors.overlaySpectralAmber.opacity(0.08), location: 1)
+                            ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
                     )
-                    .frame(width: 18, height: 18)
-                    .rotationEffect(.degrees(-35))
-                    .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.8), radius: hovered ? 9 : 6)
-                if taskCount > 1 {
-                    Text("\(taskCount)")
-                        .font(.system(size: 9, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .frame(width: 16, height: 16)
-                        .background(DS.Colors.overlaySpectralViolet, in: Circle())
-                        .offset(x: 3, y: -2)
+                    Capsule()
+                        .strokeBorder(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: Color.white.opacity(0.96), location: 0),
+                                    .init(color: DS.Colors.overlayCursorBlue.opacity(0.48), location: 0.48),
+                                    .init(color: DS.Colors.overlaySpectralMagenta.opacity(0.32), location: 0.76),
+                                    .init(color: DS.Colors.overlaySpectralAmber.opacity(0.36), location: 1)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.85
+                        )
                 }
             }
-            .frame(width: 44, height: 44)
-            .contentShape(Circle())
+            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.07), radius: 6, y: 3)
+            .shadow(color: Color.black.opacity(0.11), radius: 8, y: 4)
         }
         .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-        .scaleEffect(hovered ? 1.06 : 1)
-        .animation(.easeOut(duration: 0.16), value: hovered)
-        .help("管理任务与提醒")
-        .accessibilityLabel("管理任务与提醒，\(taskCount) 项")
-    }
-}
-
-private struct AgentPresenceSatelliteButton: View {
-    let task: YishuDelegatedTaskPresenceEvent
-    let onOpen: () -> Void
-    let onHover: (Bool) -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var breathing = false
-
-    var body: some View {
-        Button(action: onOpen) {
-            Triangle()
-                .fill(fillColor)
-                .frame(width: 14, height: 14)
-                .rotationEffect(.degrees(-35))
-                .scaleEffect(breathing ? activeScale : 0.94)
-                .shadow(color: glowColor, radius: breathing ? 8 : 4)
-                .frame(width: 32, height: 32)
-                .contentShape(Circle())
+        .padding(18)
+        .onHover { hovering in
+            hovered = hovering
+            onHover(hovering)
         }
-        .buttonStyle(.plain)
-        .onHover(perform: onHover)
+        .scaleEffect(hovered ? 1.02 : 1)
+        .animation(.easeOut(duration: 0.14), value: hovered)
         .onAppear {
+            guard isActive else { breathing = true; return }
             guard !reduceMotion else { breathing = true; return }
-            withAnimation(.easeInOut(duration: pulseDuration).repeatForever(autoreverses: true)) {
+            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
                 breathing = true
             }
         }
-        .help("\(task.title) · \(task.statusLabel)")
-        .accessibilityLabel("\(task.title)，\(task.statusLabel)")
-    }
-
-    private var activeScale: CGFloat { task.status == .done ? 1.12 : 1.04 }
-    private var pulseDuration: Double { task.status == .done ? 0.72 : 1.2 }
-    private var glowColor: Color {
-        switch task.status {
-        case .pending, .running, .done: return DS.Colors.overlayCursorBlue.opacity(0.82)
-        case .blocked: return DS.Colors.overlaySpectralAmber.opacity(0.72)
-        case .failed, .interrupted: return Color.red.opacity(0.58)
-        case .cancelled: return Color.gray.opacity(0.45)
-        }
-    }
-    private var fillColor: Color {
-        switch task.status {
-        case .pending, .running: return DS.Colors.overlayCursorBlue
-        case .done: return Color.white
-        case .blocked: return DS.Colors.overlaySpectralAmber
-        case .failed, .interrupted: return Color.red.opacity(0.86)
-        case .cancelled: return Color.gray.opacity(0.68)
-        }
+        .help("管理任务与提醒")
+        .accessibilityLabel("管理任务与提醒，\(label)")
     }
 }
 
@@ -1165,11 +1151,11 @@ private struct AgentPresenceLabel: View {
             .font(.system(size: 11, weight: .medium, design: .rounded))
             .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.82))
             .lineLimit(1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay(Capsule().strokeBorder(Color.white.opacity(0.72), lineWidth: 0.7))
-            .shadow(color: Color.black.opacity(0.12), radius: 10, y: 4)
+            .shadow(color: Color.black.opacity(0.10), radius: 6, y: 3)
     }
 }
 
@@ -1256,11 +1242,10 @@ struct TaskStatusCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 9) {
-                Triangle()
-                    .fill(DS.Colors.overlayCursorBlue)
-                    .frame(width: 13, height: 13)
-                    .rotationEffect(.degrees(-35))
-                    .padding(.top, 3)
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 6)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(task.title)
                         .font(.system(size: 12.5, weight: .semibold, design: .rounded))
@@ -1370,15 +1355,15 @@ struct TaskStatusCard: View {
         if task.taskKind == .contextReminder {
             switch cancelState {
             case .idle: return nil
-            case .requesting: return "正在等待运行时确认取消提醒…"
-            case .accepted: return "运行时已接收取消提醒请求。"
+            case .requesting: return "正在确认取消提醒…"
+            case .accepted: return "已经收到取消请求。"
             case .failed(let message): return "取消提醒失败：\(message)"
             }
         }
         switch cancelState {
         case .idle: return nil
-        case .requesting: return "正在等待运行时确认停止请求…"
-        case .accepted: return "运行时已接收停止请求。"
+        case .requesting: return "正在确认停止…"
+        case .accepted: return "已经收到停止请求。"
         case .failed(let message): return "停止失败：\(message)"
         }
     }

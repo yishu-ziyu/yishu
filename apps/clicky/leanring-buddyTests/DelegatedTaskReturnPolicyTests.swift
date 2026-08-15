@@ -72,20 +72,38 @@ struct DelegatedTaskReturnPolicyTests {
         ).returnAnnouncementText)
         let running = makeTask(status: .running)
 
-        #expect(verified.contains("确认"))
+        #expect(verified.contains("做好了"))
         #expect(verified.contains("确认了三项交付物"))
         #expect(!verified.contains("https://"))
         #expect(!verified.contains("[内部记录]"))
         #expect(verified.count <= 220)
-        #expect(completed.contains("整理完成"))
-        #expect(completed.contains("未独立核验"))
-        #expect(completed.contains("结果保留在后台任务中"))
+        #expect(completed.contains("整理好了"))
+        #expect(!completed.contains("未独立核验"))
+        #expect(!completed.contains("后台任务"))
         #expect(!completed.contains("确认"))
-        #expect(failed.contains("失败"))
-        #expect(failed.contains("没有完成"))
-        #expect(cancelled.contains("取消"))
+        #expect(failed.contains("没做成"))
+        #expect(cancelled.contains("停下"))
         #expect(running.returnAnnouncementText == nil)
         #expect(running.interruptedByRuntimeStop().returnAnnouncementText == nil)
+    }
+
+    @Test @MainActor func reminderShapedDelegatedWorkDoesNotClaimASystemReminder() {
+        let masquerade = makeTask(
+            title: "20分钟后提醒用户喝一口水( 约07:34)",
+            status: .done,
+            resultKind: .unverified,
+            summary: nil
+        )
+        #expect(masquerade.returnAnnouncementText == "这个提醒没有设上。")
+        #expect(!(masquerade.returnAnnouncementText ?? "").contains("未独立核验"))
+        #expect(!(masquerade.returnAnnouncementText ?? "").contains("后台任务"))
+        #expect(YishuProductUtteranceRouter.looksLikeRelativeTimeReminder(masquerade.title))
+        let runningReminder = makeTask(
+            title: "20分钟后提醒用户喝一口水( 约07:34)",
+            status: .running
+        )
+        #expect(runningReminder.returnAnnouncementText == nil)
+        #expect(AgentPresenceWindowManager.presenceChipLabel(for: [runningReminder]) != "进行中")
     }
 
     @Test func presentationWaitsForForegroundAndThreeSecondsOfQuiet() {
@@ -113,6 +131,7 @@ struct DelegatedTaskReturnPolicyTests {
     private func makeTask(
         id: UUID = UUID(),
         conversationID: UUID = UUID(),
+        title: String = "整理研究结论",
         status: YishuDelegatedTaskStatus,
         resultKind: YishuDelegatedResultKind? = nil,
         summary: String? = nil
@@ -121,7 +140,7 @@ struct DelegatedTaskReturnPolicyTests {
             id: id,
             parentId: UUID(),
             mainConversationId: conversationID,
-            title: "整理研究结论",
+            title: title,
             status: status,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedAt: Date(timeIntervalSince1970: 1_700_000_010),

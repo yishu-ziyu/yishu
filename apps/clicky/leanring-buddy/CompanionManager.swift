@@ -432,8 +432,13 @@ final class CompanionManager: ObservableObject {
 
     private func updateVisualState() {
         let nextState = routedVisualState
-        guard visualState != nextState else { return }
-        visualState = nextState
+        if visualState != nextState {
+            visualState = nextState
+        }
+        let occupied = voiceState != .idle
+            || yishuAgentRuntimeClient.hasActiveTurn
+            || isPushToTalkKeyHeld
+        agentPresenceWindowManager.setForegroundOccupied(occupied)
     }
 
     var sessionScopeLabel: String {
@@ -3671,7 +3676,11 @@ final class CompanionManager: ObservableObject {
                 return "系统提醒权限没有允许，所以这次没有设置。"
             default:
                 if result.status == .verified {
-                    return "提醒已经设好。"
+                    if let clockLabel = result.clockLabel,
+                       YishuTimeReminderDelivery.isMacClockLabel(clockLabel) {
+                        return "已经设好提醒，大约 \(clockLabel)。"
+                    }
+                    return "已经设好提醒。"
                 }
                 if result.succeeded || result.status == .unverified {
                     return "提醒可能已经设好，但我没能确认；我不会重复设置。"

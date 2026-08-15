@@ -1264,7 +1264,10 @@ final class YishuAgentRuntimeClient {
                 method: result.method.rawValue,
                 code: result.code.rawValue,
                 receiptId: result.receiptId,
-                attemptId: result.attemptId
+                attemptId: result.attemptId,
+                clockLabel: result.clockLabel.flatMap {
+                    YishuTimeReminderDelivery.isMacClockLabel($0) ? $0 : nil
+                }
             )
         ))
     }
@@ -3008,6 +3011,7 @@ private struct YishuComputerActionResultPayload: Encodable {
     let code: String?
     let receiptId: String?
     let attemptId: String?
+    let clockLabel: String?
 
     private enum CodingKeys: String, CodingKey {
         case actionId
@@ -3020,6 +3024,7 @@ private struct YishuComputerActionResultPayload: Encodable {
         case code
         case receiptId
         case attemptId
+        case clockLabel
     }
 
     func encode(to encoder: Encoder) throws {
@@ -3034,6 +3039,7 @@ private struct YishuComputerActionResultPayload: Encodable {
         try container.encodeIfPresent(code, forKey: .code)
         try container.encodeIfPresent(receiptId, forKey: .receiptId)
         try container.encodeIfPresent(attemptId, forKey: .attemptId)
+        try container.encodeIfPresent(clockLabel, forKey: .clockLabel)
     }
 }
 

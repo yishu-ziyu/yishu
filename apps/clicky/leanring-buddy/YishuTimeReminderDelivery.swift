@@ -166,6 +166,22 @@ enum YishuTimeReminderDelivery {
             : .unknownAfterSubmission
     }
 
+    static func clockLabel(
+        delaySeconds: Int,
+        now: Date = Date(),
+        timeZone: TimeZone = .current
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: now.addingTimeInterval(TimeInterval(delaySeconds)))
+    }
+
+    static func isMacClockLabel(_ value: String) -> Bool {
+        value.range(of: #"^\d{2}:\d{2}$"#, options: .regularExpression) != nil
+    }
+
     private static func isExact(
         _ request: YishuPendingTimeReminder,
         body: String,

@@ -223,6 +223,7 @@ struct YishuComputerActionResult: Equatable, Sendable {
     let code: YishuActionCode
     let receiptId: String
     let attemptId: String
+    let clockLabel: String?
 
     init(
         succeeded: Bool,
@@ -233,7 +234,8 @@ struct YishuComputerActionResult: Equatable, Sendable {
         method: YishuActionMethod = .unknown,
         code: YishuActionCode? = nil,
         receiptId: String = UUID().uuidString,
-        attemptId: String = UUID().uuidString
+        attemptId: String = UUID().uuidString,
+        clockLabel: String? = nil
     ) {
         self.succeeded = succeeded
         self.verified = verified
@@ -244,6 +246,7 @@ struct YishuComputerActionResult: Equatable, Sendable {
         self.code = code ?? Self.defaultCode(succeeded: succeeded, verified: verified)
         self.receiptId = receiptId
         self.attemptId = attemptId
+        self.clockLabel = clockLabel
     }
 
     private static func defaultStatus(succeeded: Bool, verified: Bool) -> YishuActionStatus {
