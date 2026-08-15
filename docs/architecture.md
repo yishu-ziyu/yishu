@@ -2,8 +2,10 @@
 
 Type: architecture
 Status: current
-Verified: 209de51 2026-08-13
+Verified: 34c0eaa 2026-08-15
 Review: apps/ 或 packages/ 结构、ownership、数据流变化时
+
+> 修订 2026-08-15（ADR 0014）：唯一正式 model-tool 循环已内化为奕枢自有代码（`packages/runtime/src/model-loop/`），`@earendil-works/pi-coding-agent` 依赖已移除。本文以下沿用 "Pi" 名称的历史段落指该引擎的旧位置；执行边界语义不变。
 
 ```text
                     Yishu single macOS application

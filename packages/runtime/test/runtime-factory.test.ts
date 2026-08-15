@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MockAgentRuntime } from "../src/mock-runtime.js";
-import { PiRuntimeAdapter } from "../src/pi-runtime-adapter.js";
+import { YishuLoopRuntimeAdapter } from "../src/loop-adapter.js";
 import {
   createAgentRuntime,
   selectedRuntimeMode,
@@ -14,7 +14,7 @@ test("Pi is the only selectable agent loop", async () => {
   assert.equal(selectedRuntimeMode({ HANAKO_RUNTIME_MODE: "agent-core" }), "pi");
 
   const runtime = createAgentRuntime("pi", { productKernel: false });
-  assert.ok(runtime instanceof PiRuntimeAdapter);
+  assert.ok(runtime instanceof YishuLoopRuntimeAdapter);
   await runtime.dispose();
 });
 

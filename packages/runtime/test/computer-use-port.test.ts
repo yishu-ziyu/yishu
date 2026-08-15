@@ -12,9 +12,9 @@ import {
   computerActionCompletionText,
   isExplicitTextInputUtterance,
   piSessionCacheKey,
-  PiRuntimeAdapter,
+  YishuLoopRuntimeAdapter,
   shouldRunCompatibilityComputerAction,
-} from "../src/pi-runtime-adapter.js";
+} from "../src/loop-adapter.js";
 import { computerActionRequestedPayloadSchema } from "../src/protocol.js";
 import { PROTOCOL_VERSION, type RuntimeEvent } from "../src/protocol.js";
 import type { ComputerUsePort } from "../src/computer-use-port.js";
@@ -434,7 +434,7 @@ test("runtime injects the observed frontmost target into set_text and overrides 
     cancelRequest: () => {},
     dispose: () => {},
   };
-  const adapter = new PiRuntimeAdapter(process.cwd(), port);
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), port);
   const internals = adapter as any;
   const activeTurn: any = {
     requestId: randomUUID(),
@@ -502,7 +502,7 @@ test("text input binds exact user authority and the requested action sequence", 
     cancelRequest: () => {},
     dispose: () => {},
   };
-  const adapter = new PiRuntimeAdapter(process.cwd(), port);
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), port);
   const internals = adapter as any;
   const activeTurn: any = {
     requestId: randomUUID(),
@@ -614,7 +614,7 @@ async function assertDirectTurnSecondCallIsBlocked(firstResult: {
     cancelRequest: () => {},
     dispose: () => {},
   };
-  const adapter = new PiRuntimeAdapter(process.cwd(), port);
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), port);
   const internals = adapter as any;
   const activeTurn: any = {
     requestId: randomUUID(),
@@ -691,7 +691,7 @@ test("an admitted input-then-click sequence cannot dispatch a third action", asy
     cancelRequest: () => {},
     dispose: () => {},
   };
-  const adapter = new PiRuntimeAdapter(process.cwd(), port);
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), port);
   const internals = adapter as any;
   const activeTurn: any = {
     requestId: randomUUID(),
@@ -727,7 +727,7 @@ test("compatibility POINT fallback is only eligible before a direct action", () 
 });
 
 test("duplicate request ids fail immediately without replacing the active turn", async () => {
-  const adapter = new PiRuntimeAdapter(process.cwd(), {
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), {
     perform: async () => ({ succeeded: true, verified: true, message: "unused" }),
     resolve: () => false,
     cancelRequest: () => {},
@@ -761,7 +761,7 @@ test("duplicate request ids fail immediately without replacing the active turn",
 
 test("cancel during Pi initialization prevents session creation and later execution", async () => {
   const cancelled: string[] = [];
-  const adapter = new PiRuntimeAdapter(process.cwd(), {
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), {
     perform: async () => ({ succeeded: true, verified: true, message: "unused" }),
     resolve: () => false,
     cancelRequest: (requestId) => cancelled.push(requestId),
@@ -806,7 +806,7 @@ test("cancel during Pi initialization prevents session creation and later execut
 });
 
 test("Pi dispose waits for an initializing local turn to cross its cancellation gate", async () => {
-  const adapter = new PiRuntimeAdapter(process.cwd(), {
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), {
     perform: async () => ({ succeeded: true, verified: true, message: "unused" }),
     resolve: () => false,
     cancelRequest: () => {},

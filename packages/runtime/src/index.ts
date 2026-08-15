@@ -9,7 +9,7 @@ export * from "./computer-use-port.js";
 export * from "./context-prompt.js";
 export * from "./mock-runtime.js";
 export * from "./persona.js";
-export * from "./pi-runtime-adapter.js";
+export * from "./loop-adapter.js";
 export * from "./product-kernel-runtime.js";
 export * from "./protocol.js";
 export * from "./runtime-factory.js";

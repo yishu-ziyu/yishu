@@ -68,6 +68,10 @@ import {
   type CurrentPageNoteResult,
 } from "./delegation.js";
 import { contextFrameToTrailSource } from "./trail-source.js";
+import type {
+  StatusBarToolState,
+  TurnContextProviderFactory,
+} from "./model-loop/index.js";
 
 type TerminalKind = "completed" | "cancelled" | "failed";
 
@@ -348,6 +352,30 @@ export class ProductKernelRuntime implements AgentRuntime {
         ) => void;
       }
     ).setSessionToolPolicy?.((conversationId) => this.delegation.sessionToolPolicyFor(conversationId));
+    // ADR 0015 B architecture: the product layer owns turn-context data, the
+    // engine owns assembly timing. Skills L1 comes from the kernel's
+    // verified-skill registry (empty for private scopes); the status bar v1
+    // renders engine-observable facts only. Turn-memory recall stays on the
+    // PKR prompt path until the read-side PR moves it into assembleTurnMemory.
+    (
+      this.inner as {
+        setTurnContextProviderFactory?: (factory: TurnContextProviderFactory) => void;
+      }
+    ).setTurnContextProviderFactory?.((scopeKind) => ({
+      skillCatalog: async () => {
+        if (scopeKind === "private") return [];
+        try {
+          const skills = await this.kernel.store.listVerifiedSkills();
+          return skills.map((skill) => ({
+            name: skill.name,
+            description: verifiedSkillL1Description(skill),
+          }));
+        } catch {
+          return [];
+        }
+      },
+      statusBar: async (state) => formatEngineStatusBar(state),
+    }));
   }
 
   /** Wait for the constructor-started durable recovery without changing it. */
@@ -1418,6 +1446,14 @@ export class ProductKernelRuntime implements AgentRuntime {
       if (state.terminalKind) {
         await this.settleState(state);
         return;
+      }
+
+      if (
+        actionRoute.action === "remember_how"
+        && (receipt.output as { skill?: unknown } | undefined)?.skill
+      ) {
+        (this.inner as { invalidateSkillSessions?: () => void })
+          .invalidateSkillSessions?.();
       }
 
       if (
@@ -3141,6 +3177,39 @@ export class ProductKernelRuntime implements AgentRuntime {
       ),
     );
   }
+}
+
+/**
+ * L1 catalog description for a verified skill (ADR 0015): trigger phrase
+ * first, then the conditioning app, then the first procedural step — enough
+ * for the model to decide whether to load the skill, nothing more.
+ */
+function verifiedSkillL1Description(skill: {
+  triggerPhrase?: string;
+  steps: readonly { description: string }[];
+  conditions: Record<string, string>;
+}): string {
+  const parts: string[] = [];
+  if (skill.triggerPhrase !== undefined && skill.triggerPhrase.length > 0) {
+    parts.push(skill.triggerPhrase);
+  }
+  const app = skill.conditions.app;
+  if (app !== undefined && app.length > 0) parts.push(app);
+  const firstStep = skill.steps
+    .map((step) => step.description.trim())
+    .find((description) => description.length > 0);
+  if (firstStep !== undefined) parts.push(firstStep);
+  const text = parts.join(" · ").slice(0, 160).trim();
+  return text.length > 0 ? text : "verified procedural skill";
+}
+
+/** Status bar v1 (ADR 0015): engine-observable facts only, single line. */
+function formatEngineStatusBar(state: StatusBarToolState): string {
+  const calls = `${state.toolCallCount} tool call${state.toolCallCount === 1 ? "" : "s"}`;
+  const last = state.lastToolName === undefined
+    ? ""
+    : `, last ${state.lastToolName}${state.lastToolFailed ? " failed" : " ok"}`;
+  return `[executor: ${calls}${last}]`;
 }
 
 function freshObservedBundleId(frame: ContextFrame, now = new Date()): string | null {

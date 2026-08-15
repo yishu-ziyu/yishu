@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolDefinition } from "./model-loop/types.js";
 import { sanitizeVisibleText } from "@yishu/kernel";
 import { wrapUntrustedContent } from "./untrusted-content.js";
 

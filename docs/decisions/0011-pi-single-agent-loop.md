@@ -1,7 +1,7 @@
 # ADR 0011: Pi 是唯一正式 Agent 核心循环
 
 Type: decision
-Status: current
+Status: current（循环所有权部分已被 [ADR 0014](0014-own-model-tool-loop.md) 修订：唯一正式 model-tool 循环现为奕枢自有的 `model-loop/`，Pi SDK 依赖已移除。本 ADR 其余决定——agent-core 实验室边界、mock 仅测试替身、边界守卫——继续有效。）
 Verified: 23b2e07 2026-08-11
 Review: 该决策被重新讨论或推翻时（只能由新 ADR supersede）
 

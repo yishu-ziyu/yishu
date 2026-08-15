@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   AUTH_CONTROLLED_MODEL_IDS,
   AUTH_PROVIDER_IDS,
@@ -214,17 +213,20 @@ function publicPrompt(prompt: PiAuthPrompt): AuthPrompt {
   }
 }
 
-/** Remove ambient API-key resolution from the two subscription providers. */
-export function installProductOAuthProviderPolicy(runtime: ModelRuntime): void {
+/**
+ * Fail-closed invariant guard for the product-owned provider registry: the
+ * subscription providers must never carry an ambient API-key path. The
+ * registry is OAuth-only by construction (ADR 0014), so this only asserts
+ * that structural property instead of rewriting providers.
+ */
+export function installProductOAuthProviderPolicy(
+  runtime: Pick<AuthModelRuntime, "getProvider">,
+): void {
   for (const providerId of AUTH_PROVIDER_IDS) {
     const provider = runtime.getProvider(providerId);
-    if (!provider?.auth?.oauth) continue;
-    runtime.registerNativeProvider({
-      ...provider,
-      // Deliberately drop `apiKey`, including XAI_API_KEY / OPENAI_API_KEY
-      // ambient resolution.  Only a stored OAuth credential may configure it.
-      auth: { oauth: provider.auth.oauth },
-    });
+    if (provider?.auth?.apiKey) {
+      throw new Error(`Ambient API-key auth must not exist for ${providerId}.`);
+    }
   }
 }
 

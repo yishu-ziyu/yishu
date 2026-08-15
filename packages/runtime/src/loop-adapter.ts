@@ -1,17 +1,15 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import path from "node:path";
 import {
-  createAgentSession,
-  DefaultResourceLoader,
-  ModelRuntime,
-  SessionManager,
-  SettingsManager,
-  type AgentSession,
-  type ProviderModelConfig,
+  createYishuAgentSession,
+  createYishuProviderRuntime,
+  type AnyToolDefinition,
+  type ModelProviderRuntime,
+  type ModelSession,
+  type ResolvedModel,
   type ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
-import { PI_CAPABILITY_PROFILES } from "./capability-profiles.js";
+  type TurnContextProviderFactory,
+} from "./model-loop/index.js";
 import {
   AssistantOutputGenerationProjector,
   isDirectComputerActionUtterance,
@@ -30,8 +28,6 @@ import {
 import { buildGroundedPrompt } from "./context-prompt.js";
 import { YISHU_SYSTEM_PROMPT } from "./persona.js";
 import {
-  installProductOAuthProviderPolicy,
-  requireOAuthSubscriptionAuth,
   safeRuntimeErrorMessage,
   YishuAuthService,
   type AuthTransitionKind,
@@ -62,7 +58,7 @@ import {
 } from "@yishu/kernel";
 import { markTrustedExternalReceipt } from "./trusted-task-receipt.js";
 
-type RuntimeModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
+type RuntimeModel = ResolvedModel;
 const SESSION_ABORT_TIMEOUT_MS = 2_000;
 const INTERRUPTION_STEER_TIMEOUT_MS = 30_000;
 
@@ -94,7 +90,7 @@ function deferredSignal(): DeferredSignal {
   return { promise, resolve, reject };
 }
 
-async function abortSessionWithin(session: AgentSession): Promise<void> {
+async function abortSessionWithin(session: ModelSession): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
     timer = setTimeout(resolve, SESSION_ABORT_TIMEOUT_MS);
@@ -516,7 +512,7 @@ class PiTurnGenerationState {
 interface ActiveProviderTurn {
   provider: AuthProviderId;
   requestId: string;
-  session?: AgentSession;
+  session?: ModelSession;
   settled: Promise<void>;
   settle(): void;
   cancel(): Promise<void>;
@@ -622,25 +618,41 @@ if (process.env.YISHU_VOICE_PROXY_TOKEN !== undefined) {
   throw new Error("Voice proxy capability must not remain in the Pi process environment.");
 }
 
+/**
+ * The single production provider runtime. Shared by the loop adapter and the
+ * memory extraction model so extraction reuses the turn's provider OAuth
+ * without a second credential surface (ADR 0016 #4).
+ */
+export function createDefaultProviderRuntime(): ModelProviderRuntime {
+  return createYishuProviderRuntime({
+    credentialStore: createYishuCredentialStore(),
+    localGrokBearer: { value: () => LOCAL_PROXY_AUTH_SENTINEL },
+  });
+}
+
 export function piSessionCacheKey(
   capabilityProfile: CapabilityProfile,
   preference: ModelPreference,
   generation: number,
   conversationId: string,
   sessionScope: SessionScope = { kind: "personal" },
+  skillsVersion = 0,
 ): string {
-  return `${capabilityProfile}:${preference.provider}:${generation}:${preference.model}:${sessionScopeKey(sessionScope)}:${conversationId}`;
+  // Segment order matters: releaseConversationSession matches keys by the
+  // trailing `:${conversationId}` suffix, so the skills version must precede
+  // the conversation id (ADR 0015 #4).
+  return `${capabilityProfile}:${preference.provider}:${generation}:${preference.model}:${sessionScopeKey(sessionScope)}:skills:${skillsVersion}:${conversationId}`;
 }
 
 /**
  * Optional injection seam for tests.  Both members default to the exact
  * production wiring: a product-owned local `ModelRuntime` and Pi's
- * `createAgentSession`.  Callers that inject a model runtime still pass
+ * `createYishuAgentSession`.  Callers that inject a model runtime still pass
  * through the OAuth provider policy install below.
  */
-export interface PiRuntimeAdapterOptions {
-  modelRuntimePromise?: Promise<ModelRuntime>;
-  createSession?: typeof createAgentSession;
+export interface YishuLoopRuntimeAdapterOptions {
+  modelRuntimePromise?: Promise<ModelProviderRuntime>;
+  createSession?: typeof createYishuAgentSession;
   interruptionSteerTimeoutMs?: number;
 }
 
@@ -664,14 +676,14 @@ export const DEFAULT_SESSION_TOOL_POLICY: SessionToolPolicy = {
   extraTools: [],
 };
 
-export class PiRuntimeAdapter implements AgentRuntime {
+export class YishuLoopRuntimeAdapter implements AgentRuntime {
   private readonly workingDirectory: string;
-  private readonly modelRuntimePromise: Promise<ModelRuntime>;
-  private readonly createSession: typeof createAgentSession;
+  private readonly modelRuntimePromise: Promise<ModelProviderRuntime>;
+  private readonly createSession: typeof createYishuAgentSession;
   private readonly interruptionSteerTimeoutMs: number;
   readonly authService: YishuAuthService;
-  private readonly sessions = new Map<string, AgentSession>();
-  private readonly activeSessionByRequestId = new Map<string, AgentSession>();
+  private readonly sessions = new Map<string, ModelSession>();
+  private readonly activeSessionByRequestId = new Map<string, ModelSession>();
   private readonly sessionKeyByRequestId = new Map<string, string>();
   private readonly activeProviderTurns = new Map<string, ActiveProviderTurn>();
   private readonly activeGenerationByRequestId = new Map<string, PiTurnGenerationState>();
@@ -688,7 +700,10 @@ export class PiRuntimeAdapter implements AgentRuntime {
   private readonly activeTurnOperations = new Set<Promise<void>>();
   private readonly providerTransitions = new Set<AuthProviderId>();
   private readonly providerAuthGenerations = new Map<AuthProviderId, number>();
-  private readonly localGrokModelIds = new Set<string>();
+  /** Bumped by skill promotion; part of the session cache key (ADR 0015). */
+  private skillsVersion = 0;
+  /** Product-owned turn context providers (ADR 0015); unset keeps the engine bare. */
+  private turnContextProviderFactory: TurnContextProviderFactory | undefined;
   private readonly activeComputerTurn = new AsyncLocalStorage<ActiveComputerTurn>();
   // Additive product seam: per-conversation session tool policy, decided at
   // the createSession boundary. Delegated child conversations receive neither
@@ -700,27 +715,23 @@ export class PiRuntimeAdapter implements AgentRuntime {
   constructor(
     workingDirectory = process.cwd(),
     private readonly computerUsePort: ComputerUsePort = new UnavailableComputerUsePort(),
-    options: PiRuntimeAdapterOptions = {},
+    options: YishuLoopRuntimeAdapterOptions = {},
   ) {
     this.workingDirectory = workingDirectory;
-    this.createSession = options.createSession ?? createAgentSession;
+    this.createSession = options.createSession ?? createYishuAgentSession;
     this.interruptionSteerTimeoutMs = options.interruptionSteerTimeoutMs
       ?? INTERRUPTION_STEER_TIMEOUT_MS;
-    // Keep provider/model state in this process. In particular, do not read or
-    // write the user's global ~/.pi/agent models.json/auth.json. OAuth state is
-    // product-owned under Yishu/Auth/auth.json instead.
-    const modelRuntimePromise = options.modelRuntimePromise ?? ModelRuntime.create({
-      modelsPath: null,
-      allowModelNetwork: false,
-      credentials: createYishuCredentialStore(),
-    });
-    this.modelRuntimePromise = modelRuntimePromise.then((modelRuntime) => {
-      // Pi's xAI provider also advertises XAI_API_KEY.  Replace both
-      // subscription providers with OAuth-only native providers so ambient
-      // environment keys cannot bypass the product store.
-      installProductOAuthProviderPolicy(modelRuntime);
-      return modelRuntime;
-    });
+    // Keep provider/model state in this process. In particular, do not read
+    // or write any global model catalog. OAuth state is product-owned under
+    // Yishu/Auth/auth.json instead. The registry is OAuth-only by
+    // construction; there is no ambient API-key path to strip.
+    const modelRuntimePromise = options.modelRuntimePromise ?? Promise.resolve(
+      createYishuProviderRuntime({
+        credentialStore: createYishuCredentialStore(),
+        localGrokBearer: { value: () => LOCAL_PROXY_AUTH_SENTINEL },
+      }),
+    );
+    this.modelRuntimePromise = modelRuntimePromise;
     this.authService = new YishuAuthService(
       this.modelRuntimePromise as unknown as Promise<import("./auth-service.js").AuthModelRuntime>,
       {
@@ -737,6 +748,28 @@ export class PiRuntimeAdapter implements AgentRuntime {
    */
   setSessionToolPolicy(policy: (conversationId: string) => SessionToolPolicy): void {
     this.sessionToolPolicy = policy;
+  }
+
+  /**
+   * ADR 0015 B architecture: the product layer supplies per-session turn
+   * context providers (skill catalog / turn memory / status bar). Sessions
+   * created after this call receive them; existing sessions keep theirs.
+   */
+  setTurnContextProviderFactory(factory: TurnContextProviderFactory): void {
+    this.turnContextProviderFactory = factory;
+  }
+
+  /**
+   * Skill promotion changed the L1 catalog: retire cached sessions so the
+   * next turn cold-starts with the new system prefix (ADR 0015 #4).
+   */
+  invalidateSkillSessions(): void {
+    this.skillsVersion += 1;
+    for (const [key, session] of [...this.sessions.entries()]) {
+      session.dispose();
+      this.sessions.delete(key);
+      this.activeGenerationBySessionKey.delete(key);
+    }
   }
 
   beginPageNoteReceiptReconciliation(requestId: string): () => void {
@@ -771,12 +804,12 @@ export class PiRuntimeAdapter implements AgentRuntime {
    * all ordinary turns.
    */
   private activateToolsForTurn(
-    session: AgentSession,
+    session: ModelSession,
     policy: SessionToolPolicy,
   ): (() => void) | undefined {
     const registered = policy.registeredExtraTools ?? [];
     if (registered.length === 0) return undefined;
-    const controllable = session as AgentSession & {
+    const controllable = session as ModelSession & {
       getActiveToolNames?: () => readonly string[];
       setActiveToolsByName?: (names: readonly string[]) => void;
     };
@@ -852,7 +885,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
     }
   }
 
-  private evictSession(sessionKey: string, session: AgentSession): void {
+  private evictSession(sessionKey: string, session: ModelSession): void {
     // A supersede/cancel fence may already have detached this exact object and
     // taken ownership of its bounded abort + dispose. The late runTurn finally
     // must not dispose the same provider session a second time.
@@ -866,7 +899,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
     if (this.disposed) {
       emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
         code: "runtime_disposed",
-        message: "PiRuntimeAdapter has been disposed.",
+        message: "YishuLoopRuntimeAdapter has been disposed.",
       }));
       return;
     }
@@ -893,7 +926,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
   private async runTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
     let preference!: ModelPreference;
     let model: RuntimeModel;
-    let session: AgentSession;
+    let session: ModelSession;
     let sessionKey = "";
     let sessionCreated = false;
     let providerTurn: ActiveProviderTurn | undefined;
@@ -1034,7 +1067,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
     });
 
     emit(runtimeEvent("turn.started", command.requestId, command.traceId, {
-      runtime: "pi",
+      runtime: "yishu-loop",
       capabilityProfile: command.payload.capabilityProfile,
       sessionId: session.sessionId,
       provider: preference.provider,
@@ -1211,7 +1244,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
       command.payload.message,
       command.payload.nextGeneration,
       async () => {
-        // AgentSession.prompt is the atomic SDK entry: while streaming it
+        // ModelSession.prompt is the atomic SDK entry: while streaming it
         // queues exactly one steer; while idle it starts exactly one fresh run.
         // Checking isStreaming ourselves would race the provider settling.
         await generationState.awaitInitialPromptAdmitted();
@@ -1506,36 +1539,10 @@ export class PiRuntimeAdapter implements AgentRuntime {
     this.ensureProviderAvailable(preference.provider);
     const modelRuntime = await this.modelRuntimePromise;
     this.ensureProviderAvailable(preference.provider);
-    if (preference.provider === LOCAL_GROK_PROVIDER && !this.localGrokModelIds.has(preference.model)) {
-      this.localGrokModelIds.add(preference.model);
-      const models: ProviderModelConfig[] = [...this.localGrokModelIds].map((id) => ({
-        id,
-        name: id,
-        api: "openai-completions",
-        reasoning: false,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128_000,
-        maxTokens: 8_192,
-      }));
-
-      modelRuntime.registerProvider(LOCAL_GROK_PROVIDER, {
-        name: "Yishu Local Grok",
-        baseUrl: LOCAL_GROK_BASE_URL,
-        api: "openai-completions",
-        apiKey: LOCAL_PROXY_AUTH_SENTINEL,
-        authHeader: true,
-        models,
-      });
-    }
-
-    const model = modelRuntime.getModel(preference.provider, preference.model);
-    if (!model) {
-      throw new Error(`Model is unavailable: ${preference.provider}/${preference.model}`);
-    }
-    if (preference.provider !== LOCAL_GROK_PROVIDER) {
-      await requireOAuthSubscriptionAuth(modelRuntime, preference.provider);
-    }
+    // The product registry resolves LOCAL_GROK dynamically (loopback models
+    // are allowlisted by the worker) and enforces stored OAuth for the two
+    // subscription providers. There is no ambient API-key path.
+    const model = await modelRuntime.resolveModel(preference.provider, preference.model);
     this.ensureProviderAvailable(preference.provider);
     return model;
   }
@@ -1546,7 +1553,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
     model: RuntimeModel,
     conversationId: string,
     sessionScope: SessionScope,
-  ): Promise<{ session: AgentSession; created: boolean; key: string }> {
+  ): Promise<{ session: ModelSession; created: boolean; key: string }> {
     this.ensureProviderAvailable(preference.provider);
     const generation = preference.provider === LOCAL_GROK_PROVIDER
       ? 0
@@ -1560,6 +1567,7 @@ export class PiRuntimeAdapter implements AgentRuntime {
       generation,
       conversationId,
       sessionScope,
+      this.skillsVersion,
     );
     const existingSession = this.sessions.get(sessionKey);
     if (existingSession) {
@@ -1567,28 +1575,18 @@ export class PiRuntimeAdapter implements AgentRuntime {
     }
 
     const modelRuntime = await this.modelRuntimePromise;
-    const settingsManager = SettingsManager.inMemory({
-      compaction: { enabled: true },
-      retry: { enabled: true, maxRetries: 2 },
-    });
-    const resourceLoader = new DefaultResourceLoader({
-      cwd: this.workingDirectory,
-      agentDir: path.join(this.workingDirectory, ".yishu", "pi"),
-      settingsManager,
-      systemPromptOverride: () => YISHU_SYSTEM_PROMPT,
-    });
-    await resourceLoader.reload();
     this.ensureProviderAvailable(preference.provider);
 
-    const capabilityConfiguration = PI_CAPABILITY_PROFILES[capabilityProfile];
     const toolPolicy = this.sessionToolPolicy(conversationId);
     const { session } = await this.createSession({
-      cwd: this.workingDirectory,
-      modelRuntime,
       model,
-      resourceLoader,
-      settingsManager,
-      sessionManager: SessionManager.inMemory(this.workingDirectory),
+      providerRuntime: modelRuntime,
+      systemPrompt: YISHU_SYSTEM_PROMPT,
+      // ADR 0015: per-session product context providers; undefined keeps the
+      // engine bare (tests / embedded use).
+      ...(this.turnContextProviderFactory
+        ? { context: this.turnContextProviderFactory(sessionScope.kind, conversationId) }
+        : {}),
       customTools: [
         ...(toolPolicy.computerControl
           ? [createComputerControlTool((action, signal) => (
@@ -1598,7 +1596,6 @@ export class PiRuntimeAdapter implements AgentRuntime {
         ...[...toolPolicy.extraTools, ...(toolPolicy.registeredExtraTools ?? [])]
           .map((tool) => this.fenceEffectfulExtraTool(tool, sessionKey)),
       ],
-      ...capabilityConfiguration,
     });
 
     this.ensureProviderAvailable(preference.provider);

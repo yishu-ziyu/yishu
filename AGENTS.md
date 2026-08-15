@@ -12,7 +12,7 @@ Review: 产品不变量、架构边界或验证拓扑变化时
 - Voice and spatial presence are primary interfaces, not add-ons.
 - Context is evidence: every context item carries source, capture time, confidence, and expiry semantics. → docs/decisions/0006-context-is-evidence.md
 - Keep the user cursor, Yishu's visible pointer, and background execution input as separate channels.
-- Pi 是唯一正式 Agent 核心循环；`packages/agent-core` 只保留为独立实验室，不是 `AgentRuntime` 模式或 `packages/runtime` 依赖；mock 只是协议测试替身。 → docs/decisions/0011-pi-single-agent-loop.md
+- 奕枢自有 model-tool 循环（`packages/runtime/src/model-loop/`，ADR 0014）是唯一正式 Agent 循环；`@earendil-works/pi-coding-agent` 依赖已移除；`packages/agent-core` 只保留为独立实验室，不是 `AgentRuntime` 模式或 `packages/runtime` 依赖；mock 只是协议测试替身。 → docs/decisions/0014-own-model-tool-loop.md
 - Kairos 只在 Kairos 历史仓库保留旧 bridge 的历史记录；Kairos bridge、SSE progress stream、`RunProgressPresenter` 和 `forceKairosRouting` 都不是 Yishu 的依赖、回退或运行路径，禁止迁入、调用或恢复；task state comes from typed Pi `AgentRuntime` events. → docs/decisions/0004-no-kairos.md
 - Agent Native 只提供 Action 设计方法论，不是 Yishu 的 Swift 或 Node 依赖，也不是第二个运行时；可吸收模式：单一 typed Action、fresh target/observation、执行前 revalidate、结构化 receipt、可见 read-back。 → docs/decisions/0008-agent-native-methodology-only.md
 - A tool success is not task completion. Verify the final visible or externally observable result.
@@ -24,11 +24,11 @@ Review: 产品不变量、架构边界或验证拓扑变化时
 - The Clicky macOS app at `apps/clicky` owns presence, voice, permissions, TTS, user settings, source, installation, and visible acceptance. Tests and build configurations must not create a second App implementation. → docs/decisions/0012-single-macos-app-source.md
 - `YishuContext` owns the portable evidence model in the root Swift package; Clicky supplies its production collector.
 - `packages/kernel` owns the product layer above turns: `YishuAction` registry, `ContextTrail`, evidence store (`MemoryClaim` / Learning / Skill / Mandate / TaskTruth), and `ContextCapsule`; Voice / UI / initiative / MCP / CLI / Pi share product actions, not fork handlers. → docs/decisions/0011-pi-single-agent-loop.md
-- `packages/runtime` owns the Pi adapter and the versioned runtime protocol (`AgentRuntime` remains turn-centric execution).
-- Product code depends on `AgentRuntime` for turns and on `@yishu/kernel` for product capabilities; Pi-specific types stay inside `PiRuntimeAdapter`.
+- `packages/runtime` owns the product model-tool loop (`model-loop/`) and the versioned runtime protocol (`AgentRuntime` remains turn-centric execution).
+- Product code depends on `AgentRuntime` for turns and on `@yishu/kernel` for product capabilities; engine/wire specifics stay inside `YishuLoopRuntimeAdapter`.
 - Runtime commands and events must remain versioned, typed, cancellable, and traceable.
-- Pi remains the only shipping model-tool loop; Swift remains the macOS actuator through Accessibility and Quartz; Agent Native patterns may shape the product-owned protocol, but no Agent Native or AgentCore runtime code is imported into kernel or runtime. → docs/architecture.md
-- Mature Pi tools are retained through task capability profiles. Do not rebuild them without evidence.
+- The Yishu-owned model-tool loop is the only shipping loop; Swift remains the macOS actuator through Accessibility and Quartz; Agent Native patterns may shape the product-owned protocol, but no Agent Native or AgentCore runtime code is imported into kernel or runtime. → docs/architecture.md、docs/decisions/0014-own-model-tool-loop.md
+- Capability profiles (`conversation`/`observe`/`build`/`owner`) keep their protocol semantics; the internalized engine ships product tools only (no engine built-in dev tools).
 
 ## Verification
 
