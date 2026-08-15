@@ -792,20 +792,20 @@ test("private turns never receive delegated results", async (t) => {
   assert.equal(snippetsFrom(inner.received[0]!).length, 0);
 });
 
-// --- Full-stack boundary: real PiRuntimeAdapter createSession edge ---------
+// --- Full-stack boundary: real YishuLoopRuntimeAdapter createSession edge ---------
 // The Main session must receive delegate + computer_control; the delegated
 // child session must receive neither. The child command must satisfy the full
 // wire schema, inherit the Main model, and an unverified research answer must
-// not become done. The fake harness mirrors pi-runtime-adapter.test.ts.
+// not become done. The fake harness mirrors loop-adapter.test.ts.
 
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
-  AgentSession,
-  ModelRuntime,
-} from "@earendil-works/pi-coding-agent";
-import { PiRuntimeAdapter } from "../src/pi-runtime-adapter.js";
+  ModelSession,
+  ModelProviderRuntime,
+} from "../src/model-loop/types.js";
+import { YishuLoopRuntimeAdapter } from "../src/loop-adapter.js";
 import type { ComputerUsePort } from "../src/computer-use-port.js";
 
 type FakeSessionEvent = {
@@ -881,8 +881,8 @@ test("at the real createSession boundary a safe conversation result completes an
   };
 
   const workdir = await mkdtemp(path.join(tmpdir(), "yishu-delegation-boundary-"));
-  const adapter = new PiRuntimeAdapter(workdir, unusedPort, {
-    modelRuntimePromise: Promise.resolve(modelRuntime as unknown as ModelRuntime),
+  const adapter = new YishuLoopRuntimeAdapter(workdir, unusedPort, {
+    modelRuntimePromise: Promise.resolve(modelRuntime as unknown as ModelProviderRuntime),
     createSession: (async (args: { customTools?: CapturedSessionCall["customTools"]; model?: unknown }) => {
       const session = new FakeAgentSession();
       const index = sessions.length;
@@ -899,7 +899,7 @@ test("at the real createSession boundary a safe conversation result completes an
           ? "正在整理。\n<delegated_result>边界调研结论</delegated_result>"
           : "好的");
       };
-      return { session: session as unknown as AgentSession };
+      return { session: session as unknown as ModelSession };
     }) as never,
   });
 

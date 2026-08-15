@@ -22,7 +22,7 @@
 
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolDefinition } from "./model-loop/types.js";
 import type {
   DelegatedResultRecord,
   DelegatedTaskSequenceStep,
@@ -40,7 +40,7 @@ import {
   createTaskExecutionContract,
   evaluateTaskCompletion,
 } from "@yishu/kernel";
-import type { SessionToolPolicy } from "./pi-runtime-adapter.js";
+import type { SessionToolPolicy } from "./loop-adapter.js";
 import type {
   ContextFrame,
   DelegatedTaskCancelCommand,

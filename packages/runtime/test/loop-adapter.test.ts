@@ -5,18 +5,18 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import type {
-  AgentSession,
-  ModelRuntime,
+  ModelSession,
+  ModelProviderRuntime,
   ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+} from "../src/model-loop/types.js";
 import {
   StdioComputerUsePort,
   type ComputerUsePort,
 } from "../src/computer-use-port.js";
 import {
-  PiRuntimeAdapter,
-  type PiRuntimeAdapterOptions,
-} from "../src/pi-runtime-adapter.js";
+  YishuLoopRuntimeAdapter,
+  type YishuLoopRuntimeAdapterOptions,
+} from "../src/loop-adapter.js";
 import { attachConversationHistory } from "../src/context-prompt.js";
 import {
   computerActionRequestedPayloadSchema,
@@ -64,12 +64,12 @@ type FakeSessionEvent = {
 };
 
 /**
- * The fake session implements exactly the surface PiRuntimeAdapter consumes:
+ * The fake session implements exactly the surface YishuLoopRuntimeAdapter consumes:
  * sessionId, subscribe, prompt, abort, steer, dispose, and agent.state.
  */
-class FakeAgentSession {
+class FakeModelSession {
   private static nextId = 0;
-  readonly sessionId = `fake-pi-session-${++FakeAgentSession.nextId}`;
+  readonly sessionId = `fake-pi-session-${++FakeModelSession.nextId}`;
   readonly agent: { state: { errorMessage?: string } } = { state: {} };
   readonly prompts: { text: string; images: unknown[] }[] = [];
   readonly steers: string[] = [];
@@ -82,12 +82,12 @@ class FakeAgentSession {
   disposeCount = 0;
   activeToolNames = ["read", "web_search", "computer_control", "delegate"];
   readonly activeToolNameSets: string[][] = [];
-  promptHandler: (session: FakeAgentSession, text: string) => Promise<void> = async (session) => {
+  promptHandler: (session: FakeModelSession, text: string) => Promise<void> = async (session) => {
     session.emitTextDelta("收到。");
   };
-  steerHandler: (session: FakeAgentSession, text: string) => Promise<void> = async () => {};
-  queuedSteerHandler?: (session: FakeAgentSession, text: string) => Promise<void>;
-  afterPromptSettled?: (session: FakeAgentSession, text: string) => Promise<void>;
+  steerHandler: (session: FakeModelSession, text: string) => Promise<void> = async () => {};
+  queuedSteerHandler?: (session: FakeModelSession, text: string) => Promise<void>;
+  afterPromptSettled?: (session: FakeModelSession, text: string) => Promise<void>;
   isStreaming = false;
   private readonly pendingSteers: string[] = [];
   private readonly abortGate = deferred();
@@ -194,25 +194,31 @@ class FakeAgentSession {
 type FakeTool = ToolDefinition<any, any, any>;
 
 interface FakePiHarness {
-  readonly adapterOptions: PiRuntimeAdapterOptions;
-  readonly sessions: FakeAgentSession[];
+  readonly adapterOptions: YishuLoopRuntimeAdapterOptions;
+  readonly sessions: FakeModelSession[];
   readonly registeredProviderIds: string[];
   readonly capturedTools: FakeTool[];
-  configureSession(session: FakeAgentSession): void;
-  waitForNextSession(): Promise<FakeAgentSession>;
+  configureSession(session: FakeModelSession): void;
+  waitForNextSession(): Promise<FakeModelSession>;
 }
 
 function createFakePiHarness(): FakePiHarness {
-  const sessions: FakeAgentSession[] = [];
+  const sessions: FakeModelSession[] = [];
   const registeredProviderIds: string[] = [];
   const capturedTools: FakeTool[] = [];
-  const sessionWaiters: Array<(session: FakeAgentSession) => void> = [];
+  const sessionWaiters: Array<(session: FakeModelSession) => void> = [];
   const modelRuntime = {
     getProvider: (_providerId: string) => undefined,
-    registerProvider: (providerId: string) => {
-      registeredProviderIds.push(providerId);
-    },
-    getModel: (provider: string, modelId: string) => ({ provider, id: modelId }),
+    resolveModel: async (provider: string, modelId: string) => ({
+      providerId: provider,
+      id: modelId,
+      name: modelId,
+      api: "openai-completions",
+      baseUrl: "http://127.0.0.1:8787/v1",
+      input: ["text", "image"],
+      contextWindow: 128_000,
+      maxTokens: 8_192,
+    }),
   };
   const harness: FakePiHarness = {
     sessions,
@@ -223,18 +229,18 @@ function createFakePiHarness(): FakePiHarness {
       sessionWaiters.push(resolve);
     }),
     adapterOptions: {
-      modelRuntimePromise: Promise.resolve(modelRuntime as unknown as ModelRuntime),
+      modelRuntimePromise: Promise.resolve(modelRuntime as unknown as ModelProviderRuntime),
       interruptionSteerTimeoutMs: 100,
       createSession: (async (options: { customTools?: FakeTool[] }) => {
-        const session = new FakeAgentSession();
+        const session = new FakeModelSession();
         sessions.push(session);
         capturedTools.push(...(options.customTools ?? []));
         harness.configureSession(session);
         for (const waiter of sessionWaiters.splice(0)) {
           waiter(session);
         }
-        return { session: session as unknown as AgentSession };
-      }) as NonNullable<PiRuntimeAdapterOptions["createSession"]>,
+        return { session: session as unknown as ModelSession };
+      }) as NonNullable<YishuLoopRuntimeAdapterOptions["createSession"]>,
     },
   };
   return harness;
@@ -250,13 +256,13 @@ const unusedPort: ComputerUsePort = {
 async function makeAdapter(
   harness: FakePiHarness,
   computerUsePort: ComputerUsePort = unusedPort,
-): Promise<{ adapter: PiRuntimeAdapter; workdir: string }> {
+): Promise<{ adapter: YishuLoopRuntimeAdapter; workdir: string }> {
   const workdir = await mkdtemp(path.join(tmpdir(), "yishu-pi-adapter-test-"));
-  const adapter = new PiRuntimeAdapter(workdir, computerUsePort, harness.adapterOptions);
+  const adapter = new YishuLoopRuntimeAdapter(workdir, computerUsePort, harness.adapterOptions);
   return { adapter, workdir };
 }
 
-function cleanupAfter(t: TestContext, adapter: PiRuntimeAdapter, workdir: string): void {
+function cleanupAfter(t: TestContext, adapter: YishuLoopRuntimeAdapter, workdir: string): void {
   t.after(async () => {
     await adapter.dispose();
     await rm(workdir, { recursive: true, force: true });
@@ -361,7 +367,7 @@ test("startTurn prompts with grounded text and streams deltas to completion", as
 
   const started = events.find((event) => event.type === "turn.started");
   assert.ok(started);
-  assert.equal(started.payload.runtime, "pi");
+  assert.equal(started.payload.runtime, "yishu-loop");
   assert.equal(started.payload.capabilityProfile, "conversation");
   assert.equal(started.payload.sessionId, session.sessionId);
   assert.equal(started.payload.provider, LOCAL_GROK_PROVIDER);
@@ -394,7 +400,7 @@ test("barge-in suppresses stale output and completes only the replacement genera
     content: [{ type: "text" as const, text: "旧半句" }],
   };
   harness.configureSession = (session) => {
-    const emitReplacement = async (current: FakeAgentSession) => {
+    const emitReplacement = async (current: FakeModelSession) => {
       const user = {
         role: "user",
         timestamp: 2,
@@ -1461,11 +1467,9 @@ test("Pi sessions are cached per conversation identity", async (t) => {
     events.filter((event) => event.type === "response.completed").length,
     3,
   );
-  assert.deepEqual(
-    harness.registeredProviderIds,
-    [LOCAL_GROK_PROVIDER],
-    "the local provider registers once per model id",
-  );
+  // The product registry resolves local models dynamically; no per-model
+  // provider registration happens anymore (ADR 0014). Session reuse above is
+  // the behavioral contract this test protects.
 });
 
 test("conversation history rehydrates a cold Pi session once and is omitted from the hot session", async (t) => {

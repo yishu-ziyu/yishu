@@ -1,5 +1,8 @@
 import { MockAgentRuntime } from "./mock-runtime.js";
-import { PiRuntimeAdapter } from "./pi-runtime-adapter.js";
+import {
+  createDefaultProviderRuntime,
+  YishuLoopRuntimeAdapter,
+} from "./loop-adapter.js";
 import { ProductKernelRuntime } from "./product-kernel-runtime.js";
 import type { ComputerUsePort } from "./computer-use-port.js";
 import type { AgentRuntime } from "./runtime-port.js";
@@ -42,7 +45,9 @@ function createInnerRuntime(
   ports: RuntimePorts,
 ): AgentRuntime {
   if (mode === "mock") return new MockAgentRuntime();
-  return new PiRuntimeAdapter(process.cwd(), ports.computerUse);
+  return new YishuLoopRuntimeAdapter(process.cwd(), ports.computerUse, {
+    modelRuntimePromise: Promise.resolve(createDefaultProviderRuntime()),
+  });
 }
 
 export function createAgentRuntime(

@@ -1,4 +1,4 @@
-// Concurrency contract for PiRuntimeAdapter (ADR 0009, RFC v2 §2.1–2.2):
+// Concurrency contract for YishuLoopRuntimeAdapter (ADR 0009, RFC v2 §2.1–2.2):
 // one adapter may run independent executions for distinct conversationIds
 // in parallel while sessions, events, cancel, and disposal stay isolated.
 // The fake harness below mirrors pi-runtime-adapter.test.ts and is
@@ -10,14 +10,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import type {
-  AgentSession,
-  ModelRuntime,
-} from "@earendil-works/pi-coding-agent";
+  ModelSession,
+  ModelProviderRuntime,
+} from "../src/model-loop/types.js";
 import type { ComputerUsePort } from "../src/computer-use-port.js";
 import {
-  PiRuntimeAdapter,
-  type PiRuntimeAdapterOptions,
-} from "../src/pi-runtime-adapter.js";
+  YishuLoopRuntimeAdapter,
+  type YishuLoopRuntimeAdapterOptions,
+} from "../src/loop-adapter.js";
 import {
   PROTOCOL_VERSION,
   type RuntimeEvent,
@@ -46,13 +46,13 @@ type FakeSessionEvent = {
   assistantMessageEvent?: { type: string; delta?: string };
 };
 
-class FakeAgentSession {
+class FakeModelSession {
   private static nextId = 0;
-  readonly sessionId = `concurrency-session-${++FakeAgentSession.nextId}`;
+  readonly sessionId = `concurrency-session-${++FakeModelSession.nextId}`;
   readonly agent: { state: { errorMessage?: string } } = { state: {} };
   readonly promptStarted = deferred();
   abortCount = 0;
-  promptHandler: (session: FakeAgentSession) => Promise<void> = async () => {};
+  promptHandler: (session: FakeModelSession) => Promise<void> = async () => {};
   private readonly abortGate = deferred();
   private aborted = false;
   private readonly listeners = new Set<(event: FakeSessionEvent) => void>();
@@ -75,7 +75,7 @@ class FakeAgentSession {
 
   async prompt(): Promise<void> {
     this.promptStarted.resolve();
-    // Real AgentSession.abort() settles an in-flight prompt; mirror that so
+    // Real ModelSession.abort() settles an in-flight prompt; mirror that so
     // the adapter's cancelled-path checks run instead of hanging forever.
     await Promise.race([this.promptHandler(this), this.abortGate.promise]);
   }
@@ -94,18 +94,26 @@ class FakeAgentSession {
 }
 
 interface FakeHarness {
-  readonly adapterOptions: PiRuntimeAdapterOptions;
-  readonly sessions: FakeAgentSession[];
-  waitForNextSession(): Promise<FakeAgentSession>;
+  readonly adapterOptions: YishuLoopRuntimeAdapterOptions;
+  readonly sessions: FakeModelSession[];
+  waitForNextSession(): Promise<FakeModelSession>;
 }
 
 function createFakeHarness(): FakeHarness {
-  const sessions: FakeAgentSession[] = [];
-  const sessionWaiters: Array<(session: FakeAgentSession) => void> = [];
+  const sessions: FakeModelSession[] = [];
+  const sessionWaiters: Array<(session: FakeModelSession) => void> = [];
   const modelRuntime = {
     getProvider: (_providerId: string) => undefined,
-    registerProvider: (_providerId: string) => {},
-    getModel: (provider: string, modelId: string) => ({ provider, id: modelId }),
+    resolveModel: async (provider: string, modelId: string) => ({
+      providerId: provider,
+      id: modelId,
+      name: modelId,
+      api: "openai-completions",
+      baseUrl: "http://127.0.0.1:8787/v1",
+      input: ["text", "image"],
+      contextWindow: 128_000,
+      maxTokens: 8_192,
+    }),
   };
   return {
     sessions,
@@ -113,15 +121,15 @@ function createFakeHarness(): FakeHarness {
       sessionWaiters.push(resolve);
     }),
     adapterOptions: {
-      modelRuntimePromise: Promise.resolve(modelRuntime as unknown as ModelRuntime),
+      modelRuntimePromise: Promise.resolve(modelRuntime as unknown as ModelProviderRuntime),
       createSession: (async () => {
-        const session = new FakeAgentSession();
+        const session = new FakeModelSession();
         sessions.push(session);
         for (const waiter of sessionWaiters.splice(0)) {
           waiter(session);
         }
-        return { session: session as unknown as AgentSession };
-      }) as NonNullable<PiRuntimeAdapterOptions["createSession"]>,
+        return { session: session as unknown as ModelSession };
+      }) as NonNullable<YishuLoopRuntimeAdapterOptions["createSession"]>,
     },
   };
 }
@@ -135,13 +143,13 @@ const unusedPort: ComputerUsePort = {
 
 async function makeAdapter(
   harness: FakeHarness,
-): Promise<{ adapter: PiRuntimeAdapter; workdir: string }> {
+): Promise<{ adapter: YishuLoopRuntimeAdapter; workdir: string }> {
   const workdir = await mkdtemp(path.join(tmpdir(), "yishu-adapter-concurrency-"));
-  const adapter = new PiRuntimeAdapter(workdir, unusedPort, harness.adapterOptions);
+  const adapter = new YishuLoopRuntimeAdapter(workdir, unusedPort, harness.adapterOptions);
   return { adapter, workdir };
 }
 
-function cleanupAfter(t: TestContext, adapter: PiRuntimeAdapter, workdir: string): void {
+function cleanupAfter(t: TestContext, adapter: YishuLoopRuntimeAdapter, workdir: string): void {
   t.after(async () => {
     await adapter.dispose();
     await rm(workdir, { recursive: true, force: true });
@@ -175,7 +183,7 @@ test("concurrent turns keep sessions, events, and completion isolated", async (t
   const gateB = deferred();
   // Sessions are created in turn-start order: conv-a first, conv-b second.
   harness.adapterOptions.createSession = (async () => {
-    const session = new FakeAgentSession();
+    const session = new FakeModelSession();
     harness.sessions.push(session);
     const gate = harness.sessions.length === 1 ? gateA : gateB;
     const tag = harness.sessions.length === 1 ? "A" : "B";
@@ -183,8 +191,8 @@ test("concurrent turns keep sessions, events, and completion isolated", async (t
       await gate.promise;
       s.emitTextDelta(`reply-from-${tag}`);
     };
-    return { session: session as unknown as AgentSession };
-  }) as NonNullable<PiRuntimeAdapterOptions["createSession"]>;
+    return { session: session as unknown as ModelSession };
+  }) as NonNullable<YishuLoopRuntimeAdapterOptions["createSession"]>;
 
   const { adapter, workdir } = await makeAdapter(harness);
   cleanupAfter(t, adapter, workdir);
@@ -240,7 +248,7 @@ test("cancelling one turn leaves a concurrently running turn intact", async (t) 
   const gateA = deferred();
   const gateB = deferred();
   harness.adapterOptions.createSession = (async () => {
-    const session = new FakeAgentSession();
+    const session = new FakeModelSession();
     harness.sessions.push(session);
     if (harness.sessions.length === 1) {
       session.promptHandler = () => gateA.promise;
@@ -250,8 +258,8 @@ test("cancelling one turn leaves a concurrently running turn intact", async (t) 
         s.emitTextDelta("B-survived");
       };
     }
-    return { session: session as unknown as AgentSession };
-  }) as NonNullable<PiRuntimeAdapterOptions["createSession"]>;
+    return { session: session as unknown as ModelSession };
+  }) as NonNullable<YishuLoopRuntimeAdapterOptions["createSession"]>;
 
   const { adapter, workdir } = await makeAdapter(harness);
   cleanupAfter(t, adapter, workdir);
@@ -311,13 +319,13 @@ test("dispose aborts every in-flight session and stops event flow", async (t) =>
   const harness = createFakeHarness();
   const gates: Deferred<void>[] = [];
   harness.adapterOptions.createSession = (async () => {
-    const session = new FakeAgentSession();
+    const session = new FakeModelSession();
     harness.sessions.push(session);
     const gate = deferred();
     gates.push(gate);
     session.promptHandler = () => gate.promise;
-    return { session: session as unknown as AgentSession };
-  }) as NonNullable<PiRuntimeAdapterOptions["createSession"]>;
+    return { session: session as unknown as ModelSession };
+  }) as NonNullable<YishuLoopRuntimeAdapterOptions["createSession"]>;
 
   const { adapter, workdir } = await makeAdapter(harness);
   t.after(async () => {
@@ -350,9 +358,9 @@ test("dispose aborts every in-flight session and stops event flow", async (t) =>
 });
 
 async function waitForSessionAt(
-  sessions: FakeAgentSession[],
+  sessions: FakeModelSession[],
   index: number,
-): Promise<FakeAgentSession> {
+): Promise<FakeModelSession> {
   while (sessions.length <= index) {
     await new Promise((resolve) => setImmediate(resolve));
   }

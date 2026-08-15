@@ -35,14 +35,6 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 - revisit trigger: 任一域（history / memory / turn）需要独立演进或独立测试时。
 - severity: medium
 
-## debt-004: pi-coding-agent 0.x pin
-
-- what: `@earendil-works/pi-coding-agent` pin 在 0.83.0；0.x 语义下升级可能 breaking。
-- why deferred: 升级需跑一次完整 conformance pass，无证据不升级。
-- evidence: `packages/runtime/package.json:16`
-- revisit trigger: 需要上游新能力或安全修复时；升级必须附 conformance 结果。
-- severity: medium
-
 ## debt-005: 死代码（OpenAIAPI / ElementLocationDetector）
 
 - what: `OpenAIAPI`（vision analysis helper）与 `ElementLocationDetector` 两个 class 无调用点。
@@ -135,6 +127,14 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 - what: `DelegationCoordinator` 已在 child promise 的 `finally` 中按 conversationId 调用 `PiRuntimeAdapter.releaseConversationSession()`，实现终态后精确释放；但尚缺一项回归，穷举 success / failed / cancel / exception / dispose 后都断言 child cache 尺寸不增长。
 - why deferred: 生产接线和全套 Runtime 回归已通过；保留一项聚焦的测试债，不扩展成重复的终态组合测试。
-- evidence: `packages/runtime/src/delegation.ts` 的 child `finally`，`packages/runtime/src/pi-runtime-adapter.ts` 的 `releaseConversationSession()`；现有 suite 已跑通实际 child session 创建边界，但未穷举各类终态的 cache non-growth。
+- evidence: `packages/runtime/src/delegation.ts` 的 child `finally`，`packages/runtime/src/loop-adapter.ts` 的 `releaseConversationSession()`；现有 suite 已跑通实际 child session 创建边界，但未穷举各类终态的 cache non-growth。
 - revisit trigger: 修改 delegation 终态、cancel / dispose、Pi session cache 或 child promise 生命周期时；或出现 session 累积证据时。
+- severity: low
+
+## debt-018: 循环内化后的残留命名
+
+- what: ADR 0014 移除 Pi SDK 后的残留：(a) `YishuLoopRuntimeAdapter` 构造仍收 `workingDirectory`（引擎已不消费，仅测试 mkdtemp 用）；(b) capability 档位命名 `build`/`owner` 仍是 coding 词汇（引擎已无内置开发工具，四档语义退化为文档性）；(c) `YISHU_RUNTIME_MODE=pi` 作为兼容值保留（Clicky 仍发送）。历史背景见 [agent-book-product-alignment.md](../research/agent-book-product-alignment.md)。
+- why deferred: 纯命名清理；`pi` 兼容值改动需同步 Clicky 与边界守卫字面量，单独一批做。
+- evidence: `packages/runtime/src/loop-adapter.ts`（构造参数）、`packages/runtime/src/capability-profiles.ts`、`packages/runtime/src/runtime-factory.ts`
+- revisit trigger: 触及 runtime-factory / capability 档位 / Clicky 启动环境变量时。
 - severity: low
