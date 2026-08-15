@@ -215,6 +215,18 @@ struct leanring_buddyTests {
         #expect(YishuProductUtteranceRouter.classify("这个按钮为什么是灰色的？") == .conversation)
         #expect(YishuProductUtteranceRouter.shouldPreferProductKernel("记住刚才这个流程"))
         #expect(!YishuProductUtteranceRouter.shouldPreferProductKernel("这个按钮为什么是灰色的？"))
+        #expect(YishuProductUtteranceRouter.classify("20分钟后提醒我喝一口水") == .timeReminder)
+        #expect(
+            YishuProductUtteranceRouter.relativeTimeReminderKind("20分钟后提醒我喝一口水")
+                == .schedule(delaySeconds: 1_200, body: "喝一口水")
+        )
+        #expect(YishuProductUtteranceRouter.relativeTimeReminderKind("能不能20分钟后提醒我喝水") == .question)
+        #expect(YishuProductUtteranceRouter.relativeTimeReminderKind("20分钟后提醒我喝水呢") == .question)
+        #expect(YishuProductUtteranceRouter.relativeTimeReminderKind("20分钟后提醒我喝水好不好") == .question)
+        #expect(YishuProductUtteranceRouter.classify("能不能20分钟后提醒我喝水") == .timeReminder)
+        #expect(YishuProductUtteranceRouter.shouldPreferProductKernel("20分钟后提醒我喝一口水"))
+        #expect(YishuProductUtteranceRouter.shouldPreferProductKernel("20分钟后提醒我喝水呢"))
+        #expect(!YishuBargeInPolicy.allowsSameSessionConversation("20分钟后提醒我喝一口水"))
     }
 
     @Test func memorySourceNoticeShowsClaimTimeAndSource() async throws {

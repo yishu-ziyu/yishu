@@ -89,7 +89,8 @@ struct YishuTimeReminderTests {
         func confirmation(
             succeeded: Bool,
             status: YishuActionStatus,
-            code: YishuActionCode
+            code: YishuActionCode,
+            clockLabel: String? = nil
         ) -> String {
             CompanionManager.directActionConfirmation(
                 for: YishuComputerActionResult(
@@ -99,16 +100,36 @@ struct YishuTimeReminderTests {
                     evidence: nil,
                     status: status,
                     method: .nativeCommand,
-                    code: code
+                    code: code,
+                    clockLabel: clockLabel
                 ),
                 action: "schedule_reminder"
             )
         }
-        #expect(confirmation(succeeded: true, status: .verified, code: .verifiedSystemNotification) == "提醒已经设好。")
+        #expect(confirmation(succeeded: true, status: .verified, code: .verifiedSystemNotification) == "已经设好提醒。")
+        #expect(confirmation(
+            succeeded: true,
+            status: .verified,
+            code: .verifiedSystemNotification,
+            clockLabel: "07:34"
+        ) == "已经设好提醒，大约 07:34。")
+        #expect(confirmation(
+            succeeded: true,
+            status: .verified,
+            code: .verifiedSystemNotification,
+            clockLabel: "7:34"
+        ) == "已经设好提醒。")
         #expect(confirmation(succeeded: true, status: .unverified, code: .timeout) == "提醒可能已经设好，但我没能确认；我不会重复设置。")
         #expect(confirmation(succeeded: false, status: .blocked, code: .notificationPermissionPending) == "还没有设置，请允许后再说一次。")
         #expect(confirmation(succeeded: false, status: .blocked, code: .notificationPermissionDenied) == "系统提醒权限没有允许，所以这次没有设置。")
         #expect(confirmation(succeeded: false, status: .failed, code: .notificationScheduleFailed) == "这次没有设置提醒。")
+        #expect(YishuTimeReminderDelivery.clockLabel(
+            delaySeconds: 1_200,
+            now: Date(timeIntervalSince1970: 1_700_000_000),
+            timeZone: TimeZone(secondsFromGMT: 8 * 3_600)!
+        ) == "06:33")
+        #expect(YishuTimeReminderDelivery.isMacClockLabel("07:34"))
+        #expect(!YishuTimeReminderDelivery.isMacClockLabel("7:34"))
     }
 }
 

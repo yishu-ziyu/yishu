@@ -1156,7 +1156,8 @@ enum YishuComputerUseActuator {
                 method: .nativeCommand,
                 code: .verifiedSystemNotification,
                 receiptId: receiptId,
-                attemptId: attemptId
+                attemptId: attemptId,
+                clockLabel: YishuTimeReminderDelivery.clockLabel(delaySeconds: delaySeconds)
             )
         case .permissionPending:
             return YishuComputerActionResult(

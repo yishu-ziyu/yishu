@@ -18,6 +18,9 @@ struct YishuBargeInTests {
         #expect(YishuBargeInPolicy.allowsSameSessionConversation("它是什么意思"))
         #expect(YishuBargeInPolicy.allowsSameSessionConversation("What does it mean?"))
         #expect(!YishuBargeInPolicy.allowsSameSessionConversation("记住：我喜欢简短回答"))
+        #expect(!YishuBargeInPolicy.allowsSameSessionConversation("20分钟后提醒我喝一口水"))
+        #expect(!YishuBargeInPolicy.allowsSameSessionConversation("能不能20分钟后提醒我喝水"))
+        #expect(!YishuBargeInPolicy.allowsSameSessionConversation("20分钟后提醒我喝水呢"))
         #expect(!YishuBargeInPolicy.allowsSameSessionConversation(""))
     }
 
