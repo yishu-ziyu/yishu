@@ -154,6 +154,7 @@ export class SqliteYishuStore implements YishuStorePort {
       tags: [...input.tags],
     };
     if (input.retiredAt !== undefined) claim.retiredAt = input.retiredAt;
+    if (input.truthRef !== undefined) claim.truthRef = input.truthRef;
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -162,8 +163,8 @@ export class SqliteYishuStore implements YishuStorePort {
         .prepare(
           `INSERT INTO memories (
             id, claim, source, captured_at, scope, confidence,
-            last_confirmed_at, supersedes, tags_json, retired_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            last_confirmed_at, supersedes, tags_json, retired_at, truth_ref
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           claim.id,
@@ -176,6 +177,7 @@ export class SqliteYishuStore implements YishuStorePort {
           claim.supersedes,
           JSON.stringify(claim.tags),
           claim.retiredAt ?? null,
+          claim.truthRef ?? null,
         );
       assertStoreOperationNotAborted(signal);
       this.db.exec("COMMIT");
@@ -224,6 +226,22 @@ export class SqliteYishuStore implements YishuStorePort {
         if (conf !== 0) return conf;
         return b.lastConfirmedAt.localeCompare(a.lastConfirmedAt);
       });
+  }
+
+  async confirmMemory(
+    id: string,
+    confirmedAt: string,
+    options?: StoreMutationOptions,
+  ): Promise<boolean> {
+    const signal = options?.signal;
+    assertStoreOperationNotAborted(signal);
+    const result = this.db
+      .prepare(
+        `UPDATE memories SET last_confirmed_at = ?
+         WHERE id = ? AND last_confirmed_at < ?`,
+      )
+      .run(confirmedAt, id, confirmedAt);
+    return Number(result.changes) > 0;
   }
 
   async retireMemory(
@@ -1735,7 +1753,8 @@ export class SqliteYishuStore implements YishuStorePort {
         last_confirmed_at TEXT NOT NULL,
         supersedes TEXT,
         tags_json TEXT NOT NULL,
-        retired_at TEXT
+        retired_at TEXT,
+        truth_ref TEXT
       );
       CREATE TABLE IF NOT EXISTS learnings (
         id TEXT PRIMARY KEY,
@@ -1896,6 +1915,12 @@ export class SqliteYishuStore implements YishuStorePort {
     } catch {
       // Fresh databases already declare trace_id; SQLite reports duplicate
       // column and the schema is otherwise complete.
+    }
+    // ADR 0016 #2: markdown truth-layer pointer on memory index rows.
+    try {
+      this.db.exec("ALTER TABLE memories ADD COLUMN truth_ref TEXT;");
+    } catch {
+      // Fresh schemas already contain the additive column.
     }
     const scopeColumns = [
       ["tasks", "scope_kind", "TEXT NOT NULL DEFAULT 'personal'"],
@@ -2205,6 +2230,9 @@ function rowToMemory(row: Record<string, unknown>): MemoryClaim {
     tags,
   };
   if (row.retired_at != null) claim.retiredAt = String(row.retired_at);
+  if (typeof row.truth_ref === "string" && row.truth_ref.length > 0) {
+    claim.truthRef = row.truth_ref;
+  }
   return claim;
 }
 

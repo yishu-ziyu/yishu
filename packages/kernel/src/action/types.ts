@@ -157,6 +157,7 @@ export interface ScheduleTimeReminderResult {
   method?: string;
   receiptId?: string;
   attemptId?: string;
+  clockLabel?: string;
 }
 
 /** Narrow host capability injected only for the one-shot reminder action. */

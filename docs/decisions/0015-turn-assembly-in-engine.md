@@ -31,6 +31,6 @@ ADR 0014 内化 model-tool 循环后，记忆/Skills/状态栏的 prompt 组装�
 ## Consequences
 
 - `createYishuAgentSession` 签名扩展（`persona`、`context`）；引擎新增瞬态尾随消息机制（两个 wire builder 支持 `transientTail`，不落历史）。
-- 记忆召回路径分两步迁移：本决定先落端口与 Skills/状态栏接线；`assembleTurnMemory` 的实现在后续读取侧 PR 中接管现有 PKR 召回（含 `memory.used` 事件），避免双装配。
+- 记忆召回路径分两步迁移：本决定先落端口与 Skills/状态栏接线；写入侧 PR 之后，读取侧 PR-2 让 `assembleTurnMemory` 读取 PKR 的 per-turn 召回缓存（`memory.used` 仍由 PKR 发出），不再把记忆挂到命令上，避免双装配。
 - 状态栏首版内容为引擎可观测事实（工具计数/最近工具/失败位），kernel 任务步骤投影后续增强。
 - 书义原则保持：system 稳定前缀只在 skill 晋升时变化（会话失效兜底）；状态栏末尾注入且代码维护。

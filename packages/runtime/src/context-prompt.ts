@@ -154,6 +154,15 @@ function formatMemoryBlock(memories: readonly PromptMemorySnippet[]): string[] {
   return lines;
 }
 
+/** Engine-facing memory block (ADR 0015/0016 PR-2). Undefined when empty. */
+export function formatTurnMemoryBlock(
+  memories: readonly PromptMemorySnippet[],
+): string | undefined {
+  const lines = formatMemoryBlock(memories);
+  if (lines.length === 0) return undefined;
+  return lines.join("\n").trimEnd();
+}
+
 function mindLessonsFromCommand(
   command: TurnStartCommand,
 ): readonly PromptMindLesson[] {
@@ -408,6 +417,7 @@ export function attachBehaviorRules(
   };
 }
 
+/** Test/compat helper. Production recall is assembled by `assembleTurnMemory`. */
 export function attachRecalledMemories(
   command: TurnStartCommand,
   memories: readonly PromptMemorySnippet[],

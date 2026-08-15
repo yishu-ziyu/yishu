@@ -197,8 +197,16 @@ export function formatProductActionSpeech(
   output: unknown,
 ): string {
   if (action === "schedule_time_reminder") {
-    const result = output as { succeeded?: boolean; verified?: boolean; code?: string } | null;
-    if (result?.verified) return "已经设好提醒。";
+    const result = output as {
+      succeeded?: boolean;
+      verified?: boolean;
+      code?: string;
+      clockLabel?: string;
+    } | null;
+    const when = validClockLabel(result?.clockLabel);
+    if (result?.verified) {
+      return when ? `已经设好提醒，大约 ${when}。` : "已经设好提醒。";
+    }
     if (result?.code === "notification_permission_pending") {
       return "还没有设置，请允许后再说一次。";
     }
@@ -314,30 +322,224 @@ export function formatProductActionSpeech(
   }
 }
 
+export type RelativeTimeReminderClass =
+  | { kind: "schedule"; delaySeconds: number; body: string }
+  | { kind: "question" }
+  | { kind: "incomplete" };
+
+/** Spoken clarification when a reminder-shaped line must not reach Pi. */
+export const RELATIVE_TIME_REMINDER_CLARIFY_SPEECH =
+  "要设提醒的话，直接说时间，比如二十分钟后提醒我喝水。";
+
+/**
+ * One classifier for routing, barge-in, and delegate refusal.
+ * Commands parse; questions/incomplete stay product-owned and never fall to Pi.
+ */
+export function classifyRelativeTimeReminder(text: string): RelativeTimeReminderClass | null {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return null;
+  const rest = stripReminderLeadIn(trimmed);
+  if (!hasRelativeTimeReminderShape(trimmed) && !hasRelativeTimeReminderShape(rest)) {
+    return null;
+  }
+  if (isRelativeTimeReminderQuestion(trimmed, rest)) return { kind: "question" };
+  const parsed = parseRelativeTimeReminder(trimmed);
+  return parsed ? { kind: "schedule", ...parsed } : { kind: "incomplete" };
+}
+
+/** True for spoken reminders, questions, and rewritten titles like “20分钟后提醒用户…”. */
+export function looksLikeRelativeTimeReminder(text: string): boolean {
+  return classifyRelativeTimeReminder(text) !== null;
+}
+
 function parseRelativeTimeReminder(
   text: string,
 ): { delaySeconds: number; body: string } | null {
-  if (
-    /[？?]\s*$/u.test(text)
-    || /(?:好吗|行吗|可以吗|能吗|吗|么|嘛)\s*[。！!]?\s*$/u.test(text)
-  ) return null;
-  const match = text.match(
-    /^(?:奕枢[，,\s]*)?(?:请\s*)?(?:在\s*)?(\d{1,4})\s*(分钟|分|小时|时)\s*后\s*提醒我\s*(.{1,500}?)[。！!\s]*$/u,
+  const rest = stripReminderLeadIn(text);
+  if (isRelativeTimeReminderQuestion(text, rest)) return null;
+
+  const parsed = parseTimeThenRemind(rest)
+    ?? parseRemindThenTime(rest)
+    ?? parseSetReminder(rest)
+    ?? parseEnglishReminder(rest);
+  if (!parsed) return null;
+  const body = normalizeReminderBody(parsed.body);
+  if (!isUsableReminderBody(body)) return null;
+  return { delaySeconds: parsed.delaySeconds, body };
+}
+
+function parseTimeThenRemind(
+  text: string,
+): { delaySeconds: number; body: string } | null {
+  const delay = matchSpokenDelayPrefix(text.replace(/^(?:再过|再)\s*/u, ""));
+  if (!delay) return null;
+  const after = delay.rest.replace(/^[，,]\s*/u, "");
+  const verb = after.match(
+    /^(?:请你?|帮我|麻烦|给我)?\s*(?:提醒(?:我一下|一下我|我|用户|你)|叫我(?:一声)?|喊我|帮我提醒)\s*/u,
   );
-  if (!match) return null;
-  const amount = Number(match[1]);
-  const unit = match[2];
-  const body = match[3]?.trim() ?? "";
-  const isMinutes = unit === "分钟" || unit === "分";
+  if (!verb) return null;
+  return { delaySeconds: delay.delaySeconds, body: after.slice(verb[0].length) };
+}
+
+function parseRemindThenTime(
+  text: string,
+): { delaySeconds: number; body: string } | null {
+  const verb = text.match(
+    /^(?:提醒(?:我一下|一下我|我|用户|你)|叫我(?:一声)?|喊我)\s*/u,
+  );
+  if (!verb) return null;
+  const delay = matchSpokenDelayPrefix(text.slice(verb[0].length));
+  if (!delay) return null;
+  return { delaySeconds: delay.delaySeconds, body: delay.rest };
+}
+
+function parseSetReminder(
+  text: string,
+): { delaySeconds: number; body: string } | null {
+  const setTimeBody = text.match(
+    /^设(?:一个|个)?(?:在|过|再过)?\s*/u,
+  );
+  if (setTimeBody) {
+    const afterSet = text.slice(setTimeBody[0].length);
+    const delay = matchSpokenDelayPrefix(afterSet);
+    if (delay) {
+      const remainder = delay.rest.replace(/^的?提醒[，,：:\s]*/u, "");
+      const remindVerb = remainder.match(
+        /^(?:提醒(?:我一下|一下我|我|用户|你)|叫我(?:一声)?|喊我)\s*/u,
+      );
+      if (remindVerb) {
+        return { delaySeconds: delay.delaySeconds, body: remainder.slice(remindVerb[0].length) };
+      }
+      const beforeReminder = remainder.match(/^(.*?)的提醒[。！!\s]*$/u);
+      if (beforeReminder) {
+        return { delaySeconds: delay.delaySeconds, body: beforeReminder[1] ?? "" };
+      }
+      return { delaySeconds: delay.delaySeconds, body: remainder };
+    }
+  }
+  const setThenTime = text.match(/^设(?:一个|个)?提醒[，,：:\s]*/u);
+  if (!setThenTime) return null;
+  const delay = matchSpokenDelayPrefix(text.slice(setThenTime[0].length));
+  if (!delay) return null;
+  return { delaySeconds: delay.delaySeconds, body: delay.rest };
+}
+
+function parseEnglishReminder(
+  text: string,
+): { delaySeconds: number; body: string } | null {
+  const remindFirst = text.match(
+    /^remind\s+me\s+(?:to\s+)?/i,
+  );
+  if (remindFirst) {
+    const delay = matchSpokenDelayPrefix(text.slice(remindFirst[0].length));
+    if (!delay) return null;
+    return {
+      delaySeconds: delay.delaySeconds,
+      body: delay.rest.replace(/^(?:to|that)\s+/i, ""),
+    };
+  }
+  const delay = matchSpokenDelayPrefix(text);
+  if (!delay) return null;
+  const remind = delay.rest.match(/^remind\s+me\s+(?:to\s+)?/i);
+  if (!remind) return null;
+  return {
+    delaySeconds: delay.delaySeconds,
+    body: delay.rest.slice(remind[0].length).replace(/^(?:to|that)\s+/i, ""),
+  };
+}
+
+function matchSpokenDelayPrefix(
+  text: string,
+): { delaySeconds: number; rest: string } | null {
+  const trimmed = text.replace(/^(?:在|过|in)\s*/iu, "");
+  const half = trimmed.match(/^半(?:个)?小时\s*(?:后|以后|之后)?\s*/u);
+  if (half) return finishDelay(1_800, trimmed, half[0]);
+  const oneHour = trimmed.match(/^(?:一|1)个?小时\s*(?:后|以后|之后)?\s*/u);
+  if (oneHour) return finishDelay(3_600, trimmed, oneHour[0]);
+  const twoHours = trimmed.match(/^(?:两|二|2)个?小时\s*(?:后|以后|之后)?\s*/u);
+  if (twoHours) return finishDelay(7_200, trimmed, twoHours[0]);
+  const numbered = trimmed.match(/^(\d{1,4})\s*(分钟|分|小时|时)\s*(?:后|以后|之后)?\s*/u);
+  if (numbered) {
+    const amount = Number(numbered[1]);
+    const unit = numbered[2];
+    if (unit === undefined) return null;
+    const isMinutes = unit === "分钟" || unit === "分";
+    if (!Number.isInteger(amount)
+      || (isMinutes && (amount < 1 || amount > 1_440))
+      || (!isMinutes && (amount < 1 || amount > 24))) {
+      return null;
+    }
+    return finishDelay(amount * (isMinutes ? 60 : 3_600), trimmed, numbered[0]);
+  }
+  const english = trimmed.match(
+    /^(\d{1,4})\s*(minutes?|mins?|hours?|hrs?)\s*(?:from now|later)?\s*/i,
+  );
+  if (!english) return null;
+  const amount = Number(english[1]);
+  const unit = english[2]?.toLowerCase();
+  if (unit === undefined) return null;
+  const isMinutes = unit.startsWith("min");
   if (!Number.isInteger(amount)
     || (isMinutes && (amount < 1 || amount > 1_440))
-    || (!isMinutes && (amount < 1 || amount > 24))
-    || body.length === 0
-    || /^(?:不要|别|不用|无需)/u.test(body)
-    || /^(?:一下|这件事|这个|那个|到时候|别忘了|提醒)$/u.test(body)) {
+    || (!isMinutes && (amount < 1 || amount > 24))) {
     return null;
   }
-  return { delaySeconds: amount * (isMinutes ? 60 : 3_600), body };
+  return finishDelay(amount * (isMinutes ? 60 : 3_600), trimmed, english[0]);
+}
+
+function finishDelay(
+  delaySeconds: number,
+  source: string,
+  consumed: string,
+): { delaySeconds: number; rest: string } | null {
+  if (delaySeconds < 60 || delaySeconds > 86_400) return null;
+  return { delaySeconds, rest: source.slice(consumed.length) };
+}
+
+function isRelativeTimeReminderQuestion(original: string, stripped: string): boolean {
+  if (
+    /(?:[？?]|好吗|行吗|可以吗|能吗|好不好|行不行|要不要|是不是)\s*[。！!]?\s*$/u.test(original)
+    || /(?:吗|么|嘛|呢)\s*[。！!]?\s*$/u.test(original)
+  ) {
+    return true;
+  }
+  return /^(?:能不能|可不可以|是否|要不要|是不是|可以不可以|can you|could you|would you|will you)\b/iu
+    .test(stripped);
+}
+
+function hasRelativeTimeReminderShape(text: string): boolean {
+  return /(?:\d{1,4}\s*(?:分钟|分|小时|时)|半(?:个)?小时|(?:一|两|二|\d)个?小时|\d{1,4}\s*(?:minutes?|mins?|hours?|hrs?))/iu
+      .test(text)
+    && /(?:提醒(?:我|用户|你)?|叫我|喊我|remind\s+me)/iu.test(text);
+}
+
+function normalizeReminderBody(raw: string): string {
+  return raw
+    .replace(/[（(]\s*约\s*\d{2}:\d{2}\s*[）)]\s*$/u, "")
+    .replace(/[。！!？?\s]+$/u, "")
+    .replace(/(?:啊|呀|哦|哈|吧|谢谢)+$/u, "")
+    .replace(/^(?:to|that)\s+/i, "")
+    .trim();
+}
+
+function isUsableReminderBody(body: string): boolean {
+  return body.length > 0
+    && body.length <= 500
+    && !/^(?:不要|别|不用|无需)/u.test(body)
+    && !/^(?:一下|这件事|这个|那个|到时候|别忘了|提醒)$/u.test(body);
+}
+
+function stripReminderLeadIn(text: string): string {
+  return text
+    .replace(/^(?:奕枢[，,\s]*)+/u, "")
+    .replace(/^(?:嗯|啊|那个|然后)[，,\s]*/u, "")
+    .replace(/^(?:请你?|帮我|麻烦|给我)[，,\s]*/u, "")
+    .replace(/^(?:请\s*)?/u, "")
+    .trim();
+}
+
+function validClockLabel(value: unknown): string | null {
+  return typeof value === "string" && /^\d{2}:\d{2}$/.test(value) ? value : null;
 }
 
 function parseCreateNote(text: string): { content: string; title: string } | null {

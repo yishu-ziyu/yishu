@@ -17,15 +17,20 @@ export {
 export type {
   CreateYishuKernelOptions,
   YishuKernel,
+  YishuMemoryLayer,
   YishuStoreBackend,
 } from "./kernel.js";
 export {
   routeProductUtterance,
   formatProductActionSpeech,
+  looksLikeRelativeTimeReminder,
+  classifyRelativeTimeReminder,
+  RELATIVE_TIME_REMINDER_CLARIFY_SPEECH,
 } from "./utterance-router.js";
 export type {
   ProductActionName,
   ProductUtteranceRoute,
+  RelativeTimeReminderClass,
 } from "./utterance-router.js";
 export {
   MEMORY_RECALL_MAX_ITEMS,
@@ -38,4 +43,18 @@ export {
 export type {
   RecalledMemory,
   RecallRelevantMemoriesOptions,
+} from "./memory/index.js";
+export {
+  GREETING_SKIP_PHRASES,
+  assertMemoryPathWithinRoot,
+  isGreetingUtterance,
+  memoryScopeSlug,
+  runExtractionPass,
+} from "./memory/index.js";
+export type {
+  ExtractionRunStats,
+  ExtractionSnapshot,
+  MemoryExtractionInput,
+  MemoryExtractionModel,
+  MemoryExtractionOutput,
 } from "./memory/index.js";

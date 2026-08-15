@@ -13,16 +13,22 @@ export type { SuggestionOutcomeStatus } from "../mind/document.js"
 export interface MemoryClaim {
   id: string
   claim: string
-  source: "conversation" | "observation" | "user_correction" | "skill_verify" | "system"
+  source: "conversation" | "observation" | "user_correction" | "skill_verify" | "system" | "extraction"
   capturedAt: string
   /** e.g. "global" | "project:yishu" */
   scope: string
-  /** 0-1 */
+  /** 0-1. Evidence metadata only, never a write gate (ADR 0016 #6). */
   confidence: number
   lastConfirmedAt: string
   supersedes: string | null
   tags: string[]
   retiredAt?: string
+  /**
+   * Markdown truth-layer pointer (ADR 0016 #2), e.g.
+   * `personal/facts/preferences.md#mem:abcd`. Absent on pre-P1 rows and on
+   * index-only writes from hosts without a memory directory.
+   */
+  truthRef?: string
 }
 
 export interface Learning {

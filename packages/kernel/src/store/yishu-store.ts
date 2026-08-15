@@ -727,6 +727,9 @@ function parseMemories(raw: unknown): MemoryClaim[] {
       tags: [...memoryFields.tags],
     }
     if (value.retiredAt !== undefined) memory.retiredAt = value.retiredAt
+    if (value.truthRef !== undefined && typeof value.truthRef === "string") {
+      memory.truthRef = value.truthRef
+    }
     return memory
   })
 }
@@ -886,6 +889,12 @@ export interface YishuStorePort {
   load(): Promise<void>
   save(): Promise<void>
   addMemory(input: MemoryInput, options?: StoreMutationOptions): Promise<MemoryClaim>
+  /** Bump lastConfirmedAt on one claim (extraction confirm, ADR 0016 #8). */
+  confirmMemory(
+    id: string,
+    confirmedAt: string,
+    options?: StoreMutationOptions,
+  ): Promise<boolean>
   searchMemory(query: string, options?: MemorySearchOptions): Promise<MemoryClaim[]>
   retireMemory(id: string, options?: StoreMutationOptions): Promise<boolean>
   /**
@@ -1036,9 +1045,24 @@ class YishuStoreCore {
     if (input.retiredAt !== undefined) {
       claim.retiredAt = input.retiredAt
     }
+    if (input.truthRef !== undefined) {
+      claim.truthRef = input.truthRef
+    }
     assertStoreOperationNotAborted(signal)
     this.data.memories.push(claim)
     return claim
+  }
+
+  confirmMemorySync(id: string, confirmedAt: string, signal?: AbortSignal): boolean {
+    assertStoreOperationNotAborted(signal)
+    this.ensureData()
+    const target = this.data.memories.find((m) => m.id === id)
+    if (!target) return false
+    assertStoreOperationNotAborted(signal)
+    if (confirmedAt > target.lastConfirmedAt) {
+      target.lastConfirmedAt = confirmedAt
+    }
+    return true
   }
 
   searchMemorySync(query: string, options?: MemorySearchOptions): MemoryClaim[] {
@@ -1072,6 +1096,7 @@ class YishuStoreCore {
           tags: [...m.tags],
         }
         if (m.retiredAt !== undefined) copy.retiredAt = m.retiredAt
+        if (m.truthRef !== undefined) copy.truthRef = m.truthRef
         return copy
       })
   }
@@ -2244,6 +2269,33 @@ export class YishuStore extends YishuStoreCore implements YishuStorePort {
     })
   }
 
+  async confirmMemory(
+    id: string,
+    confirmedAt: string,
+    options?: StoreMutationOptions,
+  ): Promise<boolean> {
+    return this.enqueue(async () => {
+      const signal = options?.signal
+      await this.ensureLoadedUnsafe(signal)
+      const before = cloneSnapshot(this.data)
+      try {
+        const ok = this.confirmMemorySync(id, confirmedAt, signal)
+        if (ok) {
+          await this.saveUnsafe(signal)
+          assertStoreOperationNotAborted(signal)
+        }
+        return ok
+      } catch (error) {
+        if (signal?.aborted || error instanceof StoreOperationCancelledError) {
+          this.data = before
+          await this.writeSnapshotUnsafe(before).catch(() => undefined)
+          throw new StoreOperationCancelledError()
+        }
+        throw error
+      }
+    })
+  }
+
   async retireMemory(
     id: string,
     options?: StoreMutationOptions,
@@ -2871,6 +2923,14 @@ export class InMemoryYishuStore extends YishuStoreCore implements YishuStorePort
     options?: MemorySearchOptions,
   ): Promise<MemoryClaim[]> {
     return this.searchMemorySync(query, options)
+  }
+
+  async confirmMemory(
+    id: string,
+    confirmedAt: string,
+    options?: StoreMutationOptions,
+  ): Promise<boolean> {
+    return this.confirmMemorySync(id, confirmedAt, options?.signal)
   }
 
   async retireMemory(

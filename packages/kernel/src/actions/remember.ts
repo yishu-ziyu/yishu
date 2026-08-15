@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { defineYishuAction } from "../action/define.js";
 import { ActionCancelledError } from "../action/types.js";
 import type { YishuStorePort } from "../store/yishu-store.js";
 import type { MemoryClaim } from "../store/types.js";
+import type { MemoryTruthLayer } from "../memory/truth-layer.js";
 
 const rememberInputSchema = z.object({
   claim: z.string().trim().min(1).max(2000),
@@ -23,7 +25,13 @@ const rememberInputSchema = z.object({
 
 export type RememberInput = z.infer<typeof rememberInputSchema>;
 
-export function createRememberAction(store: YishuStorePort) {
+/**
+ * ADR 0016 #2: single write path. Explicit remember writes the markdown
+ * truth layer first (when wired), then mirrors into the store index with a
+ * truthRef. Hosts without a memory directory keep index-only writes for
+ * tests/embedded use.
+ */
+export function createRememberAction(store: YishuStorePort, truth?: MemoryTruthLayer) {
   return defineYishuAction({
     name: "remember",
     description:
@@ -36,6 +44,20 @@ export function createRememberAction(store: YishuStorePort) {
       throwIfAborted(ctx.signal);
       const now = ctx.now.toISOString();
       const input = ctx.input;
+      let truthRef: string | undefined;
+      // The markdown line is the truth; write it before the index row so a
+      // crash between the two leaves a rebuildable gap, not a lost fact.
+      if (truth !== undefined) {
+        const factId = randomUUID();
+        await truth.upsertFact(input.scope, {
+          id: factId,
+          claim: input.claim,
+          source: input.source,
+          capturedAt: now,
+          confirmedAt: now,
+        });
+        truthRef = truth.truthRefFor(input.scope, factId);
+      }
       const payload = {
         claim: input.claim,
         source: input.source,
@@ -45,6 +67,7 @@ export function createRememberAction(store: YishuStorePort) {
         lastConfirmedAt: now,
         supersedes: input.supersedes ?? null,
         tags: input.tags,
+        ...(truthRef !== undefined ? { truthRef } : {}),
       };
       const mutationOptions =
         ctx.signal === undefined ? undefined : { signal: ctx.signal };

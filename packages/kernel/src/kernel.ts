@@ -27,8 +27,20 @@ import {
 } from "./store/yishu-store.js";
 import { SqliteYishuStore } from "./store/sqlite-store.js";
 import { TaskTruthProjector } from "./task-truth.js";
+import { MemoryTruthLayer } from "./memory/truth-layer.js";
+import {
+  InMemoryExtractionQueue,
+  JsonExtractionQueue,
+  SqliteExtractionQueue,
+  type ExtractionQueuePort,
+} from "./memory/extraction-queue.js";
 
 export type YishuStoreBackend = "memory" | "json" | "sqlite";
+
+export interface YishuMemoryLayer {
+  readonly truth: MemoryTruthLayer;
+  readonly queue: ExtractionQueuePort;
+}
 
 export interface CreateYishuKernelOptions {
   /**
@@ -40,6 +52,11 @@ export interface CreateYishuKernelOptions {
   storeDir?: string;
   /** Explicit sqlite file path (wins over storeDir). */
   sqlitePath?: string;
+  /**
+   * Markdown truth-layer root (ADR 0016 #1). When absent, no memory layer is
+   * wired: remember writes the index only (test/embedded hosts).
+   */
+  memoryDir?: string;
   trail?: ContextTrailOptions;
   /** Extra product actions to register after the defaults. */
   extraActions?: AnyYishuAction[];
@@ -51,6 +68,8 @@ export interface YishuKernel {
   trail: ContextTrail;
   taskTruth: TaskTruthProjector;
   storeBackend: YishuStoreBackend;
+  /** Present only when a memory directory is wired (ADR 0016). */
+  memory?: YishuMemoryLayer;
   /** Default product action names registered at create time. */
   defaultActionNames: readonly string[];
 }
@@ -58,6 +77,8 @@ export interface YishuKernel {
 function resolveStore(options: CreateYishuKernelOptions): {
   store: YishuStorePort;
   backend: YishuStoreBackend;
+  sqlitePath?: string;
+  storeDir?: string;
 } {
   const backend = options.storeBackend ?? "memory";
   if (backend === "memory") {
@@ -65,7 +86,7 @@ function resolveStore(options: CreateYishuKernelOptions): {
   }
   if (backend === "json") {
     const dir = options.storeDir ?? path.join(homedir(), ".yishu");
-    return { store: new YishuStore(dir), backend };
+    return { store: new YishuStore(dir), backend, storeDir: dir };
   }
   const sqlitePath =
     options.sqlitePath ??
@@ -73,7 +94,29 @@ function resolveStore(options: CreateYishuKernelOptions): {
       options.storeDir ?? path.join(homedir(), ".yishu"),
       "yishu-store.sqlite",
     );
-  return { store: new SqliteYishuStore(sqlitePath), backend };
+  return {
+    store: new SqliteYishuStore(sqlitePath),
+    backend,
+    sqlitePath,
+    ...(options.storeDir !== undefined ? { storeDir: options.storeDir } : {}),
+  };
+}
+
+function buildMemoryLayer(
+  options: CreateYishuKernelOptions,
+  resolved: ReturnType<typeof resolveStore>,
+): YishuMemoryLayer | undefined {
+  if (options.memoryDir === undefined) return undefined;
+  const truth = new MemoryTruthLayer(options.memoryDir);
+  let queue: ExtractionQueuePort;
+  if (resolved.backend === "sqlite" && resolved.sqlitePath !== undefined) {
+    queue = new SqliteExtractionQueue(resolved.sqlitePath);
+  } else if (resolved.backend === "json" && resolved.storeDir !== undefined) {
+    queue = new JsonExtractionQueue(resolved.storeDir);
+  } else {
+    queue = new InMemoryExtractionQueue();
+  }
+  return { truth, queue };
 }
 
 /**
@@ -83,14 +126,16 @@ function resolveStore(options: CreateYishuKernelOptions): {
 export function createYishuKernel(
   options: CreateYishuKernelOptions = {},
 ): YishuKernel {
-  const { store, backend } = resolveStore(options);
+  const resolved = resolveStore(options);
+  const { store, backend } = resolved;
+  const memory = buildMemoryLayer(options, resolved);
   const trail = new ContextTrail(options.trail);
   const taskTruth = new TaskTruthProjector(store);
   const registry = new YishuActionRegistry();
 
   const defaults: AnyYishuAction[] = [
-    createRememberAction(store),
-    createForgetAction(store),
+    createRememberAction(store, memory?.truth),
+    createForgetAction(store, memory?.truth),
     createRememberHowAction({ store, trail }),
     createShareContextAction(trail),
     createRecordLearningAction(store),
@@ -118,12 +163,15 @@ export function createYishuKernel(
     trail,
     taskTruth,
     storeBackend: backend,
+    ...(memory !== undefined ? { memory } : {}),
     defaultActionNames: defaults.map((a) => a.name),
   };
 }
 
 /**
- * Product host default: SQLite under ~/.yishu (or YISHU_STORE_DIR / YISHU_SQLITE_PATH).
+ * Product host default: SQLite under ~/.yishu (or YISHU_STORE_DIR /
+ * YISHU_SQLITE_PATH) and markdown memory under ~/Documents/Yishu/Memory
+ * (or YISHU_MEMORY_DIR, ADR 0016 #1).
  */
 export function createDefaultProductKernel(
   environment: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
@@ -141,5 +189,7 @@ export function createDefaultProductKernel(
   if (environment.YISHU_STORE_DIR) {
     options.storeDir = environment.YISHU_STORE_DIR;
   }
+  options.memoryDir = environment.YISHU_MEMORY_DIR
+    ?? path.join(homedir(), "Documents", "Yishu", "Memory");
   return createYishuKernel(options);
 }
