@@ -4,6 +4,7 @@ import {
   YishuLoopRuntimeAdapter,
 } from "./loop-adapter.js";
 import { ProductKernelRuntime } from "./product-kernel-runtime.js";
+import { createCompletionsExtractionModel } from "./memory-extraction-model.js";
 import type { ComputerUsePort } from "./computer-use-port.js";
 import type { AgentRuntime } from "./runtime-port.js";
 
@@ -43,20 +44,30 @@ export function productKernelEnabled(
 function createInnerRuntime(
   mode: RuntimeMode,
   ports: RuntimePorts,
-): AgentRuntime {
-  if (mode === "mock") return new MockAgentRuntime();
-  return new YishuLoopRuntimeAdapter(process.cwd(), ports.computerUse, {
-    modelRuntimePromise: Promise.resolve(createDefaultProviderRuntime()),
-  });
+): { inner: AgentRuntime; providerRuntime?: ReturnType<typeof createDefaultProviderRuntime> } {
+  if (mode === "mock") return { inner: new MockAgentRuntime() };
+  // One provider runtime instance feeds both the loop adapter and the memory
+  // extraction model (ADR 0016 #4) so extraction follows the turn's provider.
+  const providerRuntime = createDefaultProviderRuntime();
+  return {
+    inner: new YishuLoopRuntimeAdapter(process.cwd(), ports.computerUse, {
+      modelRuntimePromise: Promise.resolve(providerRuntime),
+    }),
+    providerRuntime,
+  };
 }
 
 export function createAgentRuntime(
   mode: RuntimeMode = selectedRuntimeMode(),
   ports: RuntimePorts = {},
 ): AgentRuntime {
-  const inner = createInnerRuntime(mode, ports);
+  const { inner, providerRuntime } = createInnerRuntime(mode, ports);
   if (!productKernelEnabled(process.env, ports.productKernel)) {
     return inner;
   }
-  return new ProductKernelRuntime(inner, undefined, ports.computerUse);
+  return new ProductKernelRuntime(inner, undefined, ports.computerUse, {
+    ...(providerRuntime !== undefined
+      ? { memoryExtractionModel: createCompletionsExtractionModel(providerRuntime) }
+      : {}),
+  });
 }

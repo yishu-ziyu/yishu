@@ -564,6 +564,23 @@ test("grounded prompt leaves normal context unwrapped without reminder", () => {
   assert.doesNotMatch(prompt, /Security reminder/);
 });
 
+test("formatTurnMemoryBlock is undefined when empty and otherwise matches the prompt contract", async () => {
+  const { formatTurnMemoryBlock } = await import("../src/context-prompt.js");
+  assert.equal(formatTurnMemoryBlock([]), undefined);
+  const block = formatTurnMemoryBlock([
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      claim: "验收回答先给结论",
+      source: "conversation",
+      capturedAt: "2026-08-08T12:00:00.000Z",
+      scope: "personal",
+    },
+  ]);
+  assert.match(block ?? "", /<durable_memories>/);
+  assert.match(block ?? "", /验收回答先给结论/);
+  assert.doesNotMatch(block ?? "", /\n$/);
+});
+
 test("grounded prompt injects controlled durable memories without screenshot bytes", async () => {
   const { attachRecalledMemories, buildGroundedPrompt: build } = await import(
     "../src/context-prompt.js"

@@ -39,6 +39,7 @@ import {
   sanitizeVisibleText,
   createTaskExecutionContract,
   evaluateTaskCompletion,
+  looksLikeRelativeTimeReminder,
 } from "@yishu/kernel";
 import type { SessionToolPolicy } from "./loop-adapter.js";
 import type {
@@ -516,6 +517,7 @@ export class DelegationCoordinator {
       promptGuidelines: [
         "After a successful delegate call, confirm briefly that the task started; do not wait for the result.",
         "Never call delegate from within a delegated task.",
+        "Never delegate a relative-time reminder such as 'N minutes from now'. That is a product action, not background work.",
       ],
       parameters,
       executionMode: "sequential",
@@ -526,6 +528,11 @@ export class DelegationCoordinator {
         }
         if (mainTurn.sessionScope.kind === "private") {
           throw new Error("delegate is unavailable in private sessions");
+        }
+        if (looksLikeRelativeTimeReminder(params.task)) {
+          throw new Error(
+            "Relative-time reminders are a product action, not background work. Do not delegate them.",
+          );
         }
         try {
           const { accepted, taskId } = await coordinator.acceptDelegation({

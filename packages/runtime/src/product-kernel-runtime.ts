@@ -7,6 +7,8 @@ import {
   sessionScopeKey,
   sessionScopesEqual,
   routeProductUtterance,
+  classifyRelativeTimeReminder,
+  RELATIVE_TIME_REMINDER_CLARIFY_SPEECH,
   recallRelevantMemories,
   sanitizeVisibleText,
   selectRelevantMindLessons,
@@ -52,8 +54,8 @@ import {
   attachConversationHistory,
   attachDelegatedResults,
   attachRecentTrail,
-  attachRecalledMemories,
   attachRecalledMind,
+  formatTurnMemoryBlock,
   type PromptBehaviorRule,
   type PromptConversationTurn,
   type PromptMemorySnippet,
@@ -72,8 +74,16 @@ import type {
   StatusBarToolState,
   TurnContextProviderFactory,
 } from "./model-loop/index.js";
+import {
+  runExtractionPass,
+  type ExtractionSnapshot,
+  type MemoryExtractionModel,
+} from "@yishu/kernel";
 
 type TerminalKind = "completed" | "cancelled" | "failed";
+
+/** Debounce between a turn settle and the async extraction drain (ADR 0016). */
+const EXTRACTION_DRAIN_DELAY_MS = 1_500;
 
 function terminalKindForStatus(status: ConversationTurn["status"]): TerminalKind {
   if (status === "completed") return "completed";
@@ -277,6 +287,10 @@ interface TurnLedgerState {
   terminalDelivered: boolean;
   ledgerError?: unknown;
   contract?: TaskExecutionContract;
+  /** Product action name when this turn was routed to the kernel registry. */
+  productAction?: string;
+  /** Scoped recall for this turn; engine assembleTurnMemory reads this cache. */
+  recalledMemories?: RecalledMemory[];
 }
 
 interface ReplayRecord {
@@ -309,6 +323,10 @@ export class ProductKernelRuntime implements AgentRuntime {
   private readonly recoveryReady: Promise<void>;
   private activeTrailScopeKey: string | undefined;
   private taskPresenceSink: ((update: DelegatedTaskPresenceUpdate) => void) | undefined;
+  /** Optional write-side memory extraction worker (ADR 0016 #3). */
+  private readonly extractionModel: MemoryExtractionModel | undefined;
+  private extractionDrainScheduled = false;
+  private extractionDrainTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
 
   /** Forward the optional auth capability without making the kernel own OAuth. */
@@ -320,6 +338,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     private readonly inner: AgentRuntime,
     kernel: YishuKernel = createDefaultProductKernel(),
     private readonly computerUsePort?: ComputerUsePort,
+    options: { memoryExtractionModel?: MemoryExtractionModel } = {},
   ) {
     this.kernel = kernel;
     // Runtime side of delegated execution (RFC v2 / ADR 0009): child turns run
@@ -355,13 +374,13 @@ export class ProductKernelRuntime implements AgentRuntime {
     // ADR 0015 B architecture: the product layer owns turn-context data, the
     // engine owns assembly timing. Skills L1 comes from the kernel's
     // verified-skill registry (empty for private scopes); the status bar v1
-    // renders engine-observable facts only. Turn-memory recall stays on the
-    // PKR prompt path until the read-side PR moves it into assembleTurnMemory.
+    // renders engine-observable facts only. Turn memory is assembled here
+    // from the per-turn recall cache — never re-attached onto the command.
     (
       this.inner as {
         setTurnContextProviderFactory?: (factory: TurnContextProviderFactory) => void;
       }
-    ).setTurnContextProviderFactory?.((scopeKind) => ({
+    ).setTurnContextProviderFactory?.((scopeKind, conversationId) => ({
       skillCatalog: async () => {
         if (scopeKind === "private") return [];
         try {
@@ -374,8 +393,77 @@ export class ProductKernelRuntime implements AgentRuntime {
           return [];
         }
       },
+      assembleTurnMemory: async () => {
+        if (scopeKind === "private") return undefined;
+        const state = this.activeTurnForConversation(conversationId);
+        const recalled = state?.recalledMemories ?? [];
+        if (recalled.length === 0) return undefined;
+        return formatTurnMemoryBlock(recalled.map(toPromptMemorySnippet));
+      },
       statusBar: async (state) => formatEngineStatusBar(state),
     }));
+    // ADR 0016 #3: write-side extraction worker. Startup drain replays
+    // pending/failed rows from before a crash; every enqueue schedules the
+    // next drain. Turns never wait for extraction.
+    if (this.kernel.memory !== undefined && options.memoryExtractionModel !== undefined) {
+      this.extractionModel = options.memoryExtractionModel;
+      void this.drainExtraction().catch(() => undefined);
+    }
+  }
+
+  private scheduleExtractionDrain(): void {
+    if (this.extractionModel === undefined || this.disposed) return;
+    if (this.extractionDrainScheduled) return;
+    this.extractionDrainScheduled = true;
+    this.extractionDrainTimer = setTimeout(() => {
+      this.extractionDrainScheduled = false;
+      this.extractionDrainTimer = undefined;
+      void this.drainExtraction().catch(() => undefined);
+    }, EXTRACTION_DRAIN_DELAY_MS);
+  }
+
+  private async drainExtraction(): Promise<void> {
+    const memory = this.kernel.memory;
+    if (memory === undefined || this.extractionModel === undefined || this.disposed) {
+      return;
+    }
+    await runExtractionPass({
+      queue: memory.queue,
+      truth: memory.truth,
+      store: this.kernel.store,
+      model: this.extractionModel,
+    });
+  }
+
+  /**
+   * ADR 0016 #3/#5/#7: enqueue one completed model turn for extraction.
+   * Fire-and-forget; product-action turns and private scopes never enqueue.
+   */
+  private enqueueMemoryExtraction(state: TurnLedgerState, replyText: string | undefined): void {
+    // Enqueueing is independent of having a model in this process: rows stay
+    // pending and replay wherever a model is wired (ADR 0016 #3).
+    if (this.kernel.memory === undefined) return;
+    if (state.productAction !== undefined) return;
+    const scopeKey = memoryScopeForSession(state.sessionScope);
+    if (scopeKey === null) return;
+    const preference = state.command.payload.modelPreference;
+    if (preference === undefined || replyText === undefined) return;
+    const snapshot: ExtractionSnapshot = {
+      turnId: state.command.requestId,
+      conversationId: state.conversationId,
+      scopeKey,
+      utterance: state.command.payload.utterance,
+      replyText,
+      providerId: preference.provider,
+      modelId: preference.model,
+      capturedAt: new Date().toISOString(),
+    };
+    void this.kernel.memory.queue.enqueue(snapshot)
+      .then(() => {
+        // Only schedule a drain when this process can actually extract.
+        if (this.extractionModel !== undefined) this.scheduleExtractionDrain();
+      })
+      .catch(() => undefined);
   }
 
   /** Wait for the constructor-started durable recovery without changing it. */
@@ -894,7 +982,8 @@ export class ProductKernelRuntime implements AgentRuntime {
         interruptEligible:
           command.payload.capabilityProfile === "conversation"
           && contractForOrdinaryTurn(command).successMode === "read_only_delivery"
-          && routeProductUtterance(command.payload.utterance, command.payload.contextFrame) === null,
+          && routeProductUtterance(command.payload.utterance, command.payload.contextFrame) === null
+          && classifyRelativeTimeReminder(command.payload.utterance) === null,
         generation: 1,
         effectsStarted: false,
         effectsBlocked: false,
@@ -998,6 +1087,11 @@ export class ProductKernelRuntime implements AgentRuntime {
       command.payload.contextFrame,
     );
     if (!route) {
+      const reminder = classifyRelativeTimeReminder(command.payload.utterance);
+      if (reminder?.kind === "question" || reminder?.kind === "incomplete") {
+        await this.completeSpokenProductReply(state, RELATIVE_TIME_REMINDER_CLARIFY_SPEECH);
+        return;
+      }
       await this.runInnerTurn(state);
       return;
     }
@@ -1149,8 +1243,10 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
 
       // Ordinary turns: small scoped MemoryClaim recall only. Private / failed
-      // retrieval never pretends a memory was used.
+      // retrieval never pretends a memory was used. The engine later prepends
+      // the cached block via assembleTurnMemory (ADR 0015 PR-2).
       const recalled = await this.recallForOrdinaryTurn(state);
+      state.recalledMemories = recalled;
       if (state.terminalKind) {
         await this.settleState(state);
         return;
@@ -1181,10 +1277,6 @@ export class ProductKernelRuntime implements AgentRuntime {
       const delegatedResults = await this.delegatedResultsForOrdinaryTurn(state);
       let commandForInner: TurnStartCommand = pageNoteCommandForInner(state.command);
       commandForInner = attachConversationHistory(commandForInner, conversationHistory);
-      commandForInner = attachRecalledMemories(
-        commandForInner,
-        recalled.map(toPromptMemorySnippet),
-      );
       commandForInner = attachBehaviorRules(commandForInner, behaviorRules);
       commandForInner = attachRecalledMind(commandForInner, mindLessons);
       commandForInner = attachDelegatedResults(commandForInner, delegatedResults);
@@ -1272,6 +1364,27 @@ export class ProductKernelRuntime implements AgentRuntime {
     await this.settleState(state);
   }
 
+  private async completeSpokenProductReply(state: TurnLedgerState, text: string): Promise<void> {
+    this.acceptRuntimeEvent(
+      state,
+      runtimeEvent("turn.started", state.command.requestId, state.traceId, {
+        capabilityProfile: state.command.payload.capabilityProfile,
+      }),
+    );
+    this.acceptRuntimeEvent(
+      state,
+      runtimeEvent("response.delta", state.command.requestId, state.traceId, { text }),
+    );
+    this.acceptRuntimeEvent(
+      state,
+      runtimeEvent("response.completed", state.command.requestId, state.traceId, {
+        text,
+        verified: true,
+      }),
+    );
+    await this.settleState(state);
+  }
+
   private async completePrivateProductActionBlock(state: TurnLedgerState): Promise<void> {
     const text = "这是私密会话：我不会读取或写入记忆，也不会把这轮加入历史。请切换到个人或项目会话后再保存。";
     this.acceptRuntimeEvent(
@@ -1310,6 +1423,9 @@ export class ProductKernelRuntime implements AgentRuntime {
     route: NonNullable<ReturnType<typeof routeProductUtterance>>,
   ): Promise<void> {
     const { command } = state;
+    // ADR 0016 #5: product-action turns never enqueue memory extraction —
+    // their ledger receipts are already the task truth.
+    state.productAction = route.action;
     const actionRoute = route.action === "finder_history_back"
       || route.action === "create_note"
       || route.action === "schedule_time_reminder"
@@ -1409,6 +1525,19 @@ export class ProductKernelRuntime implements AgentRuntime {
         return;
       }
 
+      // ADR 0015 #4: remember_how may have promoted a verified skill, which
+      // changes the L1 catalog. Retire cached harness sessions so the next
+      // turn cold-starts with the new system prefix. Applies even when the
+      // receipt later resolves to cancelled_after_commit — the promotion is
+      // durable either way.
+      if (
+        actionRoute.action === "remember_how"
+        && (receipt.output as { skill?: unknown } | undefined)?.skill
+      ) {
+        (this.inner as { invalidateSkillSessions?: () => void })
+          .invalidateSkillSessions?.();
+      }
+
       // Once an action has committed, a stop request must not pretend that
       // nothing happened.  Persist the safe action receipt first, then fail the
       // turn with a stable reconciliation code; never speak success.
@@ -1449,14 +1578,6 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
 
       if (
-        actionRoute.action === "remember_how"
-        && (receipt.output as { skill?: unknown } | undefined)?.skill
-      ) {
-        (this.inner as { invalidateSkillSessions?: () => void })
-          .invalidateSkillSessions?.();
-      }
-
-      if (
         actionRoute.action === "watch_app_return"
         && (receipt.status === "ok" || receipt.status === "verified")
       ) {
@@ -1466,7 +1587,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       const speech = formatProductActionSpeech(
         actionRoute.action,
         receipt.status,
-        receipt.output,
+        speechOutputForProductAction(actionRoute, receipt.output),
       );
       this.emitProductActionCompleted(state, receipt);
       this.acceptRuntimeEvent(
@@ -2015,7 +2136,8 @@ export class ProductKernelRuntime implements AgentRuntime {
       return;
     }
     if (COMPUTER_EFFECT_INTENT.test(command.payload.message)
-      || routeProductUtterance(command.payload.message, state.command.payload.contextFrame) !== null) {
+      || routeProductUtterance(command.payload.message, state.command.payload.contextFrame) !== null
+      || classifyRelativeTimeReminder(command.payload.message) !== null) {
       emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
         generation: state.generation,
         code: "effectful_steer",
@@ -2270,6 +2392,11 @@ export class ProductKernelRuntime implements AgentRuntime {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    if (this.extractionDrainTimer !== undefined) {
+      clearTimeout(this.extractionDrainTimer);
+      this.extractionDrainTimer = undefined;
+    }
+    this.kernel.memory?.queue.close?.();
     const deadline = Date.now() + RUNTIME_SHUTDOWN_TIMEOUT_MS;
     const runBeforeDeadline = async (
       operation: () => Promise<unknown>,
@@ -2570,6 +2697,9 @@ export class ProductKernelRuntime implements AgentRuntime {
       traceId: state.traceId,
       ...(text === undefined ? {} : { assistantOutput: text }),
     });
+    // ADR 0016 #3: fire-and-forget extraction enqueue after the durable
+    // terminal write; the turn has already settled for the user.
+    this.enqueueMemoryExtraction(state, text);
   }
 
   private async persistCancelled(state: TurnLedgerState, event: RuntimeEvent): Promise<void> {
@@ -3150,6 +3280,17 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
   }
 
+  private activeTurnForConversation(conversationId: string): TurnLedgerState | undefined {
+    const key = conversationId.toLowerCase();
+    let found: TurnLedgerState | undefined;
+    for (const state of this.activeTurns.values()) {
+      if (state.conversationId.toLowerCase() !== key) continue;
+      if (state.terminalKind) continue;
+      found = state;
+    }
+    return found;
+  }
+
   private emitMemoryUsed(
     state: TurnLedgerState,
     memories: readonly RecalledMemory[],
@@ -3257,6 +3398,18 @@ function contextWatchStateFromTask(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function speechOutputForProductAction(
+  route: { action: string; input: Record<string, unknown> },
+  output: unknown,
+): unknown {
+  if (route.action !== "schedule_time_reminder") return output;
+  if (!isRecord(output)) return output;
+  const clockLabel = typeof output.clockLabel === "string" && /^\d{2}:\d{2}$/.test(output.clockLabel)
+    ? output.clockLabel
+    : undefined;
+  return clockLabel === undefined ? output : { ...output, clockLabel };
 }
 
 function toPromptMemorySnippet(memory: RecalledMemory): PromptMemorySnippet {
@@ -3761,6 +3914,11 @@ function summarizeProductActionOutput(
       ? ["native_command", "unknown"]
       : ["ax_press", "unknown"];
     if (method && safeMethods.includes(method)) result.method = method;
+    if (actionName === "schedule_time_reminder"
+      && typeof value.clockLabel === "string"
+      && /^\d{2}:\d{2}$/.test(value.clockLabel)) {
+      result.clockLabel = value.clockLabel;
+    }
     return result;
   }
   return {};

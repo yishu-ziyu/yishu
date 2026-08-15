@@ -251,6 +251,7 @@ export const computerActionResultPayloadSchema = z.object({
   method: computerActionMethodSchema.optional(),
   receiptId: z.string().trim().min(1).max(160).optional(),
   attemptId: z.string().uuid().optional(),
+  clockLabel: z.string().regex(/^\d{2}:\d{2}$/).optional(),
 });
 
 export const pointerSampleSchema = z.object({

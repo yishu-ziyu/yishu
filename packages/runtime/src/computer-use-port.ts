@@ -39,6 +39,7 @@ export interface ComputerActionResult {
   method?: ComputerActionMethod;
   receiptId?: string;
   attemptId?: string;
+  clockLabel?: string;
 }
 
 export interface ComputerActionFailureDetails {
@@ -210,6 +211,7 @@ export class StdioComputerUsePort implements ComputerUsePort {
       ...(command.payload.method === undefined ? {} : { method: command.payload.method }),
       ...(command.payload.receiptId === undefined ? {} : { receiptId: command.payload.receiptId }),
       ...(command.payload.attemptId === undefined ? {} : { attemptId: command.payload.attemptId }),
+      ...(command.payload.clockLabel === undefined ? {} : { clockLabel: command.payload.clockLabel }),
     });
     return true;
   }

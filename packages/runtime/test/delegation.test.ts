@@ -558,6 +558,23 @@ test("delegate refuses private sessions and missing main turns", async (t) => {
   assert.equal((await kernel.store.listTasks()).length, 0);
 });
 
+test("delegate refuses relative-time reminders instead of running them as background work", async (t) => {
+  const harness = new FakeChildHarness();
+  const { coordinator, kernel } = makeCoordinator(harness);
+  t.after(async () => {
+    await coordinator.dispose();
+  });
+
+  coordinator.noteMainTurn("conv-main", makeMainTurn());
+  const tool = delegateToolFor(coordinator, "conv-main");
+  await assert.rejects(
+    tool.execute("tc", { task: "20分钟后提醒用户喝一口水( 约07:34)" }),
+    /product action/,
+  );
+  assert.equal(harness.calls.length, 0);
+  assert.equal((await kernel.store.listTasks()).length, 0);
+});
+
 test("an expired handoff capsule fails the child instead of executing it", async (t) => {
   const harness = new FakeChildHarness();
   const base = Date.now();
@@ -796,7 +813,7 @@ test("private turns never receive delegated results", async (t) => {
 // The Main session must receive delegate + computer_control; the delegated
 // child session must receive neither. The child command must satisfy the full
 // wire schema, inherit the Main model, and an unverified research answer must
-// not become done. The fake harness mirrors loop-adapter.test.ts.
+// not become done. The fake harness mirrors pi-runtime-adapter.test.ts.
 
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -813,12 +830,13 @@ type FakeSessionEvent = {
   assistantMessageEvent?: { type: string; delta?: string };
 };
 
-class FakeAgentSession {
+class FakeModelSession {
   private static nextId = 0;
-  readonly sessionId = `delegation-session-${++FakeAgentSession.nextId}`;
+  readonly sessionId = `delegation-session-${++FakeModelSession.nextId}`;
   readonly agent: { state: { errorMessage?: string } } = { state: {} };
   readonly promptStarted = deferred();
-  promptHandler: (session: FakeAgentSession) => Promise<void> = async () => {};
+  promptHandler: (session: FakeModelSession) => Promise<void> = async () => {};
+  private activeToolNames: string[] = [];
   private readonly abortGate = deferred();
   private aborted = false;
   private readonly listeners = new Set<(event: FakeSessionEvent) => void>();
@@ -830,6 +848,14 @@ class FakeAgentSession {
     };
   }
 
+  getActiveToolNames(): readonly string[] {
+    return this.activeToolNames;
+  }
+
+  setActiveToolsByName(names: readonly string[]): void {
+    this.activeToolNames = [...names];
+  }
+
   emitTextDelta(delta: string): void {
     for (const listener of [...this.listeners]) {
       listener({
@@ -839,9 +865,13 @@ class FakeAgentSession {
     }
   }
 
-  async prompt(): Promise<void> {
+  async prompt(
+    _text?: string,
+    options?: { preflightResult?: (accepted: boolean) => void },
+  ): Promise<void> {
     this.promptStarted.resolve();
-    // Real AgentSession.abort() settles an in-flight prompt; mirror that.
+    options?.preflightResult?.(true);
+    // Real ModelSession.abort() settles an in-flight prompt; mirror that.
     await Promise.race([this.promptHandler(this), this.abortGate.promise]);
   }
 
@@ -871,26 +901,37 @@ const unusedPort: ComputerUsePort = {
 
 test("at the real createSession boundary a safe conversation result completes and re-enters the next Main turn", async (t) => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
-  const sessions: FakeAgentSession[] = [];
+  const sessions: FakeModelSession[] = [];
   const sessionCalls: CapturedSessionCall[] = [];
   const gates = [deferred(), deferred()];
   const modelRuntime = {
     getProvider: (_providerId: string) => undefined,
-    registerProvider: (_providerId: string) => {},
-    getModel: (provider: string, modelId: string) => ({ provider, id: modelId }),
+    resolveModel: async (provider: string, modelId: string) => ({
+      providerId: provider,
+      id: modelId,
+      name: modelId,
+      api: "openai-completions",
+      baseUrl: "http://127.0.0.1:8787/v1",
+      input: ["text", "image"],
+      contextWindow: 128_000,
+      maxTokens: 8_192,
+    }),
   };
 
   const workdir = await mkdtemp(path.join(tmpdir(), "yishu-delegation-boundary-"));
   const adapter = new YishuLoopRuntimeAdapter(workdir, unusedPort, {
     modelRuntimePromise: Promise.resolve(modelRuntime as unknown as ModelProviderRuntime),
     createSession: (async (args: { customTools?: CapturedSessionCall["customTools"]; model?: unknown }) => {
-      const session = new FakeAgentSession();
+      const session = new FakeModelSession();
       const index = sessions.length;
       sessions.push(session);
       sessionCalls.push({
         customTools: args.customTools ?? [],
         model: args.model,
       });
+      session.setActiveToolsByName(
+        (args.customTools ?? []).map((tool) => tool.name).filter((name): name is string => name !== undefined),
+      );
       const gate = gates[index] ?? deferred();
       const tag = index === 0 ? "main" : "child";
       session.promptHandler = async (s) => {

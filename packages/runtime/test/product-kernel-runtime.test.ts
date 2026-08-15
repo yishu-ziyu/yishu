@@ -804,6 +804,7 @@ test("an explicit relative reminder schedules once, requires system read-back, a
         code: "verified_system_notification",
         method: "native_command",
         message: "System reminder was read back.",
+        clockLabel: "07:34",
       };
     },
     resolve: () => false,
@@ -818,7 +819,7 @@ test("an explicit relative reminder schedules once, requires system read-back, a
     async dispose() {},
   };
   const runtime = new ProductKernelRuntime(inner, kernel, port);
-  const body = "喝水";
+  const body = "喝一口水";
   const events: RuntimeEvent[] = [];
   await runtime.startTurn(makeCommand(`20分钟后提醒我${body}`), (event) => events.push(event));
 
@@ -831,10 +832,55 @@ test("an explicit relative reminder schedules once, requires system read-back, a
   assert.match(String(action.reminderId), /^[0-9a-f-]{36}$/i);
   const completed = events.find((event) => event.type === "response.completed");
   assert.equal(completed?.payload.verified, true);
-  assert.match(String(completed?.payload.text), /设好提醒/);
+  assert.equal(completed?.payload.text, "已经设好提醒，大约 07:34。");
+  assert.doesNotMatch(String(completed?.payload.text), /未独立核验|详情保留|执行结束/);
   const receipt = events.find((event) => event.type === "product.action.completed");
   assert.equal(receipt?.payload.status, "verified");
   assert.equal(JSON.stringify(receipt?.payload).includes(body), false);
+});
+
+test("reminder questions and incomplete lines never reach Pi or schedule", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const actions: unknown[] = [];
+  const port: ComputerUsePort = {
+    async perform(action) {
+      actions.push(action);
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_system_notification",
+        method: "native_command",
+        message: "System reminder was read back.",
+        clockLabel: "07:34",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  let innerStarts = 0;
+  const inner: AgentRuntime = {
+    async startTurn() { innerStarts += 1; },
+    async steerTurn() {},
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const runtime = new ProductKernelRuntime(inner, kernel, port);
+  for (const utterance of [
+    "能不能20分钟后提醒我喝水",
+    "20分钟后提醒我喝水呢",
+    "20分钟后提醒我喝水好不好",
+    "20分钟后提醒我",
+  ]) {
+    const events: RuntimeEvent[] = [];
+    await runtime.startTurn(makeCommand(utterance), (event) => events.push(event));
+    const completed = events.find((event) => event.type === "response.completed");
+    assert.equal(innerStarts, 0, utterance);
+    assert.equal(actions.length, 0, utterance);
+    assert.match(String(completed?.payload.text), /要设提醒/);
+    assert.doesNotMatch(String(completed?.payload.text), /product action|schedule_time_reminder|未独立核验/i);
+  }
 });
 
 test("cancelling after a reminder dispatch waits for its single receipt", async () => {
@@ -3342,7 +3388,7 @@ class CapturingRuntime implements AgentRuntime {
   async dispose(): Promise<void> {}
 }
 
-test("ordinary personal turn recalls related memory, emits memory.used, injects prompt", async () => {
+test("ordinary personal turn recalls related memory, emits memory.used, does not attach onto the command", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const now = "2026-08-08T12:00:00.000Z";
   const memory = await kernel.store.addMemory({
@@ -3377,9 +3423,8 @@ test("ordinary personal turn recalls related memory, emits memory.used, injects 
   const attached = capturing.lastCommand as TurnStartCommand & {
     payload: { __yishuRecalledMemories?: Array<{ id: string; claim: string }> };
   };
-  assert.equal(attached.payload.__yishuRecalledMemories?.length, 1);
-  assert.equal(attached.payload.__yishuRecalledMemories?.[0]?.id, memory.id);
-  // User-visible utterance is unchanged (ledger / history must not swallow memory block).
+  // PR-2: recall stays on the turn cache; the engine prepends the block.
+  assert.equal(attached.payload.__yishuRecalledMemories, undefined);
   assert.equal(attached.payload.utterance, "我希望你怎么回答？");
 });
 
