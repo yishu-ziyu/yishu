@@ -20,6 +20,8 @@ import {
   type ConversationTurn,
   type RecalledMemory,
   type TrailSourceFrame,
+  type ConversationArchiveFailureReason,
+  type ConversationOpenFailureReason,
   type SessionScope,
   type TaskExecutionContract,
   type YishuKernel,
@@ -298,6 +300,43 @@ interface ReplayRecord {
   readonly events: ConversationEvent[];
 }
 
+function wireHistoryOpenFailure(reason: ConversationOpenFailureReason): {
+  code: string;
+  message: string;
+} {
+  switch (reason) {
+    case "private":
+      return { code: "private_session_not_readable", message: "不保存的对话不会留下历史。" };
+    case "not_found":
+      return { code: "conversation_not_found", message: "找不到这段对话。" };
+    case "scope_mismatch":
+      return { code: "scope_mismatch", message: "这段对话不在当前范围。" };
+    case "archived":
+      return { code: "conversation_archived", message: "这段对话已删除，不能继续。" };
+  }
+}
+
+function wireHistoryArchiveFailure(reason: ConversationArchiveFailureReason): {
+  code: string;
+  message: string;
+} {
+  switch (reason) {
+    case "private":
+      return {
+        code: "private_session_not_deletable",
+        message: "不保存的对话不会留下历史，也无需删除。",
+      };
+    case "scope_not_supported":
+      return { code: "scope_not_supported", message: "只能删除「我的」历史对话。" };
+    case "not_found":
+      return { code: "conversation_not_found", message: "找不到这段对话。" };
+    case "scope_mismatch":
+      return { code: "scope_mismatch", message: "这段对话不在当前范围。" };
+    case "archive_failed":
+      return { code: "history_delete_failed", message: "删除失败，原对话仍保留。" };
+  }
+}
+
 /**
  * Product layer wrapper around the Pi AgentRuntime or its protocol test double.
  *
@@ -307,6 +346,10 @@ interface ReplayRecord {
  * are synchronous while store mutations are asynchronous.
  */
 export class ProductKernelRuntime implements AgentRuntime {
+  /**
+   * Transitional full kernel. History list/open/archive go through
+   * `kernel.conversations`; other domains still depend on the complete object.
+   */
   readonly kernel: YishuKernel;
   private readonly taskTrackers = new Map<string, RuntimeTaskProgressTracker>();
   private readonly suggestionTrackers = new Map<string, RuntimeSuggestionTracker>();
@@ -581,6 +624,7 @@ export class ProductKernelRuntime implements AgentRuntime {
   /**
    * Read-only history list for the product UI. Never includes raw events,
    * screenshots, or hidden reasoning — only compact visible rows.
+   * Product policy lives on kernel.conversations; this method maps wire in/out.
    */
   async listHistory(command: HistoryListCommand, emit: RuntimeEventSink): Promise<void> {
     if (this.disposed) {
@@ -592,7 +636,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
     try {
       const sessionScope = normalizeSessionScope(command.payload.sessionScope);
-      const items = await this.kernel.store.listConversations({
+      const items = await this.kernel.conversations.list({
         sessionScope,
         ...(command.payload.limit !== undefined ? { limit: command.payload.limit } : {}),
       });
@@ -620,6 +664,7 @@ export class ProductKernelRuntime implements AgentRuntime {
   /**
    * Validate and open one durable conversation for continue. Returns only
    * user-visible turn text so the client can restore local context cache.
+   * Product policy lives on kernel.conversations; this method maps wire in/out.
    */
   async openHistory(command: HistoryOpenCommand, emit: RuntimeEventSink): Promise<void> {
     if (this.disposed) {
@@ -631,66 +676,20 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
     try {
       const expectedScope = normalizeSessionScope(command.payload.sessionScope);
-      if (expectedScope.kind === "private") {
-        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
-          code: "private_session_not_readable",
-          message: "不保存的对话不会留下历史。",
-        }));
+      const result = await this.kernel.conversations.open({
+        conversationId: command.payload.conversationId,
+        expectedScope,
+      });
+      if (!result.ok) {
+        emit(runtimeEvent(
+          "history.failed",
+          command.requestId,
+          command.traceId,
+          wireHistoryOpenFailure(result.reason),
+        ));
         return;
       }
-      const conversation = await this.kernel.store.getConversation(
-        command.payload.conversationId,
-      );
-      if (!conversation) {
-        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
-          code: "conversation_not_found",
-          message: "找不到这段对话。",
-        }));
-        return;
-      }
-      if (!sessionScopesEqual(conversation.sessionScope, expectedScope)) {
-        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
-          code: "scope_mismatch",
-          message: "这段对话不在当前范围。",
-        }));
-        return;
-      }
-      if (conversation.status === "archived") {
-        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
-          code: "conversation_archived",
-          message: "这段对话已删除，不能继续。",
-        }));
-        return;
-      }
-      const turns = await this.kernel.store.listConversationTurns(conversation.id);
-      // Cap restored visible context so open history cannot dump an unbounded
-      // transcript into the client cache.
-      const visibleTurns = turns
-        .filter((turn) => {
-          const hasUser = turn.userInput !== undefined && turn.userInput.trim().length > 0;
-          const hasAssistant =
-            turn.assistantOutput !== undefined && turn.assistantOutput.trim().length > 0;
-          return hasUser || hasAssistant;
-        })
-        .slice(-20)
-        .map((turn) => ({
-          id: turn.id,
-          sequence: turn.sequence,
-          status: turn.status,
-          createdAt: turn.createdAt,
-          updatedAt: turn.updatedAt,
-          ...(turn.userInput !== undefined
-            ? { userInput: sanitizeVisibleText(turn.userInput, "conversation user input") }
-            : {}),
-          ...(turn.assistantOutput !== undefined
-            ? {
-                assistantOutput: sanitizeVisibleText(
-                  turn.assistantOutput,
-                  "conversation assistant output",
-                ),
-              }
-            : {}),
-        }));
+      const { conversation, turns } = result;
       emit(runtimeEvent(
         "history.opened",
         command.requestId,
@@ -704,7 +703,17 @@ export class ProductKernelRuntime implements AgentRuntime {
             sessionScope: conversation.sessionScope,
             ...(conversation.title !== undefined ? { title: conversation.title } : {}),
           },
-          turns: visibleTurns,
+          turns: turns.map((turn) => ({
+            id: turn.id,
+            sequence: turn.sequence,
+            status: turn.status,
+            createdAt: turn.createdAt,
+            updatedAt: turn.updatedAt,
+            ...(turn.userInput !== undefined ? { userInput: turn.userInput } : {}),
+            ...(turn.assistantOutput !== undefined
+              ? { assistantOutput: turn.assistantOutput }
+              : {}),
+          })),
         },
         conversation.id,
       ));
@@ -719,6 +728,7 @@ export class ProductKernelRuntime implements AgentRuntime {
   /**
    * Soft-delete one personal history row (status=archived). Emits only after
    * store confirms success so the UI can remove the row safely.
+   * Product policy lives on kernel.conversations; this method maps wire in/out.
    */
   async deleteHistory(command: HistoryDeleteCommand, emit: RuntimeEventSink): Promise<void> {
     if (this.disposed) {
@@ -730,46 +740,17 @@ export class ProductKernelRuntime implements AgentRuntime {
     }
     try {
       const expectedScope = normalizeSessionScope(command.payload.sessionScope);
-      if (expectedScope.kind === "private") {
-        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
-          code: "private_session_not_deletable",
-          message: "不保存的对话不会留下历史，也无需删除。",
-        }));
-        return;
-      }
-      // This product entry only deletes from "我的" (personal).
-      if (expectedScope.kind !== "personal") {
-        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
-          code: "scope_not_supported",
-          message: "只能删除「我的」历史对话。",
-        }));
-        return;
-      }
-      const existing = await this.kernel.store.getConversation(
-        command.payload.conversationId,
-      );
-      if (!existing) {
-        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
-          code: "conversation_not_found",
-          message: "找不到这段对话。",
-        }));
-        return;
-      }
-      if (!sessionScopesEqual(existing.sessionScope, expectedScope)) {
-        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
-          code: "scope_mismatch",
-          message: "这段对话不在当前范围。",
-        }));
-        return;
-      }
-      const archived = await this.kernel.store.archiveConversation(existing.id, {
+      const result = await this.kernel.conversations.archivePersonal({
+        conversationId: command.payload.conversationId,
         expectedScope,
       });
-      if (!archived || archived.status !== "archived") {
-        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
-          code: "history_delete_failed",
-          message: "删除失败，原对话仍保留。",
-        }));
+      if (!result.ok) {
+        emit(runtimeEvent(
+          "history.failed",
+          command.requestId,
+          command.traceId,
+          wireHistoryArchiveFailure(result.reason),
+        ));
         return;
       }
       emit(runtimeEvent(
@@ -777,12 +758,12 @@ export class ProductKernelRuntime implements AgentRuntime {
         command.requestId,
         command.traceId,
         {
-          conversationId: archived.id,
-          status: archived.status,
-          sessionScope: archived.sessionScope,
-          alreadyArchived: existing.status === "archived",
+          conversationId: result.conversationId,
+          status: result.status,
+          sessionScope: result.sessionScope,
+          alreadyArchived: result.alreadyArchived,
         },
-        archived.id,
+        result.conversationId,
       ));
     } catch {
       emit(runtimeEvent("history.failed", command.requestId, command.traceId, {

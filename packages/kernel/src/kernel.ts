@@ -2,6 +2,10 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { YishuActionRegistry } from "./action/registry.js";
 import type { AnyYishuAction } from "./action/types.js";
+import {
+  createConversationLedger,
+  type ConversationLedger,
+} from "./conversation/ledger.js";
 import { ContextTrail } from "./context/trail.js";
 import type { ContextTrailOptions } from "./context/trail.js";
 import {
@@ -64,7 +68,14 @@ export interface CreateYishuKernelOptions {
 
 export interface YishuKernel {
   registry: YishuActionRegistry;
+  /**
+   * Transitional full store. History list/open/archive already go through
+   * `conversations`. Remaining runtime callers (PKR turn/memory/watch paths,
+   * delegation.ts store + YishuStorePort, suggestion-loop via registry) still
+   * use this until later PRs migrate them onto narrow ports.
+   */
   store: YishuStorePort;
+  conversations: ConversationLedger;
   trail: ContextTrail;
   taskTruth: TaskTruthProjector;
   storeBackend: YishuStoreBackend;
@@ -131,6 +142,7 @@ export function createYishuKernel(
   const memory = buildMemoryLayer(options, resolved);
   const trail = new ContextTrail(options.trail);
   const taskTruth = new TaskTruthProjector(store);
+  const conversations = createConversationLedger(store);
   const registry = new YishuActionRegistry();
 
   const defaults: AnyYishuAction[] = [
@@ -160,6 +172,7 @@ export function createYishuKernel(
   return {
     registry,
     store,
+    conversations,
     trail,
     taskTruth,
     storeBackend: backend,
