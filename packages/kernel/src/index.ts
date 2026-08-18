@@ -20,6 +20,16 @@ export type {
   YishuMemoryLayer,
   YishuStoreBackend,
 } from "./kernel.js";
+export { createConversationLedger } from "./conversation/ledger.js";
+export type {
+  ConversationArchiveFailureReason,
+  ConversationArchiveResult,
+  ConversationLedger,
+  ConversationOpenFailureReason,
+  ConversationOpenResult,
+  VisibleConversation,
+  VisibleConversationTurn,
+} from "./conversation/ledger.js";
 export {
   routeProductUtterance,
   formatProductActionSpeech,
