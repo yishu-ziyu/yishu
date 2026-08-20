@@ -163,7 +163,8 @@ enum YishuDirectClickResolver {
             "帮我点击", "替我点击", "给我点击", "请你点一下", "请你点击", "现在点击", "请点击", "去点击",
             "左上角", "右上角", "左下角", "右下角",
             "左边", "右边", "左侧", "右侧", "上方", "上面", "下方", "下面", "顶部", "底部",
-            "屏幕上", "屏幕里", "当前页面", "当前窗口",
+            "屏幕上", "屏幕里", "屏幕当中", "屏幕中间", "屏幕中",
+            "当前页面", "当前窗口",
             "帮我点", "替我点", "给我点", "请点", "去点",
             "点一下", "按一下", "点击", "点开", "点选", "按下", "选中",
             "这个", "那个", "这里", "那里", "按钮", "图标", "选项", "一下",
@@ -185,6 +186,50 @@ enum YishuDirectClickResolver {
         guard let target = targetPhrase(from: utterance) else { return nil }
         let region = recognitionRegion(for: utterance)
         return "\(target)|\(region.origin.x)|\(region.origin.y)|\(region.width)|\(region.height)"
+    }
+
+    /// Named applications are resolved from running / installed apps, not OCR.
+    /// Dock icons often have no readable glyphs, so a vision-model fallback
+    /// just waits and fails.
+    static func matchingRunningApplication(for utterance: String) -> NSRunningApplication? {
+        guard let target = targetPhrase(from: utterance) else { return nil }
+        return NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .first { applicationNameMatches(target: target, names: applicationNames(for: $0)) }
+    }
+
+    static func launchableApplicationURL(for utterance: String) -> URL? {
+        guard let target = targetPhrase(from: utterance) else { return nil }
+        let domains: [FileManager.SearchPathDomainMask] = [.localDomainMask, .userDomainMask]
+        for domain in domains {
+            guard let directory = FileManager.default.urls(for: .applicationDirectory, in: domain).first,
+                  let contents = try? FileManager.default.contentsOfDirectory(
+                    at: directory,
+                    includingPropertiesForKeys: nil
+                  ) else {
+                continue
+            }
+            for url in contents where url.pathExtension == "app" {
+                if applicationNameMatches(target: target, names: applicationNames(at: url)) {
+                    return url
+                }
+            }
+        }
+        return nil
+    }
+
+    static func applicationNameMatches(target: String, names: [String]) -> Bool {
+        let needle = normalizedText(target)
+        guard needle.count >= 2 else { return false }
+        for name in names {
+            let candidate = normalizedText(name)
+            guard candidate.count >= 2 else { continue }
+            if candidate == needle { return true }
+            if candidate.contains(needle) || needle.contains(candidate) {
+                return true
+            }
+        }
+        return false
     }
 
     static func resolve(
@@ -364,6 +409,79 @@ enum YishuDirectClickResolver {
         let y: CGFloat = isTop ? 0.45 : 0
         let height: CGFloat = isTop || isBottom ? 0.55 : 1
         return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    private static func applicationNames(for application: NSRunningApplication) -> [String] {
+        var names: [String] = []
+        if let localizedName = application.localizedName {
+            names.append(localizedName)
+        }
+        if let bundleURL = application.bundleURL {
+            names.append(contentsOf: applicationNames(at: bundleURL))
+        }
+        if let bundleIdentifier = application.bundleIdentifier,
+           let last = bundleIdentifier.split(separator: ".").last {
+            names.append(String(last))
+        }
+        return names
+    }
+
+    /// Current-locale Info.plist plus every `.lproj/InfoPlist.strings` display name.
+    /// `Bundle.object(forInfoDictionaryKey:)` only returns the active language,
+    /// so an English system would miss 微信 inside WeChat.app without this harvest.
+    static func applicationNames(at bundleURL: URL) -> [String] {
+        var names = [bundleURL.deletingPathExtension().lastPathComponent]
+        if let bundle = Bundle(url: bundleURL) {
+            for key in ["CFBundleDisplayName", "CFBundleName"] {
+                if let value = bundle.object(forInfoDictionaryKey: key) as? String {
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        names.append(trimmed)
+                    }
+                }
+            }
+        }
+        names.append(contentsOf: localizedInfoPlistNames(at: bundleURL))
+        return names
+    }
+
+    static func localizedInfoPlistNames(at bundleURL: URL) -> [String] {
+        let roots = [
+            bundleURL.appendingPathComponent("Contents/Resources", isDirectory: true),
+            bundleURL,
+        ]
+        let keys = ["CFBundleDisplayName", "CFBundleName"]
+        var names: [String] = []
+        for root in roots {
+            guard let entries = try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+            for lproj in entries where lproj.pathExtension == "lproj" {
+                let stringsURL = lproj.appendingPathComponent("InfoPlist.strings")
+                guard let data = try? Data(contentsOf: stringsURL),
+                      let plist = try? PropertyListSerialization.propertyList(
+                        from: data,
+                        options: [],
+                        format: nil
+                      ),
+                      let dict = plist as? [String: Any] else {
+                    continue
+                }
+                for key in keys {
+                    if let value = dict[key] as? String {
+                        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            names.append(trimmed)
+                        }
+                    }
+                }
+            }
+        }
+        return names
     }
 
     private static func normalizedText(_ text: String) -> String {

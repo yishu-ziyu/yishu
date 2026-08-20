@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   AssistantOutputGenerationProjector,
   AssistantOutputStreamProjector,
+  attachObservationalPointDirective,
   isDirectComputerActionUtterance,
   projectAssistantOutput,
 } from "../src/assistant-output.js";
@@ -163,18 +164,55 @@ test("explanation and question utterances never enable direct-click max-once", (
   assert.equal(isDirectComputerActionUtterance("点击 新对话"), true);
 });
 
-test("direct click replay turns a legacy POINT response into an action instead of asking the user to click", () => {
-  const projector = new AssistantOutputStreamProjector();
-  projector.push("我已经指向左上角的新对话了，你自己点一下吧。[POINT:52,78:新对话]", true);
+test("observational POINT is stripped from visible text and kept as pointing, not only as a click", () => {
+  const projection = projectAssistantOutput(
+    "日期在屏幕最顶上那条菜单栏。[POINT:1180,18:日期]",
+  );
 
-  const completed = projector.complete();
+  assert.equal(projection.visibleText, "日期在屏幕最顶上那条菜单栏。");
+  assert.deepEqual(projection.pointing, { x: 1180, y: 18, label: "日期" });
+  assert.deepEqual(projection.computerActions, []);
 
-  assert.deepEqual(completed.computerActions, [{
-    action: "left_click",
+  const spaced = projectAssistantOutput("日期在这儿。[POINT: 1180, 18:日期]");
+  assert.deepEqual(spaced.pointing, { x: 1180, y: 18, label: "日期" });
+});
+
+test("a completed POINT tag in the middle does not drop the rest of the sentence", () => {
+  const projection = projectAssistantOutput("前句。[POINT:10,20:时钟] 后句。");
+
+  assert.equal(projection.visibleText, "前句。 后句。");
+  assert.deepEqual(projection.pointing, { x: 10, y: 20, label: "时钟" });
+});
+
+test("POINT:none is not an observational target", () => {
+  const projection = projectAssistantOutput("这是常识。[POINT:none]");
+
+  assert.equal(projection.visibleText, "这是常识。");
+  assert.equal(projection.pointing, undefined);
+  assert.deepEqual(projection.computerActions, []);
+});
+
+test("attachObservationalPointDirective puts a Clicky-parseable tag on completion text", () => {
+  assert.equal(
+    attachObservationalPointDirective("日期在菜单栏。", { x: 1180.4, y: 18.6, label: "日期" }),
+    "日期在菜单栏。\n[POINT:1180.4,18.6:日期]",
+  );
+  assert.equal(
+    attachObservationalPointDirective("日期在菜单栏。", undefined),
+    "日期在菜单栏。",
+  );
+});
+
+test("a you-click-it POINT sentence stays observational pointing, not a computer action", () => {
+  const projection = projectAssistantOutput(
+    "我已经指向左上角的新对话了，你自己点一下吧。[POINT:52,78:新对话]",
+  );
+
+  assert.deepEqual(projection.pointing, {
     x: 52,
     y: 78,
     label: "新对话",
-  }]);
-  const presentedText = completed.computerActions.length > 0 ? "点好了。" : completed.visibleText;
-  assert.doesNotMatch(presentedText, /POINT|指向|自己点/);
+  });
+  assert.deepEqual(projection.computerActions, []);
+  assert.equal(projection.visibleText, "我已经指向左上角的新对话了，你自己点一下吧。");
 });

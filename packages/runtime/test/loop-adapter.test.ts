@@ -21,6 +21,7 @@ import { attachConversationHistory } from "../src/context-prompt.js";
 import {
   computerActionRequestedPayloadSchema,
   LOCAL_GROK_BASE_URL,
+  LOCAL_GROK_DEFAULT_MODEL,
   LOCAL_GROK_PROVIDER,
   PROTOCOL_VERSION,
   type ComputerActionMethod,
@@ -30,6 +31,7 @@ import {
   type TurnStartCommand,
 } from "../src/protocol.js";
 import { makeTurnStartCommand } from "./fixtures.js";
+import { FIRST_BYTE_TIMEOUT_MESSAGE } from "../src/model-loop/model-session.js";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -333,6 +335,85 @@ function eventTypes(events: readonly RuntimeEvent[]): string[] {
   return events.map((event) => event.type);
 }
 
+test("direct-click POINT still dispatches one left_click instead of flying", async (t) => {
+  const harness = createFakePiHarness();
+  const events: RuntimeEvent[] = [];
+  const requested = deferred<RuntimeEvent>();
+  const sink = (event: RuntimeEvent): void => {
+    events.push(event);
+    if (event.type === "computer.action.requested") requested.resolve(event);
+  };
+  const port = new StdioComputerUsePort(sink, 30_000);
+  const { adapter, workdir } = await makeAdapter(harness, port);
+  cleanupAfter(t, adapter, workdir);
+
+  harness.configureSession = (session) => {
+    session.promptHandler = async (s) => {
+      s.emitTextDelta("我点那个。[POINT:52,78:保存]");
+    };
+  };
+
+  const command = makeCommand("点击保存按钮");
+  const turn = adapter.startTurn(command, sink);
+  const requestEvent = await requested.promise;
+  const payload = computerActionRequestedPayloadSchema.parse(requestEvent.payload);
+  assert.equal(payload.action, "left_click");
+  if (payload.action === "left_click") {
+    assert.equal(payload.x, 52);
+    assert.equal(payload.y, 78);
+  }
+  assert.equal(port.resolve({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "computer.action.result",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      actionId: payload.actionId,
+      ...(payload.attemptId === undefined ? {} : { attemptId: payload.attemptId }),
+      succeeded: true,
+      verified: true,
+      status: "verified",
+      code: "verified_accessibility",
+      method: "ax_press",
+      message: "AXPress succeeded.",
+    },
+  }), true);
+  await turn;
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed?.payload.text, "点好了。");
+  assert.doesNotMatch(String(completed?.payload.text), /POINT/);
+});
+
+test("observational POINT stays off the stream and lands on completion so Clicky can fly", async (t) => {
+  const harness = createFakePiHarness();
+  harness.configureSession = (session) => {
+    session.promptHandler = async (s) => {
+      s.emitTextDelta("日期在屏幕最顶上那条菜单栏。");
+      s.emitTextDelta("[POINT:1180,18:日期]");
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(makeCommand("日期在哪"), (event) => events.push(event));
+
+  const deltaText = events
+    .filter((event) => event.type === "response.delta")
+    .map((event) => String(event.payload.text))
+    .join("");
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.ok(completed);
+  assert.equal(deltaText, "日期在屏幕最顶上那条菜单栏。");
+  assert.equal(
+    completed.payload.text,
+    "日期在屏幕最顶上那条菜单栏。\n[POINT:1180,18:日期]",
+  );
+  assert.equal(completed.payload.verifier, "conversation-response-only");
+  assert.equal(events.some((event) => event.type === "computer.action.requested"), false);
+});
+
 test("startTurn prompts with grounded text and streams deltas to completion", async (t) => {
   const harness = createFakePiHarness();
   harness.configureSession = (session) => {
@@ -363,6 +444,7 @@ test("startTurn prompts with grounded text and streams deltas to completion", as
     type: "image",
     data: "c2NyZWVu",
     mimeType: "image/jpeg",
+    label: "cursor display (image dimensions: 1280x800 pixels)",
   });
 
   const started = events.find((event) => event.type === "turn.started");
@@ -371,7 +453,7 @@ test("startTurn prompts with grounded text and streams deltas to completion", as
   assert.equal(started.payload.capabilityProfile, "conversation");
   assert.equal(started.payload.sessionId, session.sessionId);
   assert.equal(started.payload.provider, LOCAL_GROK_PROVIDER);
-  assert.equal(started.payload.model, "grok-4.5");
+  assert.equal(started.payload.model, LOCAL_GROK_DEFAULT_MODEL);
   assert.equal(started.payload.baseUrl, LOCAL_GROK_BASE_URL);
 
   const deltaText = events
@@ -1031,6 +1113,25 @@ test("an effect already admitted makes the competing interruption reject", async
   releaseTurn.resolve();
   await effect;
   await turn;
+});
+
+test("a first-byte timeout fails the turn as first_byte_timeout", async (t) => {
+  const harness = createFakePiHarness();
+  harness.configureSession = (session) => {
+    session.promptHandler = async () => {
+      throw new Error(FIRST_BYTE_TIMEOUT_MESSAGE);
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(makeCommand(), (event) => events.push(event));
+
+  assert.deepEqual(eventTypes(events), ["turn.started", "turn.failed"]);
+  const failed = events.at(-1)!;
+  assert.equal(failed.payload.code, "first_byte_timeout");
+  assert.equal(failed.payload.message, FIRST_BYTE_TIMEOUT_MESSAGE);
 });
 
 test("prompt rejection fails the turn with a credential-safe message", async (t) => {

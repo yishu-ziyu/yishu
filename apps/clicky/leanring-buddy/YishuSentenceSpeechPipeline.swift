@@ -359,8 +359,17 @@ enum YishuSentenceSpeechPolicy {
         // utterance mentions a plausible desktop effect; the typed Runtime
         // event remains the final guard if a novel action verb slips through.
         let desktopEffect = #"(?:点击|点开|点选|点一下|按下|输入|填写|填入|键入|写入|打开|关闭|滚动|拖动|删除|移除|发送|提交|保存|选择|选中|切换|返回|后退|\b(?:click|press|tap|type|fill|open|close|scroll|drag|delete|remove|send|submit|save|select|switch|go\s+back)\b)"#
-        return text.range(
+        if text.range(
             of: desktopEffect,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return false
+        }
+        // Locate questions need the orb airborne before TTS. Streaming the
+        // first sentence would talk while the companion is still on the cursor.
+        let observationalLocate = #"(?:在哪|在哪儿|哪里|哪儿|在什么地方|where(?:\s+is)?|指一下|指给我看|找一下)"#
+        return text.range(
+            of: observationalLocate,
             options: [.regularExpression, .caseInsensitive]
         ) == nil
     }

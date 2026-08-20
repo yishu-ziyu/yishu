@@ -111,6 +111,15 @@ export type TurnStartWithDelegatedResults = TurnStartCommand & {
   };
 };
 
+/** Clicky-style caption glued to each JPEG so POINT coords match the image pixels. */
+export function screenshotDimensionCaption(screenshot: {
+  label: string;
+  screenshotWidthPixels: number;
+  screenshotHeightPixels: number;
+}): string {
+  return `${screenshot.label} (image dimensions: ${screenshot.screenshotWidthPixels}x${screenshot.screenshotHeightPixels} pixels)`;
+}
+
 function contextWithoutImageBytes(contextFrame: ContextFrame): Record<string, unknown> {
   return {
     schemaVersion: contextFrame.schemaVersion,

@@ -120,7 +120,7 @@ test("a silent model stream fails instead of hanging past the first-byte deadlin
     assert.match(String(error), /timed out waiting for the first byte/);
     return true;
   });
-  assert.ok(Date.now() - startedAt < 1_000, "first-byte timeout must not wait the production 60s");
+  assert.ok(Date.now() - startedAt < 1_000, "first-byte timeout must not wait the production 20s");
   assert.equal(session.agent.state.errorMessage, "Model stream timed out waiting for the first byte.");
 });
 

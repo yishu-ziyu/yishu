@@ -493,6 +493,32 @@ struct YishuBargeInTests {
         #expect(client.pendingTurnCountForTests == 0)
     }
 
+    @Test @MainActor func firstByteTimeoutFailsTheTurnAsTimedOut() async {
+        let client = YishuAgentRuntimeClient()
+        let requestID = UUID()
+        let traceID = UUID()
+        let parked = client.parkTurnForTests(requestId: requestID, traceId: traceID)
+        client.dispatchRuntimeEventForTests(event(
+            "turn.failed",
+            requestID: requestID,
+            traceID: traceID,
+            payload: ["generation": 1, "code": "first_byte_timeout"]
+        ))
+
+        var timedOut = false
+        do {
+            for try await _ in parked.turn.events {}
+        } catch let error as YishuAgentRuntimeClientError {
+            if case .turnTimedOut = error {
+                timedOut = true
+            }
+        } catch {
+            Issue.record("Unexpected first-byte mapping error: \(error)")
+        }
+        #expect(timedOut)
+        #expect(client.pendingTurnCountForTests == 0)
+    }
+
     @Test @MainActor func authorizationFenceBlocksEveryIrreversibleCommitSeam() {
         var commitCount = 0
         for _ in 0..<3 {

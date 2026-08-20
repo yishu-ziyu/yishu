@@ -6,9 +6,18 @@ export interface LegacyComputerAction {
   label?: string;
 }
 
+/** Observational orb target extracted from a [POINT:x,y:label] tag. Not a click. */
+export interface ObservationalPointing {
+  x: number;
+  y: number;
+  screen?: number;
+  label?: string;
+}
+
 export interface AssistantOutputProjection {
   visibleText: string;
   computerActions: LegacyComputerAction[];
+  pointing?: ObservationalPointing;
 }
 
 export interface AssistantOutputGenerationCompletion extends AssistantOutputProjection {
@@ -27,7 +36,11 @@ const namedParameterBlockPattern = /<\s*parameter\b(?=[^>]*\bname\s*=)[^>]*>[\s\
 const orphanToolTagPattern = /<\/?\s*(?:computer[ _-]?control|computer[ _-]?action|tool[ _-]?call|function[ _-]?call|tool|function)(?:\s*=|\b)[^>]*>/gi;
 const bracketToolDirectivePattern = /\[\s*(?:tool[ _-]?call|computer[ _-]?control|function[ _-]?call)\b[^\]]*\][\s\S]*$/gi;
 const fencedBlockPattern = /```[^\n]*\n?[\s\S]*?```/g;
-const pointDirectivePattern = /\[POINT:\s*(?:none|(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$/gi;
+const POINT_TAG_SOURCE = String.raw`\[POINT:\s*(?:none|(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]`;
+
+function pointTagPattern(): RegExp {
+  return new RegExp(POINT_TAG_SOURCE, "gi");
+}
 const directActionTriggerPattern = /(?:点击|点开|点选|点一下|点(?:这个|那个)|按一下|按下|选中|\b(?:click|press|tap)\b)/gi;
 const directActionTriggerSearchPattern = new RegExp(directActionTriggerPattern.source, "i");
 const sequenceConnectorPattern = /(?:然后|再|接着|之后|随后|并且|并|且|and then|after that|\band\b|then|next)/i;
@@ -62,7 +75,7 @@ function parseComputerAction(block: string): LegacyComputerAction | undefined {
   };
 }
 
-function parsePointAction(match: RegExpMatchArray): LegacyComputerAction | undefined {
+function parsePointing(match: RegExpMatchArray): ObservationalPointing | undefined {
   const x = Number(match[1]);
   const y = Number(match[2]);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return undefined;
@@ -72,12 +85,37 @@ function parsePointAction(match: RegExpMatchArray): LegacyComputerAction | undef
 
   const label = match[3]?.trim();
   return {
-    action: "left_click",
     x,
     y,
     ...(screen === undefined ? {} : { screen }),
     ...(label === undefined || label.length === 0 ? {} : { label }),
   };
+}
+
+function lastPointingFrom(rawText: string): ObservationalPointing | undefined {
+  const matches = [...rawText.matchAll(pointTagPattern())];
+  for (let index = matches.length - 1; index >= 0; index -= 1) {
+    const pointing = parsePointing(matches[index]!);
+    if (pointing) return pointing;
+  }
+  return undefined;
+}
+
+export function formatPointTag(pointing: ObservationalPointing): string {
+  const label = (pointing.label?.trim() || "这里").replace(/[:\]]/g, "");
+  const screen = pointing.screen === undefined ? "" : `:screen${pointing.screen}`;
+  return `[POINT:${pointing.x},${pointing.y}:${label}${screen}]`;
+}
+
+/** Re-attach observational POINT so Clicky can fly the orb. Streaming stays stripped. */
+export function attachObservationalPointDirective(
+  visibleText: string,
+  pointing: ObservationalPointing | undefined,
+): string {
+  if (pointing === undefined) return visibleText;
+  const body = visibleText.replace(pointTagPattern(), "").trimEnd();
+  const tag = formatPointTag(pointing);
+  return body.length === 0 ? tag : `${body}\n${tag}`;
 }
 
 function cleanVisibleText(rawText: string): string {
@@ -91,7 +129,7 @@ function cleanVisibleText(rawText: string): string {
     .replace(computerControlBlockPattern, "")
     .replace(bracketToolDirectivePattern, "")
     .replace(orphanToolTagPattern, "");
-  const withoutPointDirective = withoutComputerControl.replace(pointDirectivePattern, "");
+  const withoutPointDirective = withoutComputerControl.replace(pointTagPattern(), "");
   return withoutPointDirective
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -121,7 +159,9 @@ function incompleteHiddenBlockStart(rawText: string): number | undefined {
   }
 
   const pointStart = lowercased.lastIndexOf("[point:");
-  if (pointStart >= 0) candidates.push(pointStart);
+  if (pointStart >= 0 && lowercased.indexOf("]", pointStart) < 0) {
+    candidates.push(pointStart);
+  }
   for (const marker of ["[tool_call", "[tool-call", "[computer_control", "[function_call"]) {
     const markerStart = lowercased.lastIndexOf(marker);
     if (markerStart >= 0) candidates.push(markerStart);
@@ -177,10 +217,7 @@ export function projectAssistantOutput(rawText: string): AssistantOutputProjecti
     const action = parseComputerAction(match[0]);
     if (action) computerActions.push(action);
   }
-  for (const match of rawText.matchAll(pointDirectivePattern)) {
-    const action = parsePointAction(match);
-    if (action) computerActions.push(action);
-  }
+  const pointing = lastPointingFrom(rawText);
 
   const hiddenSuffixStart = incompleteHiddenBlockStart(rawText);
   const presentationRawText = hiddenSuffixStart === undefined
@@ -189,6 +226,7 @@ export function projectAssistantOutput(rawText: string): AssistantOutputProjecti
   return {
     visibleText: cleanVisibleText(presentationRawText),
     computerActions,
+    ...(pointing === undefined ? {} : { pointing }),
   };
 }
 
@@ -316,6 +354,7 @@ export class AssistantOutputGenerationProjector {
       visibleDelta: completed?.visibleDelta ?? "",
       rawText: completed?.rawText ?? "",
       stale: false,
+      ...(completed?.pointing === undefined ? {} : { pointing: completed.pointing }),
     };
   }
 }

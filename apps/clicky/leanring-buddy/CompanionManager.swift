@@ -2480,6 +2480,20 @@ final class CompanionManager: ObservableObject {
                 clearMemorySourceNotice()
                 responseOverlayManager.hideOverlay()
             } catch {
+                let failureReason: String
+                if let runtimeError = error as? YishuAgentRuntimeClientError {
+                    switch runtimeError {
+                    case .turnTimedOut:
+                        failureReason = "turn_timed_out"
+                    case .turnFailed:
+                        failureReason = "turn_failed"
+                    default:
+                        failureReason = "runtime_error"
+                    }
+                } else {
+                    failureReason = "unknown"
+                }
+                timing.mark("runtime_failed", reason: failureReason)
                 if freshStartAfterRejectedSteerIfNeeded(error, turnToken: turnToken) {
                     return
                 }
@@ -2573,7 +2587,7 @@ final class CompanionManager: ObservableObject {
                 case .surfaceFailure:
                     break
                 }
-                await presentRuntimeFailure(turnToken: turnToken)
+                await presentRuntimeFailure(turnToken: turnToken, error: error)
             }
 
         }
@@ -2896,6 +2910,25 @@ final class CompanionManager: ObservableObject {
             return .miss(.cancelled)
         }
 
+        if let runningApplication = YishuDirectClickResolver.matchingRunningApplication(for: transcript) {
+            return await performNamedApplicationClick(
+                running: runningApplication,
+                applicationURL: nil,
+                transcript: transcript,
+                timing: timing,
+                turnToken: turnToken
+            )
+        }
+        if let applicationURL = YishuDirectClickResolver.launchableApplicationURL(for: transcript) {
+            return await performNamedApplicationClick(
+                running: nil,
+                applicationURL: applicationURL,
+                transcript: transcript,
+                timing: timing,
+                turnToken: turnToken
+            )
+        }
+
         let prewarmedCache = consumeValidDirectClickPrewarm(
             transcript: transcript,
             traceID: traceID
@@ -3024,6 +3057,91 @@ final class CompanionManager: ObservableObject {
             // The click already happened. A presentation failure must not send
             // the same action through the slower model path a second time.
         }
+        return .handled(result)
+    }
+
+    /// Clicking a named app (微信 / WeChat) is an activate/open, not OCR+Grok.
+    private func performNamedApplicationClick(
+        running: NSRunningApplication?,
+        applicationURL: URL?,
+        transcript: String,
+        timing: VoiceTurnTiming,
+        turnToken: UUID
+    ) async -> DirectClickFastPathOutcome {
+        guard ownsVoiceTurn(turnToken) else { return .miss(.cancelled) }
+        timing.mark("app_resolve", reason: "name_match")
+        activeTurnConsumedComputerAction = true
+        activeTurnEffectInFlight = true
+        timing.mark("action_dispatch", reason: "app_name_match")
+
+        let activated: NSRunningApplication?
+        if let running {
+            running.unhide()
+            running.activate(options: [.activateIgnoringOtherApps])
+            activated = running
+        } else if let applicationURL {
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            do {
+                activated = try await NSWorkspace.shared.openApplication(
+                    at: applicationURL,
+                    configuration: configuration
+                )
+            } catch {
+                activated = nil
+            }
+        } else {
+            activated = nil
+        }
+
+        guard ownsVoiceTurn(turnToken) else { return .miss(.cancelled) }
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let verified = activated != nil
+            && frontmost?.processIdentifier == activated?.processIdentifier
+        let succeeded = activated != nil
+        let result = YishuComputerActionResult(
+            succeeded: succeeded,
+            verified: verified,
+            message: succeeded ? "Activated named application." : "Named application was not activated.",
+            evidence: "method=native_command;route=app_name",
+            status: verified ? .verified : (succeeded ? .delivered : .failed),
+            method: .nativeCommand,
+            code: verified ? .verifiedAccessibility : (succeeded ? .axPressUnverified : .runtimeError)
+        )
+        activeTurnEffectInFlight = false
+        activeTurnLastComputerActionResult = result
+        activeTurnLastComputerActionName = "left_click"
+        timing.mark(
+            "actuator_readback",
+            reason: result.code.rawValue,
+            receiptID: result.receiptId
+        )
+        Self.logComputerActionTelemetry(
+            route: "app_name",
+            request: YishuComputerActionRequest(
+                requestId: UUID(),
+                traceId: UUID(),
+                actionId: UUID(),
+                action: "left_click",
+                x: 0,
+                y: 0
+            ),
+            result: result,
+            sourceCapture: nil
+        )
+        let confirmation = Self.directActionConfirmation(for: result, action: "left_click")
+        guard ownsVoiceTurn(turnToken) else { return .handled(result) }
+        do {
+            try await presentVoiceResponse(
+                confirmation,
+                transcript: transcript,
+                screenCaptures: [],
+                timing: timing,
+                turnToken: turnToken
+            )
+        } catch is CancellationError {
+            responseOverlayManager.hideOverlay()
+        } catch {}
         return .handled(result)
     }
 
@@ -3321,6 +3439,15 @@ final class CompanionManager: ObservableObject {
             clearMemorySourceNotice()
             throw YishuAgentRuntimeClientError.turnFailed
         }
+        let pointingParse = Self.parsePointingCoordinates(from: finalText)
+        let spokenOverlayText = pointingParse.spokenText
+        if !isDirectClickTurn, presentationTranscript == transcript {
+            beginObservationalPointing(
+                from: pointingParse,
+                screenCaptures: screenCaptures,
+                isDirectClickTurn: isDirectClickTurn
+            )
+        }
         // Only keep a source line when this turn actually used memory.
         if usedMemories.isEmpty {
             clearMemorySourceNotice()
@@ -3328,7 +3455,7 @@ final class CompanionManager: ObservableObject {
             applyMemorySourceNotice(Self.formatMemorySourceNotice(usedMemories))
         }
         if !isDirectClickTurn {
-            responseOverlayManager.updateStreamingText(finalText)
+            responseOverlayManager.updateStreamingText(spokenOverlayText)
         }
         turnVisualPhase = .shapingOutput
         var speechAlreadyPresented = false
@@ -3340,7 +3467,7 @@ final class CompanionManager: ObservableObject {
                 timing?.mark("tts_start", reason: "final_sentence")
             }
             speechAlreadyPresented = await sentenceSpeechPipeline.finish(
-                authoritativeText: finalText
+                authoritativeText: spokenOverlayText
             )
             if activeSentenceSpeechPipeline === sentenceSpeechPipeline {
                 activeSentenceSpeechPipeline = nil
@@ -3381,9 +3508,9 @@ final class CompanionManager: ObservableObject {
 
     /// Pi is the only product brain. A failed Runtime turn is surfaced
     /// honestly instead of silently forking the conversation through a second model loop.
-    private func presentRuntimeFailure(turnToken: UUID) async {
+    private func presentRuntimeFailure(turnToken: UUID, error: Error) async {
         guard ownsVoiceTurn(turnToken) else { return }
-        let message = "这轮没有完成。我保留了已有记录，你可以直接重试。"
+        let message = Self.spokenRuntimeFailureMessage(for: error)
         turnVisualPhase = .shapingOutput
         voiceState = .responding
         ensureOverlayVisibleForVoiceFeedback()
@@ -3394,6 +3521,17 @@ final class CompanionManager: ObservableObject {
         } catch {
             print("⚠️ 奕枢 Runtime failure notice TTS unavailable")
         }
+    }
+
+    static let genericRuntimeFailureMessage = "这轮没有完成。你再说一遍，或者换个说法。"
+
+    static func spokenRuntimeFailureMessage(for error: Error) -> String {
+        if let runtimeError = error as? YishuAgentRuntimeClientError,
+           let description = runtimeError.errorDescription,
+           !description.isEmpty {
+            return description
+        }
+        return genericRuntimeFailureMessage
     }
 
     private func presentVoiceResponse(
@@ -3414,24 +3552,6 @@ final class CompanionManager: ObservableObject {
         let parseResult = Self.parsePointingCoordinates(from: safeResponseText)
         let isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
         var spokenText = parseResult.spokenText
-
-        if parseResult.coordinate != nil {
-            turnVisualPhase = .shapingOutput
-            voiceState = .idle
-        }
-
-        let targetScreenCapture: CompanionScreenCapture? = {
-            if let screenNumber = parseResult.screenNumber {
-                guard let index = Self.selectedScreenIndex(
-                    for: screenNumber,
-                    captureCount: screenCaptures.count
-                ) else {
-                    return nil
-                }
-                return screenCaptures[index]
-            }
-            return screenCaptures.first(where: { $0.isCursorScreen })
-        }()
 
         if Self.shouldUseDirectClickFailure(
             transcript: transcript,
@@ -3494,16 +3614,11 @@ final class CompanionManager: ObservableObject {
             detectedElementScreenLocation = nil
             detectedElementDisplayFrame = nil
             voiceState = .responding
-        } else if let pointCoordinate = parseResult.coordinate,
-                  !(isDirectClickTurn && activeTurnConsumedComputerAction),
-                  let targetScreenCapture {
-            detectedElementScreenLocation = Self.globalAppKitPoint(
-                x: Double(pointCoordinate.x),
-                y: Double(pointCoordinate.y),
-                screenCapture: targetScreenCapture
-            )
-            detectedElementDisplayFrame = targetScreenCapture.displayFrame
-            ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
+        } else if beginObservationalPointing(
+            from: parseResult,
+            screenCaptures: screenCaptures,
+            isDirectClickTurn: isDirectClickTurn
+        ) {
             print("🎯 奕枢 pointing target resolved")
         } else {
             print("🎯 奕枢 response has no pointing target")
@@ -4086,6 +4201,41 @@ final class CompanionManager: ObservableObject {
         return true
     }
 
+    /// Publish the orb target as soon as coordinates exist so flight overlaps speech.
+    @discardableResult
+    private func beginObservationalPointing(
+        from parseResult: PointingParseResult,
+        screenCaptures: [CompanionScreenCapture],
+        isDirectClickTurn: Bool
+    ) -> Bool {
+        guard let pointCoordinate = parseResult.coordinate,
+              !(isDirectClickTurn && activeTurnConsumedComputerAction) else {
+            return false
+        }
+        let targetScreenCapture: CompanionScreenCapture?
+        if let screenNumber = parseResult.screenNumber,
+           let index = Self.selectedScreenIndex(
+            for: screenNumber,
+            captureCount: screenCaptures.count
+           ) {
+            targetScreenCapture = screenCaptures[index]
+        } else {
+            targetScreenCapture = screenCaptures.first(where: { $0.isCursorScreen })
+                ?? screenCaptures.first
+        }
+        guard let targetScreenCapture else { return false }
+
+        detectedElementDisplayFrame = targetScreenCapture.displayFrame
+        detectedElementBubbleText = ""
+        detectedElementScreenLocation = Self.globalAppKitPoint(
+            x: Double(pointCoordinate.x),
+            y: Double(pointCoordinate.y),
+            screenCapture: targetScreenCapture
+        )
+        ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
+        return true
+    }
+
     private static func globalAppKitPoint(
         x: Double,
         y: Double,
@@ -4152,7 +4302,7 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Point Tag Parsing
 
-    /// Result of parsing a [POINT:...] tag from Claude's response.
+    /// Result of parsing a [POINT:...] tag from the runtime completion.
     struct PointingParseResult {
         /// The response text with the [POINT:...] tag removed — this is what gets spoken.
         let spokenText: String
@@ -4164,23 +4314,24 @@ final class CompanionManager: ObservableObject {
         let screenNumber: Int?
     }
 
-    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
-    /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
+    /// Parses the last [POINT:x,y:label:screenN] or [POINT:none] tag.
+    /// Returns the spoken text (all POINT tags removed) and the optional coordinate.
     static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
-        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
+        let pattern = #"\[POINT:\s*(?:none|(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]"#
+        let fullRange = NSRange(responseText.startIndex..., in: responseText)
 
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
-            // No tag found at all
+              let match = regex.matches(in: responseText, range: fullRange).last else {
             return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
         }
 
-        // Remove the tag from the spoken text
-        let tagRange = Range(match.range, in: responseText)!
-        let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let spokenText = regex.stringByReplacingMatches(
+            in: responseText,
+            options: [],
+            range: fullRange,
+            withTemplate: ""
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Check if it's [POINT:none]
         guard match.numberOfRanges >= 3,
               let xRange = Range(match.range(at: 1), in: responseText),
               let yRange = Range(match.range(at: 2), in: responseText),
