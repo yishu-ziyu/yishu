@@ -390,21 +390,11 @@ struct YishuPresenceView: View {
             navigationAnimationTimer?.invalidate()
             companionManager.tearDownOnboardingVideo()
         }
-        .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
-            // When a UI element location is detected, navigate the orb to
-            // that position so it points at the element.
-            guard let screenLocation = newLocation,
-                  let displayFrame = companionManager.detectedElementDisplayFrame else {
-                return
-            }
-
-            // Only navigate if the target is on THIS screen
-            guard screenFrame.contains(CGPoint(x: displayFrame.midX, y: displayFrame.midY))
-                  || displayFrame == screenFrame else {
-                return
-            }
-
-            startNavigatingToElement(screenLocation: screenLocation)
+        .onChange(of: companionManager.detectedElementScreenLocation) { _ in
+            navigateToDetectedElementIfReady()
+        }
+        .onChange(of: companionManager.detectedElementDisplayFrame) { _ in
+            navigateToDetectedElementIfReady()
         }
     }
 
@@ -516,6 +506,22 @@ struct YishuPresenceView: View {
     }
 
     // MARK: - Element Navigation
+
+    /// Location and display frame are published separately. Start only once
+    /// both exist, and only from cursor-following, so a later sibling publish
+    /// cannot restart an in-flight arc.
+    private func navigateToDetectedElementIfReady() {
+        guard presenceNavigationMode == .followingCursor,
+              let screenLocation = companionManager.detectedElementScreenLocation,
+              let displayFrame = companionManager.detectedElementDisplayFrame else {
+            return
+        }
+        guard screenFrame.contains(CGPoint(x: displayFrame.midX, y: displayFrame.midY))
+              || displayFrame == screenFrame else {
+            return
+        }
+        startNavigatingToElement(screenLocation: screenLocation)
+    }
 
     /// Starts animating the orb toward a detected UI element location.
     private func startNavigatingToElement(screenLocation: CGPoint) {
@@ -633,14 +639,7 @@ struct YishuPresenceView: View {
         navigationBubbleSize = .zero
         navigationBubbleScale = 0.5
 
-        // Use custom bubble text from the companion manager (e.g. onboarding demo)
-        // if available, otherwise fall back to a random pointer phrase
-        let pointerPhrase = companionManager.detectedElementBubbleText
-            ?? navigationPointerPhrases.randomElement()
-            ?? "right here!"
-
-        streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0) {
-            // All characters streamed — hold for 3 seconds, then fly back
+        let holdThenReturn = {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                 guard self.presenceNavigationMode == .pointingAtTarget else { return }
                 self.navigationBubbleOpacity = 0.0
@@ -650,6 +649,21 @@ struct YishuPresenceView: View {
                 }
             }
         }
+
+        // Observational pointing publishes "" so the orb flies without a
+        // second spoken bubble. Keep the dwell, skip the empty frame.
+        if let customBubble = companionManager.detectedElementBubbleText {
+            if customBubble.isEmpty {
+                navigationBubbleOpacity = 0.0
+                holdThenReturn()
+                return
+            }
+            streamNavigationBubbleCharacter(phrase: customBubble, characterIndex: 0, onComplete: holdThenReturn)
+            return
+        }
+
+        let pointerPhrase = navigationPointerPhrases.randomElement() ?? "right here!"
+        streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0, onComplete: holdThenReturn)
     }
 
     /// Streams the navigation bubble text one character at a time with variable

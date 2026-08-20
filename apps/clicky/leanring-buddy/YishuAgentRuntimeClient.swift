@@ -2164,6 +2164,10 @@ final class YishuAgentRuntimeClient {
                 )
                 return
             }
+            if type == "turn.failed", code == "first_byte_timeout" {
+                finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnTimedOut)
+                return
+            }
             finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnFailed)
         default:
             break

@@ -37,13 +37,18 @@ interface AccumulatedToolCall {
 
 function userContent(text: string, images?: readonly PromptImage[]): unknown {
   if (!images || images.length === 0) return text;
-  return [
-    { type: "text", text },
-    ...images.map((image) => ({
+  const parts: Array<Record<string, unknown>> = [];
+  if (text.length > 0) parts.push({ type: "text", text });
+  for (const image of images) {
+    parts.push({
       type: "image_url",
       image_url: { url: `data:${image.mimeType};base64,${image.data}` },
-    })),
-  ];
+    });
+    if (image.label !== undefined && image.label.length > 0) {
+      parts.push({ type: "text", text: image.label });
+    }
+  }
+  return parts;
 }
 
 export interface TransientTailMessage {

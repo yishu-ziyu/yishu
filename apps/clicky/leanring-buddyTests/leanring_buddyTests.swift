@@ -7,6 +7,7 @@
 
 import Foundation
 import AVFoundation
+import AppKit
 import Testing
 @testable import Clicky
 
@@ -399,6 +400,40 @@ struct leanring_buddyTests {
         #expect(YishuDirectClickResolver.targetPhrase(from: "click top left New Thread") == "newthread")
         #expect(YishuDirectClickResolver.isDirectClickIntent("点击左上角的返回按钮"))
         #expect(YishuDirectClickResolver.targetPhrase(from: "点击左上角的返回按钮") == "返回")
+        #expect(YishuDirectClickResolver.isDirectClickIntent("点击屏幕当中微信的图标"))
+        #expect(YishuDirectClickResolver.targetPhrase(from: "点击屏幕当中微信的图标") == "微信")
+        #expect(YishuDirectClickResolver.targetPhrase(from: "去点击屏幕中间的微信图标") == "微信")
+        #expect(YishuDirectClickResolver.applicationNameMatches(
+            target: "微信",
+            names: ["微信", "WeChat"]
+        ))
+        #expect(YishuDirectClickResolver.applicationNameMatches(
+            target: "wechat",
+            names: ["WeChat"]
+        ))
+        #expect(!YishuDirectClickResolver.applicationNameMatches(
+            target: "微信",
+            names: ["WeChat", "com.tencent.xinWeChat"]
+        ))
+        #expect(!YishuDirectClickResolver.applicationNameMatches(
+            target: "微信",
+            names: ["Safari", "Notes"]
+        ))
+        let harvestedFixture = try harvestLocalizedDisplayNameFixture(displayName: "微信")
+        #expect(harvestedFixture.contains("微信"))
+        #expect(YishuDirectClickResolver.applicationNameMatches(
+            target: "微信",
+            names: harvestedFixture
+        ))
+        if let weChatURL = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.tencent.xinWeChat"
+        ) {
+            #expect(YishuDirectClickResolver.localizedInfoPlistNames(at: weChatURL).contains("微信"))
+            #expect(YishuDirectClickResolver.applicationNameMatches(
+                target: "微信",
+                names: YishuDirectClickResolver.applicationNames(at: weChatURL)
+            ))
+        }
         #expect(YishuComputerUseActuator.isAccessibilityChromeNavigationTarget("返回"))
         #expect(YishuComputerUseActuator.isAccessibilityChromeNavigationTarget("back"))
         #expect(YishuComputerUseActuator.isAccessibilityChromeNavigationTarget("上一级"))
@@ -644,6 +679,32 @@ struct leanring_buddyTests {
         #expect(parsed.elementLabel == "新对话")
     }
 
+    @Test func pointingParserUsesLastTagAndIgnoresTrailingPunctuation() {
+        let dated = CompanionManager.parsePointingCoordinates(
+            from: "日期在屏幕最顶上那条菜单栏。\n[POINT:1180,18:日期]。"
+        )
+        #expect(!dated.spokenText.contains("POINT"))
+        #expect(dated.spokenText.contains("日期在屏幕最顶上那条菜单栏。"))
+        #expect(dated.coordinate == CGPoint(x: 1180, y: 18))
+        #expect(dated.elementLabel == "日期")
+
+        let none = CompanionManager.parsePointingCoordinates(from: "这是常识。[POINT:none]")
+        #expect(none.spokenText == "这是常识。")
+        #expect(none.coordinate == nil)
+
+        let decimals = CompanionManager.parsePointingCoordinates(
+            from: "时钟在这儿。[POINT:1180.4,18.6:时钟]"
+        )
+        #expect(decimals.coordinate == CGPoint(x: 1180.4, y: 18.6))
+        #expect(decimals.elementLabel == "时钟")
+
+        let spaced = CompanionManager.parsePointingCoordinates(
+            from: "日期在这儿。[POINT: 1180, 18:日期]"
+        )
+        #expect(spaced.coordinate == CGPoint(x: 1180, y: 18))
+        #expect(spaced.elementLabel == "日期")
+    }
+
     @Test func speechTextKeepsVisibleSourcesButDoesNotReadURLs() {
         let presentationText = """
         1. Apple 调整了硬件出货。
@@ -722,6 +783,21 @@ struct leanring_buddyTests {
             actionResult: nil,
             runtimeIsRunning: true
         ) == .surfaceFailure)
+        #expect(
+            CompanionManager.spokenRuntimeFailureMessage(
+                for: YishuAgentRuntimeClientError.turnTimedOut
+            ) == "等太久了，这一轮没回。"
+        )
+        #expect(
+            CompanionManager.spokenRuntimeFailureMessage(
+                for: YishuAgentRuntimeClientError.turnFailed
+            ) == "这一轮没做成。"
+        )
+        #expect(
+            CompanionManager.spokenRuntimeFailureMessage(
+                for: NSError(domain: "test", code: 1)
+            ) == CompanionManager.genericRuntimeFailureMessage
+        )
     }
 
     @Test func runtimeIngressUUIDHelperRejectsMalformedOptionalIDs() async throws {
@@ -2091,6 +2167,34 @@ struct leanring_buddyTests {
         ))
     }
 
+}
+
+private func harvestLocalizedDisplayNameFixture(displayName: String) throws -> [String] {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yishu-lproj-\(UUID().uuidString)", isDirectory: true)
+    let bundleURL = root.appendingPathComponent("Fake.app", isDirectory: true)
+    let lproj = bundleURL.appendingPathComponent(
+        "Contents/Resources/zh-Hans.lproj",
+        isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: lproj, withIntermediateDirectories: true)
+    let plist = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+      <key>CFBundleDisplayName</key>
+      <string>\(displayName)</string>
+    </dict>
+    </plist>
+    """
+    try plist.write(
+        to: lproj.appendingPathComponent("InfoPlist.strings"),
+        atomically: true,
+        encoding: .utf8
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    return YishuDirectClickResolver.localizedInfoPlistNames(at: bundleURL)
 }
 
 private final class FakeStepFunStreamingTransport: StepFunStreamingTransport {

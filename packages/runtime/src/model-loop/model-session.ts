@@ -34,8 +34,9 @@ import type { TurnContextProviders } from "./turn-context.js";
 
 const MAX_MODEL_ITERATIONS = 16;
 const MAX_HISTORY_MESSAGES = 200;
-const STREAM_FIRST_BYTE_TIMEOUT_MS = 60_000;
+const STREAM_FIRST_BYTE_TIMEOUT_MS = 20_000;
 const TRANSIENT_RETRY_MAX = 2;
+export const FIRST_BYTE_TIMEOUT_MESSAGE = "Model stream timed out waiting for the first byte.";
 
 export interface YishuModelSessionOptions {
   readonly model: ResolvedModel;
@@ -465,8 +466,6 @@ export class YishuModelSession implements ModelSession {
   }
 }
 
-const FIRST_BYTE_TIMEOUT_MESSAGE = "Model stream timed out waiting for the first byte.";
-
 function abortError(signal: AbortSignal): Error {
   if (isFirstByteTimeout(signal)) return new Error(FIRST_BYTE_TIMEOUT_MESSAGE);
   return new Error("Model run aborted");
@@ -475,6 +474,10 @@ function abortError(signal: AbortSignal): Error {
 function isFirstByteTimeout(signal: AbortSignal, error?: unknown): boolean {
   const reason = signal.reason;
   if (reason instanceof Error && reason.message === FIRST_BYTE_TIMEOUT_MESSAGE) return true;
+  return isFirstByteTimeoutError(error);
+}
+
+export function isFirstByteTimeoutError(error: unknown): boolean {
   return error instanceof Error && error.message === FIRST_BYTE_TIMEOUT_MESSAGE;
 }
 

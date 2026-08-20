@@ -27,6 +27,9 @@ function inputItemFor(item: CanonicalMessage): Record<string, unknown> | undefin
           type: "input_image",
           image_url: `data:${image.mimeType};base64,${image.data}`,
         });
+        if (image.label !== undefined && image.label.length > 0) {
+          content.push({ type: "input_text", text: image.label });
+        }
       }
       return { type: "message", role: "user", content };
     }

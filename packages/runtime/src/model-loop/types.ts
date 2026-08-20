@@ -44,6 +44,8 @@ export interface PromptImage {
   readonly type: "image";
   readonly data: string;
   readonly mimeType: string;
+  /** Caption placed immediately after this image (pixel dimensions). */
+  readonly label?: string;
 }
 
 export interface PromptOptions {

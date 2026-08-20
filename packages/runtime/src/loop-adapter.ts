@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   createYishuAgentSession,
   createYishuProviderRuntime,
+  isFirstByteTimeoutError,
   type AnyToolDefinition,
   type ModelProviderRuntime,
   type ModelSession,
@@ -12,6 +13,7 @@ import {
 } from "./model-loop/index.js";
 import {
   AssistantOutputGenerationProjector,
+  attachObservationalPointDirective,
   isDirectComputerActionUtterance,
 } from "./assistant-output.js";
 import { intentAllowsComputerEffect } from "./intent-frame.js";
@@ -26,7 +28,7 @@ import {
   type ComputerActionResult,
   type ComputerUsePort,
 } from "./computer-use-port.js";
-import { buildGroundedPrompt } from "./context-prompt.js";
+import { buildGroundedPrompt, screenshotDimensionCaption } from "./context-prompt.js";
 import { YISHU_SYSTEM_PROMPT } from "./persona.js";
 import {
   safeRuntimeErrorMessage,
@@ -1129,6 +1131,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
             type: "image" as const,
             data: screenshot.base64Data,
             mimeType: screenshot.mediaType,
+            label: screenshotDimensionCaption(screenshot),
           })),
         });
 
@@ -1149,7 +1152,20 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         if (completedOutput.stale) {
           throw new Error("Pi ended before the interrupted response was replaced.");
         }
-        const compatibilityAction = completedOutput.computerActions.at(0);
+        const compatibilityAction = completedOutput.computerActions.at(0)
+          ?? (completedOutput.pointing === undefined
+            ? undefined
+            : {
+              action: "left_click" as const,
+              x: completedOutput.pointing.x,
+              y: completedOutput.pointing.y,
+              ...(completedOutput.pointing.screen === undefined
+                ? {}
+                : { screen: completedOutput.pointing.screen }),
+              ...(completedOutput.pointing.label === undefined
+                ? {}
+                : { label: completedOutput.pointing.label }),
+            });
         if (shouldRunCompatibilityComputerAction(
           generationState.isDirectAction(generation),
           computerTurn.actionCount,
@@ -1183,7 +1199,11 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
           emitVisibleDelta(generation, completedOutput.visibleDelta);
         }
 
-        const authoritativeText = generationState.text(generation);
+        const spokenText = generationState.text(generation);
+        const authoritativeText = generationState.isDirectAction(generation)
+          || computerTurn.actionCount > 0
+          ? spokenText
+          : attachObservationalPointDirective(spokenText, completedOutput.pointing);
         if (authoritativeText.trim().length === 0) {
           throw new Error("Pi completed the turn without a user-visible response.");
         }
@@ -1210,7 +1230,9 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
         code: error instanceof SteerReplacementFailedBeforeStartError
           ? "steer_replacement_failed_before_start"
-          : "pi_turn_failed",
+          : isFirstByteTimeoutError(error)
+            ? "first_byte_timeout"
+            : "pi_turn_failed",
         message: safeRuntimeErrorMessage(error),
         generation: Math.max(
           generationState.currentGeneration,

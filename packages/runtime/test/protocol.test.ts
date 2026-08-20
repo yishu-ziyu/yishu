@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { PI_CAPABILITY_PROFILES } from "../src/capability-profiles.js";
-import { buildGroundedPrompt } from "../src/context-prompt.js";
+import { buildGroundedPrompt, screenshotDimensionCaption } from "../src/context-prompt.js";
+import { buildCompletionsBody } from "../src/model-loop/openai-completions.js";
+import { buildResponsesBody } from "../src/model-loop/codex-responses.js";
+import type { ResolvedModel } from "../src/model-loop/types.js";
 import { MockAgentRuntime } from "../src/mock-runtime.js";
 import { YISHU_SYSTEM_PROMPT } from "../src/persona.js";
 import { contextFrameToTrailSource } from "../src/trail-source.js";
@@ -689,6 +692,81 @@ test("Yishu persona keeps agency without leaking private reflection", () => {
   assert.match(YISHU_SYSTEM_PROMPT, /越聊越准/);
   assert.match(YISHU_SYSTEM_PROMPT, /不要宣告做完了/);
   assert.match(YISHU_SYSTEM_PROMPT, /不要读网址/);
+  assert.match(YISHU_SYSTEM_PROMPT, /光球/);
+  assert.match(YISHU_SYSTEM_PROMPT, /\[POINT:x,y:标签\]/);
+  assert.match(YISHU_SYSTEM_PROMPT, /image dimensions/);
+});
+
+test("screenshot captions copy Clicky's pixel-dimension glue", () => {
+  assert.equal(
+    screenshotDimensionCaption({
+      label: "cursor display",
+      screenshotWidthPixels: 1280,
+      screenshotHeightPixels: 800,
+    }),
+    "cursor display (image dimensions: 1280x800 pixels)",
+  );
+});
+
+const visionModel: ResolvedModel = {
+  providerId: "local-grok",
+  id: "test-model",
+  name: "test-model",
+  api: "openai-completions",
+  baseUrl: "http://127.0.0.1:8787/v1",
+  input: ["text", "image"],
+  contextWindow: 128_000,
+  maxTokens: 4_096,
+};
+
+test("completions and responses put the dimension caption immediately after each image", () => {
+  const labeled = {
+    type: "image" as const,
+    data: "c2NyZWVu",
+    mimeType: "image/jpeg",
+    label: screenshotDimensionCaption({
+      label: "cursor display",
+      screenshotWidthPixels: 1280,
+      screenshotHeightPixels: 800,
+    }),
+  };
+  const labeledSecond = {
+    type: "image" as const,
+    data: "c2NyZWVuMg==",
+    mimeType: "image/jpeg",
+    label: screenshotDimensionCaption({
+      label: "display 2",
+      screenshotWidthPixels: 1920,
+      screenshotHeightPixels: 1080,
+    }),
+  };
+  const history = [{ role: "user" as const, text: "日期在哪", images: [labeled, labeledSecond] }];
+  const completions = buildCompletionsBody(visionModel, "sys", history, []);
+  const completionUser = completions.messages.find((message) => message.role === "user");
+  assert.deepEqual(completionUser?.content, [
+    { type: "text", text: "日期在哪" },
+    { type: "image_url", image_url: { url: "data:image/jpeg;base64,c2NyZWVu" } },
+    { type: "text", text: "cursor display (image dimensions: 1280x800 pixels)" },
+    { type: "image_url", image_url: { url: "data:image/jpeg;base64,c2NyZWVuMg==" } },
+    { type: "text", text: "display 2 (image dimensions: 1920x1080 pixels)" },
+  ]);
+
+  const responses = buildResponsesBody(
+    { ...visionModel, api: "codex-responses" },
+    "sys",
+    history,
+    [],
+  );
+  const responseUser = (responses.input as Array<{ role?: string; content?: unknown }>).find(
+    (item) => item.role === "user",
+  );
+  assert.deepEqual(responseUser?.content, [
+    { type: "input_text", text: "日期在哪" },
+    { type: "input_image", image_url: "data:image/jpeg;base64,c2NyZWVu" },
+    { type: "input_text", text: "cursor display (image dimensions: 1280x800 pixels)" },
+    { type: "input_image", image_url: "data:image/jpeg;base64,c2NyZWVuMg==" },
+    { type: "input_text", text: "display 2 (image dimensions: 1920x1080 pixels)" },
+  ]);
 });
 
 test("mock runtime completes a grounded response", async () => {

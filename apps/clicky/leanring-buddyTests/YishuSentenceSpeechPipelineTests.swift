@@ -15,6 +15,9 @@ struct YishuSentenceSpeechPipelineTests {
         // Even an explanatory desktop question stays final-only: false
         // negatives cost latency, while false positives can speak fake success.
         #expect(!YishuSentenceSpeechPolicy.allowsStreaming(for: "怎么打开这个设置？"))
+        #expect(!YishuSentenceSpeechPolicy.allowsStreaming(for: "日期在哪"))
+        #expect(!YishuSentenceSpeechPolicy.allowsStreaming(for: "这个时钟在哪里"))
+        #expect(!YishuSentenceSpeechPolicy.allowsStreaming(for: "where is the date"))
 
         var spoken: [String] = []
         let pipeline = YishuSentenceSpeechPipeline(
