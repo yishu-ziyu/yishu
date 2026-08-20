@@ -30,7 +30,7 @@ extension YishuVisualState {
     }
 }
 
-/// Typed facts the Clicky shell already owns. The router keeps precedence and
+/// Typed facts the Yishu shell already owns. The router keeps precedence and
 /// mapping testable without inspecting localized status text or protocol strings.
 struct YishuVisualStateInputs: Equatable {
     var voiceState: CompanionVoiceState = .idle

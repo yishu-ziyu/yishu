@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   AuthServiceError,
+  publicAccountLabelFromAuth,
   safeAuthUrl,
   YishuAuthService,
   type AuthModelRuntime,
@@ -13,7 +14,13 @@ import {
 } from "../src/auth-service.js";
 import { InMemoryCredentialStore, ProductCredentialStore, resolveYishuAuthPath } from "../src/auth-store.js";
 import { runAuthWatchdog } from "../src/auth-watchdog.js";
-import { authPublicStatusSchema } from "../src/auth-protocol.js";
+import { authPublicStatusSchema, sanitizePublicAccountLabel } from "../src/auth-protocol.js";
+
+function unsignedJwt(claims: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
+  return `${header}.${payload}.sig`;
+}
 
 class FakeOAuthRuntime implements AuthModelRuntime {
   configured = false;
@@ -96,6 +103,51 @@ test("OAuth callback results and credentials never cross the product boundary", 
     safeAuthUrl("https://example.test/authorize?value=eyJaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbb.cccccccccc"),
     undefined,
   );
+});
+
+test("public account labels keep email and drop tokens or account ids", () => {
+  assert.equal(sanitizePublicAccountLabel("you@example.com"), "you@example.com");
+  assert.equal(sanitizePublicAccountLabel("ACCOUNT_ID_SHOULD_NOT_CROSS_WIRE"), undefined);
+  assert.equal(sanitizePublicAccountLabel("acct_secret"), undefined);
+  assert.equal(sanitizePublicAccountLabel("eyJaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbb.cccccccccc"), undefined);
+  assert.equal(
+    publicAccountLabelFromAuth({
+      apiKey: unsignedJwt({
+        email: "you@example.com",
+        "https://api.openai.com/auth": { chatgpt_account_id: "ACCOUNT_ID_SHOULD_NOT_CROSS_WIRE" },
+      }),
+      accountId: "ACCOUNT_ID_SHOULD_NOT_CROSS_WIRE",
+    }),
+    "you@example.com",
+  );
+  assert.equal(
+    publicAccountLabelFromAuth({
+      apiKey: unsignedJwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: "ACCOUNT_ID_SHOULD_NOT_CROSS_WIRE" },
+      }),
+      accountId: "ACCOUNT_ID_SHOULD_NOT_CROSS_WIRE",
+    }),
+    undefined,
+  );
+});
+
+test("OAuth status exposes a public account label without credential material", async () => {
+  const runtime = new FakeOAuthRuntime();
+  runtime.configured = true;
+  runtime.getAuth = async () => ({
+    apiKey: unsignedJwt({
+      email: "you@example.com",
+      "https://api.openai.com/auth": { chatgpt_account_id: "ACCOUNT_ID_SHOULD_NOT_CROSS_WIRE" },
+    }),
+    accountId: "ACCOUNT_ID_SHOULD_NOT_CROSS_WIRE",
+  });
+  const service = new YishuAuthService(Promise.resolve(runtime));
+
+  const [status] = await service.status("openai-codex");
+  assert.ok(status);
+  assert.equal(status.accountLabel, "you@example.com");
+  assert.doesNotMatch(JSON.stringify(status), /ACCESS_VALUE|REFRESH_VALUE|ACCOUNT_ID|eyJ/);
+  assert.deepEqual(authPublicStatusSchema.parse(status), status);
 });
 
 test("OAuth status exposes only controlled models and marks xAI experimental", async () => {

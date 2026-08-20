@@ -4,7 +4,7 @@
 //
 //  Uses Claude's Computer Use API to identify the screen location of UI elements
 //  in screenshots. When a user asks about a visible element (e.g., "click the
-//  blue button"), this detects the element's coordinates so the buddy can
+//  blue button"), this detects the element's coordinates so the thinking-orb can
 //  animate to it and point at it.
 //
 

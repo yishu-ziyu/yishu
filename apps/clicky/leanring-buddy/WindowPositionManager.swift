@@ -16,6 +16,54 @@ enum PermissionRequestPresentationDestination: Equatable {
     case systemSettings
 }
 
+/// Pure permission walk-through rules. macOS cannot grant mic, Accessibility,
+/// and Screen Recording in one system dialog; the panel can only sequence them.
+enum YishuPermissionGuidance {
+    enum Step: Equatable {
+        case microphone
+        case accessibility
+        case screenRecording
+        case screenContent
+        case done
+    }
+
+    enum MicrophoneStatus: Equatable {
+        case notDetermined
+        case authorized
+        case denied
+    }
+
+    static func nextStep(
+        microphone: MicrophoneStatus,
+        accessibilityGranted: Bool,
+        screenRecordingGranted: Bool,
+        screenContentGranted: Bool
+    ) -> Step {
+        if microphone != .authorized { return .microphone }
+        if !accessibilityGranted { return .accessibility }
+        if !screenRecordingGranted { return .screenRecording }
+        if !screenContentGranted { return .screenContent }
+        return .done
+    }
+
+    static func microphoneInstruction(for status: MicrophoneStatus) -> String {
+        switch status {
+        case .authorized:
+            return ""
+        case .notDetermined:
+            return "点授权，系统会弹出询问，选「好」。"
+        case .denied:
+            return "打开系统设置 → 隐私与安全性 → 麦克风，打开「奕枢」。"
+        }
+    }
+
+    static let unifiedGrantCaption =
+        "系统不能一次给齐三项。点一次会按麦克风、辅助功能、屏幕录制的顺序弹出询问。"
+
+    static let staleGrantHint =
+        "系统设置里开了但这里还要：点「定位 App」选现在的 /Applications/奕枢.app，然后完全退出再打开。"
+}
+
 @MainActor
 class WindowPositionManager {
     private static var hasAttemptedAccessibilitySystemPromptDuringCurrentLaunch = false
@@ -132,6 +180,12 @@ class WindowPositionManager {
     /// Opens System Settings to the Screen Recording pane.
     static func openScreenRecordingSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Opens System Settings to the Microphone pane.
+    static func openMicrophoneSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else { return }
         NSWorkspace.shared.open(url)
     }
 

@@ -56,8 +56,9 @@ const MINIMAX_TTS_URL_DEFAULT = "https://api.minimaxi.com/v1/t2a_v2";
 // 奕枢 clone voice (same id as the desktop speech synthesizer default).
 const MINIMAX_VOICE_DEFAULT = "shangqiuzi_v3_20260717";
 const MINIMAX_TTS_MODEL_DEFAULT = "speech-2.8-hd";
-const CHAT_MODEL_DEFAULT = "grok-4.5";
+const CHAT_MODEL_DEFAULT = "grok-4.6";
 const YISHU_RUNTIME_MODELS = new Set([
+  "grok-4.6",
   "grok-4.5",
   "grok-4.3",
   "grok-4.20-0309-reasoning",

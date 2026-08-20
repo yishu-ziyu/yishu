@@ -110,6 +110,16 @@ Delegated result delivery is durable in the SQLite and JSON stores: one Main
 turn claims pending results, acknowledges them only after its terminal turn is
 durable, and releases the claim on failure or cancellation.
 
+EverOS is the long-term memory engine behind Kernel's product policy. Ordinary
+turns enter one durable conversation buffer and are extracted after an idle
+boundary; explicit remember is flushed immediately. Kernel still decides scope,
+privacy, user authority, and prompt admission. `~/Documents/Yishu/记忆.md` is the
+single readable user surface. Its edits override derived candidates, and its
+hidden authority ledger contains fingerprints only. The product-owned EverOS
+root lives under Application Support; search results never write the visible
+file. An external EverOS instance requires an explicit URL and compatible health
+contract.
+
 Clicky also projects a terminal delegated result back beside the cursor after
 the foreground is idle and the user has been quiet for three seconds. That
 overlay/TTS announcement is conversation-scoped and persistently de-duplicated,
@@ -184,6 +194,26 @@ only bounded length/role/match evidence, never the entered text.
 An explicit click on a visually named control first goes through a deterministic local action router. It limits OCR to the requested screen region, resolves the visible label, and uses the same verified actuator contract without paying for a model turn. The actuator prefers `AXPress`; when a self-drawn app exposes only inert accessibility groups, it confirms that the captured frontmost app still owns the point, hides the cursor, posts one Quartz click, and immediately restores the cursor before verifying screen change. If local evidence cannot resolve the target, the request falls through to the normal ContextFrame and Pi path. Legacy `[POINT]` output is presentation-only unless the original user turn is itself a direct click request; in that case Clicky upgrades it to the same verified action path and never speaks tool syntax or asks the user to finish the click.
 
 `AgentRuntime` is a ports-and-adapters boundary. Product state must not store Pi event objects or Pi session types. Cancellation, steering, errors, completion, and future checkpoints are product-level concepts with conformance tests.
+
+### Intent boundary
+
+Every final utterance is interpreted once as a Kernel-owned, immutable
+`TurnIntentFrame` before routing or execution. The frame carries the visible
+objective, speech act, product/model route, effect class, success mode,
+authority, risk, and same-session steering eligibility. Product action routing,
+`TaskExecutionContract`, and Runtime interruption policy consume that same
+frame instead of reclassifying the utterance independently.
+The frame crosses into the model-tool loop as a non-enumerable, non-wire
+attachment. An effect-free frame vetoes computer action admission; tool-specific
+parsers may further narrow exact action/parameter authority but may never widen
+the frame's effect boundary.
+
+The current candidate parser is deterministic and fail-closed. Candidate
+parsing and product policy are separate pure functions, so a later structured
+model parser can reuse the same policy resolver without moving authority or
+completion truth out of Kernel. Clicky's local voice preflight may remain more
+conservative to decide whether a fresh `ContextFrame` is needed; it never owns
+the authoritative intent or grants action authority.
 
 ### Task truth boundary
 

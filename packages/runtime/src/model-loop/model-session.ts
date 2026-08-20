@@ -44,6 +44,8 @@ export interface YishuModelSessionOptions {
   readonly customTools: readonly AnyToolDefinition[];
   /** Product-owned context providers (ADR 0015); optional for tests. */
   readonly context?: TurnContextProviders;
+  /** Override for tests; production stays at STREAM_FIRST_BYTE_TIMEOUT_MS. */
+  readonly streamFirstByteTimeoutMs?: number;
 }
 
 type SessionListener = (event: SessionEvent) => void;
@@ -154,9 +156,11 @@ export class YishuModelSession implements ModelSession {
         .catch(() => undefined);
       const firstUserText = memoryBlock ? `${memoryBlock}\n\n${initialText}` : initialText;
       this.history.push({ role: "user", text: firstUserText, ...(options.images ? { images: options.images } : {}) });
+      let lastHadTools = false;
       for (let iteration = 0; iteration < MAX_MODEL_ITERATIONS; iteration += 1) {
-        if (controller.signal.aborted) throw new Error("Model run aborted");
+        if (controller.signal.aborted) throw abortError(controller.signal);
         const { text, toolCalls } = await this.streamOneMessage(controller.signal, reportPreflight);
+        lastHadTools = toolCalls.length > 0;
         this.history.push({
           role: "assistant",
           text,
@@ -178,16 +182,23 @@ export class YishuModelSession implements ModelSession {
         if (toolCalls.length === 0) break;
         // Tool results are in history; loop back for the model's next reply.
       }
+      if (lastHadTools) {
+        throw new Error("Model exceeded the tool-call iteration limit without a final reply.");
+      }
       this.trimHistory();
       this.emit({
         type: "turn_end",
         message: this.envelope("assistant", ""),
       });
     } catch (error) {
+      if (isFirstByteTimeout(controller.signal, error)) {
+        this.agent.state.errorMessage = FIRST_BYTE_TIMEOUT_MESSAGE;
+        throw new Error(FIRST_BYTE_TIMEOUT_MESSAGE);
+      }
       if (!controller.signal.aborted) {
         this.agent.state.errorMessage = error instanceof Error ? error.message : String(error);
       }
-      throw error;
+      throw controller.signal.aborted ? abortError(controller.signal) : error;
     } finally {
       this.running = false;
       this.runController = undefined;
@@ -235,24 +246,36 @@ export class YishuModelSession implements ModelSession {
     const envelope = this.envelope("assistant", "");
     this.emit({ type: "message_start", message: envelope });
 
-    let response = await this.fetchWithRetry(url, body as Record<string, unknown>, headers, signal, isResponses);
-    if (!response.ok) {
-      reportPreflight(false);
-      const summary = await response.text().catch(() => "");
-      throw new Error(`Model request failed (${response.status}${summary ? `: ${summary.slice(0, 200)}` : ""}).`);
-    }
-    reportPreflight(true);
-    if (!response.body) throw new Error("Model response has no body.");
+    const timeoutMs = this.options.streamFirstByteTimeoutMs ?? STREAM_FIRST_BYTE_TIMEOUT_MS;
+    const firstByteTimer = setTimeout(() => {
+      if (!this.runController || this.runController.signal.aborted) return;
+      this.runController.abort(new Error(FIRST_BYTE_TIMEOUT_MESSAGE));
+    }, timeoutMs);
+    let sawFirstByte = false;
+    const noteFirstByte = (): void => {
+      if (sawFirstByte) return;
+      sawFirstByte = true;
+      clearTimeout(firstByteTimer);
+    };
 
-    const firstByteTimer = setTimeout(() => controllerTimeout(signal), STREAM_FIRST_BYTE_TIMEOUT_MS);
     let text = "";
     const completionsParser = isResponses ? undefined : new CompletionsStreamParser();
     const responsesParser = isResponses ? new ResponsesStreamParser() : undefined;
     let toolCalls: readonly WireToolCall[] = [];
     let streamDone = false;
     try {
+      const response = await this.fetchWithRetry(url, body as Record<string, unknown>, headers, signal, isResponses);
+      if (!response.ok) {
+        reportPreflight(false);
+        const summary = await response.text().catch(() => "");
+        throw new Error(`Model request failed (${response.status}${summary ? `: ${summary.slice(0, 200)}` : ""}).`);
+      }
+      reportPreflight(true);
+      if (!response.body) throw new Error("Model response has no body.");
+
       if (isResponses && responsesParser) {
         for await (const event of readResponsesEvents(response.body, signal)) {
+          noteFirstByte();
           const piece = responsesParser.push(event);
           if (piece?.type === "text_delta") {
             text += piece.delta;
@@ -273,6 +296,7 @@ export class YishuModelSession implements ModelSession {
         }
       } else if (completionsParser) {
         for await (const payload of readSseData(response.body, signal)) {
+          noteFirstByte();
           const piece = completionsParser.push(payload);
           if (piece?.type === "text_delta") {
             text += piece.delta;
@@ -337,22 +361,26 @@ export class YishuModelSession implements ModelSession {
   }
 
   private async executeToolCalls(toolCalls: readonly WireToolCall[], signal: AbortSignal): Promise<void> {
-    for (const call of toolCalls) {
+    if (signal.aborted) throw abortError(signal);
+    type Slot = { call: WireToolCall; output: string; isError: boolean; ran: boolean };
+    const slots: Slot[] = toolCalls.map((call) => ({
+      call,
+      output: "",
+      isError: false,
+      ran: false,
+    }));
+
+    const runSlot = async (slot: Slot): Promise<void> => {
+      const { call } = slot;
       const tool = this.tools.get(call.name);
       this.toolCallCount += 1;
-      this.lastToolName = call.name;
+      slot.ran = true;
+      this.emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name });
       if (!tool) {
-        this.lastToolFailed = true;
-        this.emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name });
-        this.history.push({
-          role: "tool",
-          callId: call.id,
-          toolName: call.name,
-          output: `Unknown tool: ${call.name}`,
-          isError: true,
-        });
+        slot.isError = true;
+        slot.output = `Unknown tool: ${call.name}`;
         this.emit({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, isError: true });
-        continue;
+        return;
       }
       let params: unknown;
       try {
@@ -360,20 +388,53 @@ export class YishuModelSession implements ModelSession {
       } catch {
         params = {};
       }
-      this.emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name });
-      let isError = false;
-      let output: string;
       try {
         const result = await tool.execute(call.id, params, signal);
-        output = result.content.map((part) => part.text).join("\n");
+        slot.output = result.content.map((part) => part.text).join("\n");
       } catch (error) {
-        isError = true;
-        output = error instanceof Error ? error.message : String(error);
+        slot.isError = true;
+        slot.output = error instanceof Error ? error.message : String(error);
       }
-      this.history.push({ role: "tool", callId: call.id, toolName: call.name, output, isError });
-      this.lastToolFailed = isError;
-      this.emit({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, isError });
+      this.emit({
+        type: "tool_execution_end",
+        toolCallId: call.id,
+        toolName: call.name,
+        isError: slot.isError,
+      });
+    };
+
+    let sequentialTail = Promise.resolve();
+    const running: Array<Promise<void>> = [];
+    for (const slot of slots) {
+      const mode = this.tools.get(slot.call.name)?.executionMode ?? "sequential";
+      if (mode === "parallel") {
+        running.push(runSlot(slot));
+        continue;
+      }
+      const next = sequentialTail.then(async () => {
+        if (signal.aborted) throw abortError(signal);
+        await runSlot(slot);
+      });
+      sequentialTail = next.then(() => undefined, () => undefined);
+      running.push(next);
     }
+
+    const settled = await Promise.allSettled(running);
+    for (const slot of slots) {
+      if (!slot.ran) continue;
+      this.history.push({
+        role: "tool",
+        callId: slot.call.id,
+        toolName: slot.call.name,
+        output: slot.output,
+        isError: slot.isError,
+      });
+      this.lastToolName = slot.call.name;
+      this.lastToolFailed = slot.isError;
+    }
+    if (signal.aborted) throw abortError(signal);
+    const rejected = settled.find((result) => result.status === "rejected");
+    if (rejected && rejected.status === "rejected") throw rejected.reason;
   }
 
   private trimHistory(): void {
@@ -404,14 +465,17 @@ export class YishuModelSession implements ModelSession {
   }
 }
 
-function controllerTimeout(signal: AbortSignal): void {
-  // Cooperatively unblock the reader loop; fetch abort is driven by the
-  // session-level controller, so only mark this signal if still live.
-  if (!signal.aborted) {
-    // AbortSignal.timeout-style guard: throwing inside the consumer is not
-    // possible from here, so the reader relies on fetch/stream errors. This
-    // exists as a seam for future timeout wiring.
-  }
+const FIRST_BYTE_TIMEOUT_MESSAGE = "Model stream timed out waiting for the first byte.";
+
+function abortError(signal: AbortSignal): Error {
+  if (isFirstByteTimeout(signal)) return new Error(FIRST_BYTE_TIMEOUT_MESSAGE);
+  return new Error("Model run aborted");
+}
+
+function isFirstByteTimeout(signal: AbortSignal, error?: unknown): boolean {
+  const reason = signal.reason;
+  if (reason instanceof Error && reason.message === FIRST_BYTE_TIMEOUT_MESSAGE) return true;
+  return error instanceof Error && error.message === FIRST_BYTE_TIMEOUT_MESSAGE;
 }
 
 export interface CreateSessionOptions {
@@ -420,6 +484,7 @@ export interface CreateSessionOptions {
   readonly systemPrompt: string;
   readonly customTools: readonly AnyToolDefinition[];
   readonly context?: TurnContextProviders;
+  readonly streamFirstByteTimeoutMs?: number;
 }
 
 function formatSkillCatalog(entries: readonly {

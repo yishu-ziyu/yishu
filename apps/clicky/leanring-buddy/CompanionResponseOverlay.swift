@@ -58,6 +58,7 @@ final class CompanionResponseOverlayManager {
     }
 
     func updateStreamingText(_ accumulatedText: String) {
+        cancelScheduledHide()
         viewModel.streamingResponseText = accumulatedText
         guard !accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
@@ -72,7 +73,8 @@ final class CompanionResponseOverlayManager {
     func finishStreaming() {
         cancelScheduledHide()
 
-        // Six seconds preserves the existing reading window after streaming.
+        // Reading window starts after the turn has settled the visible
+        // answer, not while speech or a later republish is still in flight.
         let hideWorkItem = DispatchWorkItem { [weak self] in
             self?.fadeOutAndHide()
         }
@@ -118,6 +120,8 @@ final class CompanionResponseOverlayManager {
         clearTextWorkItem = clearWorkItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.34, execute: clearWorkItem)
     }
+
+    var hasScheduledHide: Bool { autoHideWorkItem != nil }
 
     private func cancelScheduledHide() {
         autoHideWorkItem?.cancel()

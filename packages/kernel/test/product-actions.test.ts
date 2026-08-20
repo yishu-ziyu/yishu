@@ -32,6 +32,25 @@ describe("product actions via createYishuKernel", () => {
     assert.equal(memory.confidence, 0.91);
   });
 
+  it("empty or whitespace remember does not persist; personal note is listable", async () => {
+    const { registry, store } = createYishuKernel();
+    const empty = await registry.invoke("remember", {
+      caller: "ui",
+      input: { claim: "   ", scope: "personal" },
+    });
+    assert.equal(empty.status, "failed");
+    assert.equal((await store.listMemories({ scope: "personal" })).length, 0);
+
+    const saved = await registry.invoke("remember", {
+      caller: "ui",
+      input: { claim: "周四把钥匙放在抽屉第二格", scope: "personal" },
+    });
+    assert.equal(saved.status, "verified");
+    const listed = await store.listMemories({ scope: "personal" });
+    assert.equal(listed.length, 1);
+    assert.match(listed[0]?.summary ?? "", /钥匙放在抽屉/);
+  });
+
   it("does not persist a memory when its store mutation is cancelled", async () => {
     const { registry, store } = createYishuKernel();
     const controller = new AbortController();

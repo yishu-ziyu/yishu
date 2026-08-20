@@ -34,7 +34,9 @@ sequenceDiagram
 ```
 
 `access`, `refresh`, `api_key`, account identifiers, and raw provider errors
-never enter a runtime event, log, or trace. The auth file is created lazily at
+never enter a runtime event, log, or trace. A public `accountLabel` may carry
+only an email or short login name so the panel can say who this Mac signed in
+as. The auth file is created lazily at
 `~/Library/Application Support/Yishu/Auth/auth.json`; its directory is `0700`,
 the file is `0600`, and modifications use a cross-process lock. Tests inject
 `InMemoryCredentialStore` and never start a real login or network request.

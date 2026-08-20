@@ -11,6 +11,7 @@ import type { YishuStorePort } from "../store/yishu-store.js";
 import type { MemoryClaim } from "../store/types.js";
 import { assertPersistableMemoryFields } from "../store/ledger-safety.js";
 import { MemoryTruthLayer } from "./truth-layer.js";
+import type { VisibleMemoryFile } from "./visible-file.js";
 import { EXTRACTION_MAX_ATTEMPTS, type ExtractionQueuePort } from "./extraction-queue.js";
 
 export interface ExtractionSnapshot {
@@ -77,6 +78,7 @@ interface ExtractionDeps {
   readonly truth: MemoryTruthLayer;
   readonly store: YishuStorePort;
   readonly model: MemoryExtractionModel;
+  readonly visible?: VisibleMemoryFile;
   readonly now?: () => Date;
 }
 
@@ -184,6 +186,9 @@ async function processOne(deps: ExtractionDeps, turnId: string): Promise<Process
         tags: [],
         truthRef: deps.truth.truthRefFor(snapshot.scopeKey, factId),
       });
+      if (deps.visible !== undefined) {
+        await deps.visible.appendFacts([candidate.trim()]);
+      }
     }
   }
 

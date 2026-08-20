@@ -253,8 +253,17 @@ enum YishuProductUtteranceRouter {
         if text.range(of: #"(?:吗|么|嘛|呢)\s*[。！!]?\s*$"#, options: .regularExpression) != nil {
             return true
         }
+        // ICU \b treats Han and digits as one word, so `能不能\b` misses
+        // 「能不能20分钟…」. Node's \b is ASCII-only and does match. Split
+        // the lead-ins so the Swift mirror stays aligned with Kernel.
+        if text.range(
+            of: #"^(?:能不能|可不可以|是否|要不要|是不是|可以不可以)"#,
+            options: .regularExpression
+        ) != nil {
+            return true
+        }
         return text.range(
-            of: #"^(?:能不能|可不可以|是否|要不要|是不是|可以不可以|can you|could you|would you|will you)\b"#,
+            of: #"^(?:can you|could you|would you|will you)\b"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }

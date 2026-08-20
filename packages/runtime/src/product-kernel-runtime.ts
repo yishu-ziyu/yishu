@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import {
   createDefaultProductKernel,
   formatProductActionSpeech,
@@ -6,11 +7,18 @@ import {
   normalizeSessionScope,
   sessionScopeKey,
   sessionScopesEqual,
-  routeProductUtterance,
-  classifyRelativeTimeReminder,
+  deriveTurnIntentFrame,
+  taskExecutionContractForIntent,
   RELATIVE_TIME_REMINDER_CLARIFY_SPEECH,
+  hydrateVisibleMemoryIfNew,
+  isVisibleFactSuppressed,
+  recallFromVisibleFacts,
   recallRelevantMemories,
+  readLegacyFactClaims,
   sanitizeVisibleText,
+  everosMessagesForTurn,
+  isEverOSProfileMemory,
+  assertPersistableMemoryText,
   selectRelevantMindLessons,
   type CreateNoteExecutor,
   type CreateNoteRequest,
@@ -19,13 +27,16 @@ import {
   type ConversationEvent,
   type ConversationTurn,
   type RecalledMemory,
+  type VisibleMemoryAuthoritySnapshot,
+  type EverOSMemoryPort,
   type TrailSourceFrame,
   type ConversationArchiveFailureReason,
   type ConversationOpenFailureReason,
   type SessionScope,
   type TaskExecutionContract,
+  type TurnIntentFrame,
+  type ProductUtteranceRoute,
   type YishuKernel,
-  createTaskExecutionContract,
 } from "@yishu/kernel";
 import type {
   ContextFrame,
@@ -36,6 +47,8 @@ import type {
   HistoryOpenCommand,
   MemoryForgetCommand,
   MemoryListCommand,
+  MemoryRememberCommand,
+  SpeechExcerptCommand,
   RuntimeEvent,
   TrailObserveCommand,
   TurnCancelCommand,
@@ -49,6 +62,7 @@ import { ComputerActionError, type ComputerUsePort } from "./computer-use-port.j
 import type { YishuAuthService } from "./auth-service.js";
 import { RuntimeTaskProgressTracker } from "./task-progress.js";
 import { attachTaskExecutionContract } from "./task-contract.js";
+import { attachTurnIntentFrame } from "./intent-frame.js";
 import { trustedExternalReceiptFor } from "./trusted-task-receipt.js";
 import { RuntimeSuggestionTracker } from "./suggestion-loop.js";
 import {
@@ -81,6 +95,10 @@ import {
   type ExtractionSnapshot,
   type MemoryExtractionModel,
 } from "@yishu/kernel";
+import type { SpeechExcerptModel } from "./speech-excerpt-model.js";
+import { EverOSIngestionCoordinator } from "./everos-ingestion.js";
+import type { EverOSPendingSessionStore } from "./everos-pending-sessions.js";
+import { ingestVerifiedTaskLearning } from "./everos-task-learning.js";
 
 type TerminalKind = "completed" | "cancelled" | "failed";
 
@@ -93,7 +111,6 @@ function terminalKindForStatus(status: ConversationTurn["status"]): TerminalKind
   return "failed";
 }
 
-const COMPUTER_EFFECT_INTENT = /(?:\b(?:click|press|open|close|type|enter|select|drag|scroll|send|delete|move|rename|create|save|execute)\b|点击|打开|关闭|输入|选择|拖动|滚动|发送|删除|移动|重命名|创建|保存|执行)/iu;
 const CONVERSATION_HISTORY_MAX_TURNS = 10;
 const CONVERSATION_HISTORY_TEXT_BYTES = 5_000;
 const RECENT_TRAIL_WINDOW_MS = 2 * 60_000;
@@ -137,19 +154,18 @@ async function settlesWithin(
   }
 }
 
-function contractForOrdinaryTurn(command: TurnStartCommand): TaskExecutionContract {
-  const objective = sanitizeVisibleText(command.payload.utterance, "task objective")
+function intentForUtterance(
+  utterance: string,
+  contextFrame: ContextFrame,
+): TurnIntentFrame {
+  const objective = sanitizeVisibleText(utterance, "task objective")
     .replace(/\s+/gu, " ")
     .trim()
     .slice(0, 160);
-  const currentPageNote = isCurrentPageActionsNoteUtterance(command.payload.utterance);
-  const externalEffect = COMPUTER_EFFECT_INTENT.test(command.payload.utterance) || currentPageNote;
-  return createTaskExecutionContract({
-    objective: objective || "完成本轮任务",
-    successMode: externalEffect ? "external_effect" : "read_only_delivery",
-    authority: currentPageNote ? "explicit_approval" : externalEffect ? "reversible" : "automatic",
-    risk: externalEffect ? "medium" : "low",
-    maxAttempts: 1,
+  return deriveTurnIntentFrame(utterance, {
+    contextFrame,
+    currentPageNote: isCurrentPageActionsNoteUtterance(utterance),
+    objective,
   });
 }
 
@@ -288,6 +304,7 @@ interface TurnLedgerState {
   terminalPersistence?: Promise<void>;
   terminalDelivered: boolean;
   ledgerError?: unknown;
+  readonly intent: TurnIntentFrame;
   contract?: TaskExecutionContract;
   /** Product action name when this turn was routed to the kernel registry. */
   productAction?: string;
@@ -368,9 +385,16 @@ export class ProductKernelRuntime implements AgentRuntime {
   private taskPresenceSink: ((update: DelegatedTaskPresenceUpdate) => void) | undefined;
   /** Optional write-side memory extraction worker (ADR 0016 #3). */
   private readonly extractionModel: MemoryExtractionModel | undefined;
+  /** Vendored EverOS HTTP port. When set, it owns extraction and recall candidates. */
+  private readonly everos: EverOSMemoryPort | undefined;
+  /** Session-aware write boundary for the EverOS port. */
+  private readonly everosIngestion: EverOSIngestionCoordinator | undefined;
+  /** Optional same-turn spoken excerpt (voice mouth, not memory). */
+  private readonly speechExcerptModel: SpeechExcerptModel | undefined;
   private extractionDrainScheduled = false;
   private extractionDrainTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
+  private readonly visibleReady: Promise<void>;
 
   /** Forward the optional auth capability without making the kernel own OAuth. */
   get authService(): YishuAuthService | undefined {
@@ -381,9 +405,25 @@ export class ProductKernelRuntime implements AgentRuntime {
     private readonly inner: AgentRuntime,
     kernel: YishuKernel = createDefaultProductKernel(),
     private readonly computerUsePort?: ComputerUsePort,
-    options: { memoryExtractionModel?: MemoryExtractionModel } = {},
+    options: {
+      memoryExtractionModel?: MemoryExtractionModel;
+      speechExcerptModel?: SpeechExcerptModel;
+      everos?: EverOSMemoryPort;
+      everosIdleMs?: number;
+      everosPendingStore?: EverOSPendingSessionStore;
+    } = {},
   ) {
     this.kernel = kernel;
+    this.speechExcerptModel = options.speechExcerptModel;
+    this.everos = options.everos;
+    this.everosIngestion = options.everos === undefined
+      ? undefined
+      : new EverOSIngestionCoordinator(options.everos, {
+          ...(options.everosIdleMs === undefined ? {} : { idleMs: options.everosIdleMs }),
+          ...(options.everosPendingStore === undefined
+            ? {}
+            : { pendingStore: options.everosPendingStore }),
+        });
     // Runtime side of delegated execution (RFC v2 / ADR 0009): child turns run
     // directly on the inner harness with their own conversation identity; the
     // kernel keeps the only task-status truth.
@@ -391,6 +431,27 @@ export class ProductKernelRuntime implements AgentRuntime {
       kernel,
       executeTurn: (command, emit) => this.inner.startTurn(command, emit),
       cancelTurn: (command, emit) => this.inner.cancelTurn(command, emit),
+      ...(this.everosIngestion === undefined
+        ? {}
+        : {
+            onSettledTask: (task) => {
+              if (this.everosIngestion === undefined) return;
+              void ingestVerifiedTaskLearning(this.everosIngestion, task)
+                .catch(() => undefined);
+            },
+          }),
+      ...(this.speechExcerptModel
+        ? {
+            excerptSpokenFinding: async ({ text, providerId, modelId }) => {
+              if (!providerId || !modelId || !this.speechExcerptModel) return text;
+              return this.speechExcerptModel.excerpt({
+                providerId,
+                modelId,
+                visibleText: text,
+              });
+            },
+          }
+        : {}),
       ...("releaseConversationSession" in this.inner
         && typeof (this.inner as { releaseConversationSession?: unknown }).releaseConversationSession === "function"
         ? {
@@ -448,10 +509,15 @@ export class ProductKernelRuntime implements AgentRuntime {
     // ADR 0016 #3: write-side extraction worker. Startup drain replays
     // pending/failed rows from before a crash; every enqueue schedules the
     // next drain. Turns never wait for extraction.
-    if (this.kernel.memory !== undefined && options.memoryExtractionModel !== undefined) {
+    if (
+      this.everos === undefined
+      && this.kernel.memory !== undefined
+      && options.memoryExtractionModel !== undefined
+    ) {
       this.extractionModel = options.memoryExtractionModel;
       void this.drainExtraction().catch(() => undefined);
     }
+    this.visibleReady = this.hydrateVisibleMemory().catch(() => undefined);
   }
 
   private scheduleExtractionDrain(): void {
@@ -475,14 +541,21 @@ export class ProductKernelRuntime implements AgentRuntime {
       truth: memory.truth,
       store: this.kernel.store,
       model: this.extractionModel,
+      visible: memory.visible,
     });
   }
 
   /**
-   * ADR 0016 #3/#5/#7: enqueue one completed model turn for extraction.
-   * Fire-and-forget; product-action turns and private scopes never enqueue.
+   * ADR 0017: ordinary turns and spoken/panel remember go to EverOS.
+   * Homemade queue stays only when EverOS is not wired.
    */
   private enqueueMemoryExtraction(state: TurnLedgerState, replyText: string | undefined): void {
+    if (this.disposed) return;
+    if (this.everosIngestion !== undefined) {
+      if (state.productAction !== undefined && state.productAction !== "remember") return;
+      this.ingestEverOS(state, replyText);
+      return;
+    }
     // Enqueueing is independent of having a model in this process: rows stay
     // pending and replay wherever a model is wired (ADR 0016 #3).
     if (this.kernel.memory === undefined) return;
@@ -509,9 +582,49 @@ export class ProductKernelRuntime implements AgentRuntime {
       .catch(() => undefined);
   }
 
+  private ingestEverOS(state: TurnLedgerState, replyText: string | undefined): void {
+    if (this.everosIngestion === undefined) return;
+    const scopeKey = memoryScopeForSession(state.sessionScope);
+    if (scopeKey === null) return;
+    const utterance = state.command.payload.utterance;
+    try {
+      assertPersistableMemoryText(utterance, "memory utterance");
+      if (replyText !== undefined) assertPersistableMemoryText(replyText, "memory reply");
+    } catch {
+      return;
+    }
+    const sessionId = state.conversationId;
+    const messages = everosMessagesForTurn({
+      utterance,
+      ...(replyText === undefined ? {} : { replyText }),
+    });
+    void this.everosIngestion.ingest(
+      { sessionId, scopeKey, messages },
+      { flushNow: state.productAction === "remember" },
+    )
+      .catch(() => undefined);
+  }
+
+  private async hydrateVisibleMemory(): Promise<void> {
+    const memory = this.kernel.memory;
+    if (memory === undefined) return;
+    const leftover = await readLegacyFactClaims(
+      path.join(memory.truth.root, "personal", "facts", "preferences.md"),
+    );
+    const stored = (await this.kernel.store.searchMemory("", {
+      scope: "personal",
+      minConfidence: 0,
+    }))
+      .filter((claim) => claim.retiredAt === undefined)
+      .map((claim) => claim.claim);
+    await hydrateVisibleMemoryIfNew(memory.visible, [...leftover, ...stored]);
+    await memory.visible.reconcileAuthority();
+  }
+
   /** Wait for the constructor-started durable recovery without changing it. */
   async initialize(): Promise<void> {
     await this.recoveryReady;
+    await this.visibleReady;
   }
 
   /** One projection sink shared by delegated work and product-owned reminders. */
@@ -869,7 +982,12 @@ export class ProductKernelRuntime implements AgentRuntime {
         }));
         return;
       }
-      const result = await this.kernel.store.forgetMemory(command.payload.memoryId, {
+      const store = this.kernel.store;
+      const forgotten = (await store.searchMemory("", {
+        scope: memoryScope,
+        minConfidence: 0,
+      })).find((memory) => memory.id === command.payload.memoryId);
+      const result = await store.forgetMemory(command.payload.memoryId, {
         expectedScope: memoryScope,
       });
       if (result === null) {
@@ -878,6 +996,12 @@ export class ProductKernelRuntime implements AgentRuntime {
           message: "这条记忆不在当前范围，未删除。",
         }));
         return;
+      }
+      if (!result.alreadyGone && forgotten !== undefined) {
+        const visible = this.kernel.memory?.visible;
+        if (visible !== undefined) {
+          await visible.removeFactsMatching(forgotten.claim);
+        }
       }
       emit(runtimeEvent("memory.forgotten", command.requestId, command.traceId, {
         memoryId: result.id,
@@ -888,6 +1012,155 @@ export class ProductKernelRuntime implements AgentRuntime {
       emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
         code: "memory_forget_failed",
         message: "忘记失败，原记忆仍保留。",
+      }));
+    }
+  }
+
+  /**
+   * Panel note write. Uses the product remember action (same store as
+   * spoken「记住…」). Empty text never reaches here; unverified writes
+   * are not reported as success.
+   */
+  async rememberMemory(command: MemoryRememberCommand, emit: RuntimeEventSink): Promise<void> {
+    if (this.disposed) {
+      emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+        code: "runtime_disposed",
+        message: "这次没有记下。",
+      }));
+      return;
+    }
+    try {
+      const sessionScope = normalizeSessionScope(command.payload.sessionScope);
+      if (sessionScope.kind === "private") {
+        emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+          code: "private_session_not_writable",
+          message: "不保存的对话里不会记下长期内容。",
+        }));
+        return;
+      }
+      if (sessionScope.kind !== "personal") {
+        emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+          code: "scope_not_supported",
+          message: "只能在「我的」里记下。",
+        }));
+        return;
+      }
+      const memoryScope = memoryScopeForSession(sessionScope);
+      if (memoryScope === null) {
+        emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+          code: "scope_not_supported",
+          message: "只能在「我的」里记下。",
+        }));
+        return;
+      }
+      const text = command.payload.text.trim();
+      if (text.length === 0) {
+        emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+          code: "empty_text",
+          message: "先写一句再记下。",
+        }));
+        return;
+      }
+      const receipt = await this.kernel.registry.invoke("remember", {
+        caller: "ui",
+        input: {
+          claim: text,
+          scope: memoryScope,
+          source: "conversation",
+          confidence: 0.95,
+        },
+      });
+      const output = asRecord(receipt.output);
+      const memoryId = typeof output.id === "string" ? output.id : undefined;
+      if (receipt.status === "verified" && memoryId !== undefined) {
+        if (this.everosIngestion !== undefined) {
+          const sessionId = `note-${memoryId}`;
+          void this.everosIngestion.ingest({
+            sessionId,
+            scopeKey: memoryScope,
+            messages: everosMessagesForTurn({ utterance: text }),
+          }, { flushNow: true })
+            .catch(() => undefined);
+        }
+        const listed = await this.kernel.store.listMemories({
+          scope: memoryScope,
+          limit: 50,
+        });
+        const item = listed.find((row) => row.id === memoryId);
+        if (item === undefined) {
+          emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+            code: "memory_unconfirmed",
+            message: "可能记下了，但我没能确认。",
+          }));
+          return;
+        }
+        emit(runtimeEvent("memory.remembered", command.requestId, command.traceId, {
+          memoryId: item.id,
+          summary: item.summary,
+          capturedAt: item.capturedAt,
+          source: item.source,
+          scope: item.scope,
+          confirmed: true,
+        }));
+        return;
+      }
+      const maybeWritten = receipt.status === "cancelled_after_commit"
+        || memoryId !== undefined;
+      emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+        code: maybeWritten ? "memory_unconfirmed" : "memory_remember_failed",
+        message: maybeWritten
+          ? "可能记下了，但我没能确认。"
+          : "这次没有记下。",
+      }));
+    } catch {
+      emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+        code: "memory_remember_failed",
+        message: "这次没有记下。",
+      }));
+    }
+  }
+
+  /**
+   * Same-turn spoken excerpt. Never echoes the visible essay on failure.
+   */
+  async excerptSpeech(command: SpeechExcerptCommand, emit: RuntimeEventSink): Promise<void> {
+    if (this.disposed) {
+      emit(runtimeEvent("speech.failed", command.requestId, command.traceId, {
+        code: "runtime_disposed",
+        message: "ProductKernelRuntime has been disposed.",
+      }));
+      return;
+    }
+    if (this.speechExcerptModel === undefined) {
+      emit(runtimeEvent("speech.failed", command.requestId, command.traceId, {
+        code: "excerpt_unavailable",
+        message: "暂时无法抽出口播。",
+      }));
+      return;
+    }
+    try {
+      const spokenText = await this.speechExcerptModel.excerpt({
+        providerId: command.payload.modelPreference.provider,
+        modelId: command.payload.modelPreference.model,
+        visibleText: command.payload.visibleText,
+      });
+      const trimmed = spokenText.trim();
+      if (!trimmed) {
+        emit(runtimeEvent("speech.failed", command.requestId, command.traceId, {
+          code: "excerpt_empty",
+          message: "暂时无法抽出口播。",
+        }));
+        return;
+      }
+      emit(runtimeEvent("speech.excerpted", command.requestId, command.traceId, {
+        spokenText: trimmed,
+        provider: command.payload.modelPreference.provider,
+        model: command.payload.modelPreference.model,
+      }));
+    } catch {
+      emit(runtimeEvent("speech.failed", command.requestId, command.traceId, {
+        code: "excerpt_failed",
+        message: "暂时无法抽出口播。",
       }));
     }
   }
@@ -951,6 +1224,10 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
 
       this.activateTrailScope(sessionScope);
+      const intent = intentForUtterance(
+        command.payload.utterance,
+        command.payload.contextFrame,
+      );
       state = {
         command,
         conversationId,
@@ -962,9 +1239,7 @@ export class ProductKernelRuntime implements AgentRuntime {
         productActionCancelRequested: false,
         interruptEligible:
           command.payload.capabilityProfile === "conversation"
-          && contractForOrdinaryTurn(command).successMode === "read_only_delivery"
-          && routeProductUtterance(command.payload.utterance, command.payload.contextFrame) === null
-          && classifyRelativeTimeReminder(command.payload.utterance) === null,
+          && intent.steerable,
         generation: 1,
         effectsStarted: false,
         effectsBlocked: false,
@@ -973,7 +1248,8 @@ export class ProductKernelRuntime implements AgentRuntime {
         supersedeRequested: false,
         innerStarted: false,
         terminalDelivered: false,
-        contract: contractForOrdinaryTurn(command),
+        intent,
+        contract: taskExecutionContractForIntent(intent),
       };
       this.activeRequestIds.add(command.requestId);
       this.activeTurns.set(command.requestId, state);
@@ -1063,17 +1339,13 @@ export class ProductKernelRuntime implements AgentRuntime {
       );
     }
 
-    const route = routeProductUtterance(
-      command.payload.utterance,
-      command.payload.contextFrame,
-    );
-    if (!route) {
-      const reminder = classifyRelativeTimeReminder(command.payload.utterance);
-      if (reminder?.kind === "question" || reminder?.kind === "incomplete") {
-        await this.completeSpokenProductReply(state, RELATIVE_TIME_REMINDER_CLARIFY_SPEECH);
-        return;
-      }
+    const intentRoute = state.intent.route;
+    if (intentRoute.kind === "model") {
       await this.runInnerTurn(state);
+      return;
+    }
+    if (intentRoute.kind === "clarify") {
+      await this.completeSpokenProductReply(state, RELATIVE_TIME_REMINDER_CLARIFY_SPEECH);
       return;
     }
 
@@ -1082,6 +1354,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       return;
     }
 
+    const route = intentRoute.value;
     const memoryScope = memoryScopeForSession(state.sessionScope);
     const scopedRoute = {
       ...route,
@@ -1262,6 +1535,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       commandForInner = attachRecalledMind(commandForInner, mindLessons);
       commandForInner = attachDelegatedResults(commandForInner, delegatedResults);
       commandForInner = attachRecentTrail(commandForInner, recentTrail);
+      commandForInner = attachTurnIntentFrame(commandForInner, state.intent);
       commandForInner = attachTaskExecutionContract(commandForInner, state.contract!);
       // Mark started before the last terminal check so a concurrent cancelTurn
       // will invoke inner.cancelTurn and unblock a gated startTurn.
@@ -1401,7 +1675,7 @@ export class ProductKernelRuntime implements AgentRuntime {
 
   private async runProductAction(
     state: TurnLedgerState,
-    route: NonNullable<ReturnType<typeof routeProductUtterance>>,
+    route: ProductUtteranceRoute,
   ): Promise<void> {
     const { command } = state;
     // ADR 0016 #5: product-action turns never enqueue memory extraction —
@@ -2116,9 +2390,11 @@ export class ProductKernelRuntime implements AgentRuntime {
       }, state.conversationId as ConversationId));
       return;
     }
-    if (COMPUTER_EFFECT_INTENT.test(command.payload.message)
-      || routeProductUtterance(command.payload.message, state.command.payload.contextFrame) !== null
-      || classifyRelativeTimeReminder(command.payload.message) !== null) {
+    const steerIntent = intentForUtterance(
+      command.payload.message,
+      state.command.payload.contextFrame,
+    );
+    if (!steerIntent.steerable) {
       emit(runtimeEvent("turn.interrupt.rejected", command.requestId, command.traceId, {
         generation: state.generation,
         code: "effectful_steer",
@@ -2373,6 +2649,8 @@ export class ProductKernelRuntime implements AgentRuntime {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    const everosDispose = this.everosIngestion?.dispose().catch(() => undefined)
+      ?? Promise.resolve();
     if (this.extractionDrainTimer !== undefined) {
       clearTimeout(this.extractionDrainTimer);
       this.extractionDrainTimer = undefined;
@@ -2442,6 +2720,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     });
     if (!await runBeforeDeadline(() => Promise.allSettled([
       innerDispose,
+      everosDispose,
       ...ordinarySettlement,
       ...this.activeTurnOperations,
       ...[...pageNoteReceiptStates].map((state) => state.currentPageNoteReceiptSettled ?? Promise.resolve()),
@@ -3084,15 +3363,86 @@ export class ProductKernelRuntime implements AgentRuntime {
     if (state.sessionScope.kind === "private") return [];
     const scope = memoryScopeForSession(state.sessionScope);
     if (scope === null) return [];
-    try {
-      return await recallRelevantMemories(
-        this.kernel.store,
-        state.command.payload.utterance,
-        { scope },
-      );
-    } catch {
-      return [];
+    const merged: RecalledMemory[] = [];
+    const seen = new Set<string>();
+    const pushAll = (rows: readonly RecalledMemory[]): void => {
+      for (const row of rows) {
+        const key = row.claim.replace(/\s+/gu, " ").trim().toLowerCase();
+        if (key.length === 0 || seen.has(key)) continue;
+        seen.add(key);
+        merged.push(row);
+      }
+    };
+
+    const visible = this.kernel.memory?.visible;
+    let visibleUsed = false;
+    let authority: VisibleMemoryAuthoritySnapshot | undefined;
+    let derivedRecallAllowed = true;
+    if (visible !== undefined) {
+      if (await visible.exists()) {
+        visibleUsed = true;
+        try {
+          authority = await visible.reconcileAuthority();
+          pushAll(recallFromVisibleFacts(
+            authority.facts,
+            state.command.payload.utterance,
+            { scope },
+          ));
+        } catch {
+          derivedRecallAllowed = false;
+          try {
+            pushAll(recallFromVisibleFacts(
+              await visible.listFacts(),
+              state.command.payload.utterance,
+              { scope },
+            ));
+          } catch {
+            // The visible authority surface is unreadable; use no durable memory.
+          }
+        }
+      }
     }
+
+    if (!derivedRecallAllowed) return merged;
+
+    const currentAuthority = authority;
+    const acceptedDerived = (rows: readonly RecalledMemory[]): RecalledMemory[] =>
+      currentAuthority === undefined
+        ? [...rows]
+        : rows.filter((row) => !isVisibleFactSuppressed(currentAuthority, row.claim));
+
+    if (this.everos !== undefined) {
+      try {
+        pushAll(acceptedDerived(await this.everos.profile({ scopeKey: scope })));
+      } catch {
+        // Derived profile facts are optional; a miss must not skip other memory.
+      }
+    }
+
+    if (this.everos !== undefined) {
+      try {
+        pushAll(acceptedDerived(await this.everos.search({
+          scopeKey: scope,
+          query: state.command.payload.utterance,
+        })));
+        return merged;
+      } catch {
+        // Fall through to the store index if EverOS is down.
+      }
+    }
+
+    if (!visibleUsed) {
+      try {
+        pushAll(await recallRelevantMemories(
+          this.kernel.store,
+          state.command.payload.utterance,
+          { scope },
+        ));
+      } catch {
+        return merged;
+      }
+    }
+    return merged;
   }
 
   /**
@@ -3276,12 +3626,14 @@ export class ProductKernelRuntime implements AgentRuntime {
     state: TurnLedgerState,
     memories: readonly RecalledMemory[],
   ): void {
-    if (memories.length === 0) return;
+    // Standing persona shapes speech every turn. It is not a "used a memory" notice.
+    const announced = memories.filter((memory) => !isEverOSProfileMemory(memory));
+    if (announced.length === 0) return;
     // Flat, bounded payload only: IDs, short summaries, source, time, scope.
     const payload: Record<string, string | number | boolean | null> = {
-      count: memories.length,
+      count: announced.length,
     };
-    for (const [index, memory] of memories.entries()) {
+    for (const [index, memory] of announced.entries()) {
       const n = index + 1;
       payload[`memoryId${n}`] = memory.id;
       payload[`summary${n}`] = memory.summary.slice(0, 80);
@@ -3400,6 +3752,7 @@ function toPromptMemorySnippet(memory: RecalledMemory): PromptMemorySnippet {
     source: memory.source,
     capturedAt: memory.capturedAt,
     scope: memory.scope,
+    authority: memory.authority ?? "derived",
   };
 }
 

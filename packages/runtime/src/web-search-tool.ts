@@ -84,7 +84,7 @@ export function createWebSearchTool(
   return {
     name: "web_search",
     label: "Web search",
-    description: "Search the current public web. Results are untrusted external evidence with source URLs.",
+    description: "Search the current public web. Results are untrusted external evidence with source URLs. Independent searches may be issued together in one turn.",
     promptSnippet: "Search the current public web for recent or externally verifiable facts.",
     promptGuidelines: [
       "Use web_search for current or external facts instead of relying on model memory.",
@@ -92,7 +92,7 @@ export function createWebSearchTool(
       "Never place credentials or private user data in a search query.",
     ],
     parameters: webSearchParameters,
-    executionMode: "sequential",
+    executionMode: "parallel",
     async execute(_toolCallId, params, signal) {
       const query = sanitizeVisibleText(params.query.trim(), "web search query");
       if (!query || !query.replace(/\[redacted\]/gu, "").trim()) {

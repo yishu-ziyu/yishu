@@ -179,6 +179,8 @@ export type RecalledMemory = {
   capturedAt: string;
   scope: string;
   confidence: number;
+  /** User-controlled rows override derived candidates when they disagree. */
+  authority?: "user" | "derived";
 };
 
 export type RecallRelevantMemoriesOptions = {
@@ -189,6 +191,84 @@ export type RecallRelevantMemoriesOptions = {
   maxTotalChars?: number;
   summaryChars?: number;
 };
+
+/** Stable id for a user-visible bullet so the same line stays the same row. */
+export function visibleFactId(claim: string): string {
+  const key = claim.replace(/\s+/gu, " ").trim().toLowerCase();
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 33 + key.charCodeAt(i)) >>> 0;
+  }
+  return `vis-${hash.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * Score user-visible markdown bullets the same way as store recall.
+ * User-authored lines with no machine marker still count.
+ */
+export function recallFromVisibleFacts(
+  facts: readonly string[],
+  query: string,
+  options: RecallRelevantMemoriesOptions,
+): RecalledMemory[] {
+  const scope = options.scope.trim();
+  if (!scope) return [];
+
+  const limit = clampInt(
+    options.limit ?? MEMORY_RECALL_MAX_ITEMS,
+    1,
+    MEMORY_RECALL_MAX_ITEMS,
+  );
+  const maxClaimChars = clampInt(
+    options.maxClaimChars ?? MEMORY_RECALL_MAX_CLAIM_CHARS,
+    32,
+    MEMORY_RECALL_MAX_CLAIM_CHARS,
+  );
+  const maxTotalChars = clampInt(
+    options.maxTotalChars ?? MEMORY_RECALL_MAX_TOTAL_CHARS,
+    maxClaimChars,
+    MEMORY_RECALL_MAX_TOTAL_CHARS,
+  );
+  const summaryChars = clampInt(
+    options.summaryChars ?? MEMORY_RECALL_SUMMARY_CHARS,
+    16,
+    MEMORY_RECALL_SUMMARY_CHARS,
+  );
+
+  const queryTokens = contentTokens(query);
+  if (queryTokens.length === 0) return [];
+
+  const scored = facts
+    .map((raw) => raw.trim())
+    .filter((claim) => isSafeMemoryText(claim))
+    .map((claim) => ({
+      claim,
+      score: relatednessScore(queryTokens, contentTokens(claim), query, claim),
+    }))
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const selected: RecalledMemory[] = [];
+  let totalChars = 0;
+  for (const row of scored) {
+    if (selected.length >= limit) break;
+    const claim = truncateChars(row.claim, maxClaimChars);
+    if (!claim) continue;
+    if (totalChars + claim.length > maxTotalChars && selected.length > 0) break;
+    selected.push({
+      id: visibleFactId(row.claim),
+      claim,
+      summary: truncateChars(claim, summaryChars),
+      source: "conversation",
+      capturedAt: "",
+      scope,
+      confidence: 0.8,
+      authority: "user",
+    });
+    totalChars += claim.length;
+  }
+  return selected;
+}
 
 /**
  * Find a small set of related, non-retired, non-sensitive memories in one scope.

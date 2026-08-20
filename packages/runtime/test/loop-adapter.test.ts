@@ -1128,6 +1128,32 @@ test("cancelTurn aborts the active session and frees the request id", async (t) 
   assert.equal(session.disposed, true);
 });
 
+test("cancel after the model finishes must not emit response.completed", async (t) => {
+  const harness = createFakePiHarness();
+  const releaseCompletion = deferred();
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      current.emitTextDelta("点好了。");
+      await releaseCompletion.promise;
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const command = makeCommand();
+  const events: RuntimeEvent[] = [];
+  const turn = adapter.startTurn(command, (event) => events.push(event));
+  const session = await harness.waitForNextSession();
+  await session.promptStarted.promise;
+
+  await adapter.cancelTurn(makeCancelCommand(command), (event) => events.push(event));
+  releaseCompletion.resolve();
+  await turn;
+
+  assert.equal(events.some((event) => event.type === "response.completed"), false);
+  assert.ok(events.some((event) => event.type === "turn.cancelled"));
+  assert.equal(events.some((event) => event.type === "turn.failed"), false);
+});
+
 test("conversation release cold-starts a new session before the old abort finishes", async (t) => {
   const harness = createFakePiHarness();
   harness.configureSession = (session) => {

@@ -220,7 +220,7 @@ teable record update --base-id bseXE1G4dAOJNZ36Bjq --table-id tblHpb7Pwu1b58GeSp
 
 ## Product boundaries
 
-- Formal app: `apps/clicky` → `/Applications/Clicky.app`
+- Formal app: `apps/clicky` → `/Applications/奕枢.app`
 - kernel + runtime product layer；Pi = harness only
 - No Kairos；无第二产品身份
 - Boss conversation `D7D12DFF-2A97-49C2-BFDF-D07D5B19FEE0` 必须保留

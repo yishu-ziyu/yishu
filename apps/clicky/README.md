@@ -42,7 +42,7 @@ The app keeps the existing Clicky interaction contract:
   stale desktop effects; the model switches at a safe reply boundary, not at
   an arbitrary provider token;
 - stable `com.yishu.yishu-buddy` signing/TCC identity and
-  `/Applications/Clicky.app` install path.
+  `/Applications/奕枢.app` install path.
 
 Cold Runtime sessions rehydrate a bounded visible window from Kernel's exact
 conversation/scope, while hot Pi sessions keep their own transient context.

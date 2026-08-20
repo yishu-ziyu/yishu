@@ -83,6 +83,45 @@ test("computer-use port round-trips a typed action and verification result", asy
   port.dispose();
 });
 
+test("computer-use port omits blank click labels so icon buttons stay wire-valid", async () => {
+  const events: RuntimeEvent[] = [];
+  const port = new StdioComputerUsePort((event) => events.push(event), 1_000);
+  const requestId = randomUUID();
+  const traceId = randomUUID();
+  const pendingResult = port.perform({
+    action: "left_click",
+    x: 40,
+    y: 20,
+    label: "   ",
+  }, { requestId, traceId });
+
+  const requestEvent = events.at(0);
+  assert.equal(requestEvent?.type, "computer.action.requested");
+  const payload = computerActionRequestedPayloadSchema.parse(requestEvent?.payload);
+  assert.equal(payload.action, "left_click");
+  assert.equal("label" in payload, false);
+
+  assert.equal(port.resolve({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "computer.action.result",
+    requestId,
+    traceId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      actionId: payload.actionId,
+      succeeded: false,
+      verified: false,
+      message: "nack",
+      status: "failed",
+      code: "runtime_error",
+      method: "unknown",
+      attemptId: payload.attemptId,
+    },
+  }), true);
+  await pendingResult;
+  port.dispose();
+});
+
 test("computer-use port carries runtime-owned set_text target and AX read-back receipt", async () => {
   const events: RuntimeEvent[] = [];
   const port = new StdioComputerUsePort((event) => events.push(event), 1_000);
@@ -373,6 +412,8 @@ test("computer_control tool delegates to the product-owned port", async () => {
       evidence: "Selected state changed.",
     };
   });
+
+  assert.equal(tool.executionMode, "sequential");
 
   const result = await tool.execute("tool-call", {
     action: "left_click",

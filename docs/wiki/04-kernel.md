@@ -9,7 +9,7 @@ Review: packages/kernel 源码结构变化时
 
 `@yishu/kernel`（[packages/kernel](../../packages/kernel)）是产品层：**turn 之上的产品真相**——`YishuAction` 注册表、`ContextTrail`、证据存储（MemoryClaim / Learning / Skill / Mandate / TaskTruth / Conversation 账本）、`ContextCapsule`。它不替代 Pi、不依赖 `@yishu/runtime`（依赖方向：runtime → kernel）。运行时依赖仅 `zod`；Node ≥ 22.19（SQLite 后端用内置 `node:sqlite`）。
 
-入口 `src/index.ts`：`KERNEL_VERSION = "0.0.1"`，导出五个子系统（action / context / store / actions / mind）+ 顶层模块（task-truth、task-contract、session-scope、kernel、utterance-router、memory）。
+入口 `src/index.ts`：`KERNEL_VERSION = "0.0.1"`，导出五个子系统（action / context / store / actions / mind）+ 顶层模块（intent-frame、task-truth、task-contract、session-scope、kernel、utterance-router、memory）。
 
 ```text
 packages/kernel/src/
@@ -20,6 +20,7 @@ packages/kernel/src/
 ├── mind/          # Yishu Mind 文档（策略上下文 + learned lessons）
 ├── store/         # JSON/内存/SQLite 三后端 + 账本安全 + 状态机辅助
 ├── kernel.ts      # 装配（createYishuKernel / createDefaultProductKernel）
+├── intent-frame.ts
 ├── session-scope.ts
 ├── task-contract.ts
 ├── task-truth.ts
@@ -87,6 +88,7 @@ packages/kernel/src/
 ## 4. memory / mind 子系统
 
 - `memory/recall.ts`：`recallRelevantMemories(store, query, {scope})`——只用现有 MemoryClaim 表（不引入第二个记忆产品），双向 token 命中打分（CJK 双字 bigram），最多 3 条 / 单条 200 字 / 总计 480 字；敏感 claim（`sk-`、JWT、`data:image/`、PEM 等）跳过。
+- `memory/visible-file.ts`：`~/Documents/Yishu/记忆.md` 是唯一用户可见记忆文件。删除一行会写入指纹和语义键墓碑，压制相同或相近的 EverOS 候选；面板对过期草稿做三路合并，不覆盖之后追加的条目。
 - `mind/document.ts`：单一 sectioned markdown 文档，5 个固定 section（`Who you are` 与 `Inference discipline` 为 protected）；`LEARNED_HEADING = "What you've learned"` 是自动 outcome lesson 落地区；`applyMindUpdate` / `writeMindSection` / `revertMindSection`。
 - `mind/recall.ts`：`selectRelevantMindLessons`（最多 3 条 / 600 字符）。
 - 学习门槛：`MIND_LEARN_MIN_EVIDENCE = 2`（"Once is coincidence; twice is a pattern"）。
@@ -139,13 +141,14 @@ SQLite 表：`memories`、`learnings`、`skill_candidates`、`verified_skills`�
   - `createYishuKernel({storeBackend, storeDir, sqlitePath, trail?, extraActions?})` 装配 store + trail + taskTruth + registry 并按固定顺序注册 14 个动作。
   - `createDefaultProductKernel(env)`：读 `YISHU_STORE_BACKEND`（默认 sqlite）、`YISHU_SQLITE_PATH`、`YISHU_STORE_DIR`。
 - `session-scope.ts`：`SessionScope = personal | project(projectId, projectLabel) | private`；`normalizeSessionScope`（legacy → personal）、`sessionScopeKey`（`"project:<uuid>"`）、`memoryScopeForSession`（private → null）、`assertDurableSessionScope`（private 抛 `private_session_not_persistable`）。
+- `intent-frame.ts`：`deriveTurnIntentFrame` 为每个 turn 产出唯一不可变 `TurnIntentFrame`（objective / speechAct / route / effect / successMode / authority / risk / steerable）；`resolveTurnIntentCandidate` 把规则或未来模型候选与产品权限政策解耦；Runtime 的任务合同、产品动作路由、插话和工具 effect 准入共用同一帧，工具只能收紧参数权限，不能扩大 effect 边界。
 - `task-contract.ts`：`createTaskExecutionContract`——objective ≤160 字符、**强制 `maxAttempts === 1`**、`Object.freeze`；`evaluateTaskCompletion`（read_only_delivery 看 responseText / external_effect 看外部验证）；`evaluateActionBoundary` / `decideTaskRetry`（authority 变化或 risk 升级 → escalate，不消耗 attempt）。
 - `utterance-router.ts`：`routeProductUtterance(utterance, contextFrame?)` 把短语音映射到产品动作（优先级：相对时间提醒 0.99 → 新建备忘录 0.99 → Finder 返回 0.99 → 应用返回提醒 0.99 → 记住流程 0.95 → 交给 Codex/分享上下文 0.9 → 记录学习 0.85 → 记住事实 0.88），不命中返回 null 落回 Pi；`formatProductActionSpeech` 生成动作回执后的中英文口语播报；`classifyRelativeTimeReminder` 单分类器（schedule/question/incomplete——question 与 incomplete 永远产品自留，不落 Pi）。
 - `task-truth.ts`：`TaskTruthProjector`——runtime 只报 observation，kernel 决定持久 status（no tool → no task；verified → done；completed without verification → blocked；terminal 不可被 late event 覆盖）。
 
-## 7. 测试（test/，19 个文件）
+## 7. 测试（test/）
 
-覆盖 action-registry、context-capsule、context-trail、context-watch、conversation-ledger、create-note、delegate-action、finder-history-back、memory-list-forget、memory-recall、mind-loop、mind-recall、product-actions、schedule-time-reminder、sqlite-store、store、task-truth、utterance-router。运行：`pnpm --filter @yishu/kernel test`（或 `pnpm kernel:test`）。
+覆盖 action-registry、context-capsule、context-trail、context-watch、conversation-ledger、create-note、delegate-action、finder-history-back、intent-frame 冻结语料、memory-list-forget、memory-recall、mind-loop、mind-recall、product-actions、schedule-time-reminder、sqlite-store、store、task-truth、utterance-router。运行：`pnpm --filter @yishu/kernel test`（或 `pnpm kernel:test`）。
 
 ## 关键不变量（本模块强制）
 

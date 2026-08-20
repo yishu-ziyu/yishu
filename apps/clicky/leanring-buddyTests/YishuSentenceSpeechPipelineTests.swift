@@ -3,7 +3,7 @@ import Testing
 @testable import Clicky
 
 struct YishuSentenceSpeechPipelineTests {
-    @Test @MainActor func streamsEachSentenceOnceAndFinalOnlyAddsTheTail() async {
+    @Test @MainActor func streamsEachSentenceOnceAndStopsAfterTwo() async {
         #expect(YishuSentenceSpeechPolicy.allowsStreaming(for: "解释一下当前页面"))
         #expect(!YishuSentenceSpeechPolicy.allowsStreaming(for: "点击左上角新对话"))
         #expect(!YishuSentenceSpeechPolicy.allowsStreaming(for: "先点击 A，再输入 hello"))
@@ -34,7 +34,116 @@ struct YishuSentenceSpeechPipelineTests {
         let handled = await pipeline.finish(authoritativeText: "第一句。第二句。收尾")
 
         #expect(handled)
-        #expect(spoken == ["第一句。", "第二句。", "收尾"])
+        #expect(spoken == ["第一句。", "第二句。"])
+    }
+
+    @Test @MainActor func stopsAfterTwoCompleteSentencesWhileMoreTextArrives() async {
+        var spoken: [String] = []
+        let pipeline = YishuSentenceSpeechPipeline(
+            speaker: { sentence in spoken.append(sentence) },
+            stopPlayback: {}
+        )
+
+        #expect(pipeline.consume("第一句。第二句。第三句。第四句。") == 2)
+        for _ in 0..<30 where spoken.count < 2 {
+            await Task.yield()
+        }
+        #expect(spoken == ["第一句。", "第二句。"])
+        #expect(pipeline.consume("第五句。") == 0)
+
+        let handled = await pipeline.finish(
+            authoritativeText: "第一句。第二句。第三句。第四句。第五句。"
+        )
+        #expect(handled)
+        #expect(spoken == ["第一句。", "第二句。"])
+    }
+
+    @Test @MainActor func wallWithoutSentenceBoundaryDoesNotStreamSpeak() async {
+        var spoken: [String] = []
+        let pipeline = YishuSentenceSpeechPipeline(
+            speaker: { sentence in spoken.append(sentence) },
+            stopPlayback: {}
+        )
+
+        let wall = String(repeating: "长", count: 81)
+        #expect(pipeline.consume(wall) == 0)
+        #expect(pipeline.didDetectWall)
+        #expect(spoken.isEmpty)
+
+        let handled = await pipeline.finish(authoritativeText: wall)
+        #expect(!handled)
+        #expect(spoken.isEmpty)
+        #expect(!pipeline.didCompleteSpeech)
+    }
+
+    @Test func searchCoverSpeaksWebSearchOnceAndNeverCountsAsAnswer() {
+        #expect(
+            YishuSearchCoverSpeech.shouldSpeak(
+                toolName: "web_search",
+                didSpeakCover: false,
+                didSpeakAnswer: false,
+                hasVisibleAnswerText: false
+            )
+        )
+        #expect(
+            !YishuSearchCoverSpeech.shouldSpeak(
+                toolName: "computer_control",
+                didSpeakCover: false,
+                didSpeakAnswer: false,
+                hasVisibleAnswerText: false
+            )
+        )
+        #expect(
+            !YishuSearchCoverSpeech.shouldSpeak(
+                toolName: "web_search",
+                didSpeakCover: true,
+                didSpeakAnswer: false,
+                hasVisibleAnswerText: false
+            )
+        )
+        #expect(
+            !YishuSearchCoverSpeech.shouldSpeak(
+                toolName: "web_search",
+                didSpeakCover: false,
+                didSpeakAnswer: true,
+                hasVisibleAnswerText: false
+            )
+        )
+        #expect(
+            !YishuSearchCoverSpeech.shouldSpeak(
+                toolName: "web_search",
+                didSpeakCover: false,
+                didSpeakAnswer: false,
+                hasVisibleAnswerText: true
+            )
+        )
+        #expect(YishuSearchCoverSpeech.line == "好的，我去查查看。")
+        #expect(!YishuSearchCoverSpeech.line.contains("web_search"))
+    }
+
+    @Test func shortConfirmationsSpeakInFullAndEssaysRequestExcerpt() {
+        #expect(YishuSpokenReplyBudget.shouldSpeakInFull("已经设好提醒。"))
+        #expect(YishuSpokenReplyBudget.shouldSpeakInFull("已经点到了。"))
+        #expect(YishuSpokenReplyBudget.route(
+            speechAlreadyPresented: false,
+            visibleText: "已经设好提醒。"
+        ) == .speakInFull)
+        #expect(YishuSpokenReplyBudget.route(
+            speechAlreadyPresented: true,
+            visibleText: "第一句。第二句。第三句。第四句。第五句。第六句。第七句。第八句。"
+        ) == .alreadySpoken)
+        #expect(YishuSpokenReplyBudget.route(
+            speechAlreadyPresented: false,
+            visibleText: "第一句。第二句。第三句。第四句。第五句。第六句。第七句。第八句。"
+        ) == .requestExcerpt)
+        #expect(YishuSpokenReplyBudget.route(
+            speechAlreadyPresented: false,
+            visibleText: String(repeating: "长", count: 81)
+        ) == .requestExcerpt)
+        #expect(YishuSpokenReplyBudget.route(
+            speechAlreadyPresented: false,
+            visibleText: "第一句。第二句。"
+        ) == .speakInFull)
     }
 
     @Test @MainActor func cancellationStopsCurrentPlaybackAndDropsQueuedSentences() async {

@@ -3,7 +3,7 @@
 #
 # What this does (local machine only):
 #   1) Ensure app is signed with stable "Shangqiuko Local Code Signing"
-#   2) Install / refresh /Applications/Clicky.app (fixed path)
+#   2) Install / refresh /Applications/奕枢.app (fixed path)
 #   3) Write app UserDefaults so in-app permission gates stay open
 #   4) Ensure user-level TCC mic row matches current csreq
 #   5) Only with --system-tcc, request admin access to refresh system TCC
@@ -18,7 +18,9 @@ YISHU_REPO_ROOT_DEFAULT="$(cd "$ROOT/../.." && pwd)"
 YISHU_CLICKY_DERIVED_DATA="${YISHU_CLICKY_DERIVED_DATA:-$YISHU_REPO_ROOT_DEFAULT/.build/clicky-derived-data}"
 IDENTITY="Shangqiuko Local Code Signing"
 BUNDLE_ID="com.yishu.yishu-buddy"
-INSTALL_APP="/Applications/Clicky.app"
+APP_PRODUCT_NAME="奕枢"
+INSTALL_APP="/Applications/${APP_PRODUCT_NAME}.app"
+LEGACY_INSTALL_APP="/Applications/Clicky.app"
 CERT_HASH="9F34695EB8AD35A6B2CC1FEDCA08D559AECC8C11"
 REQ="identifier \"${BUNDLE_ID}\" and certificate leaf = H\"${CERT_HASH}\""
 USER_TCC="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
@@ -34,9 +36,9 @@ need_identity() {
 }
 
 resolve_built_app() {
-  local candidate="$YISHU_CLICKY_DERIVED_DATA/Build/Products/Debug/Clicky.app"
-  if [[ ! -x "$candidate/Contents/MacOS/Clicky" ]]; then
-    echo "No Debug Clicky.app in $YISHU_CLICKY_DERIVED_DATA. Run: $ROOT/scripts/run-local.sh build" >&2
+  local candidate="$YISHU_CLICKY_DERIVED_DATA/Build/Products/Debug/${APP_PRODUCT_NAME}.app"
+  if [[ ! -x "$candidate/Contents/MacOS/${APP_PRODUCT_NAME}" ]]; then
+    echo "No Debug ${APP_PRODUCT_NAME}.app in $YISHU_CLICKY_DERIVED_DATA. Run: $ROOT/scripts/run-local.sh build" >&2
     exit 1
   fi
   echo "$candidate"
@@ -44,15 +46,28 @@ resolve_built_app() {
 
 install_fixed_path() {
   local src="$1"
-  echo "Installing fixed path: $src → $INSTALL_APP"
+  local src_abs dest_abs
+  echo "Installing fixed path: $src → $INSTALL_APP (in-place overlay; will not delete the app first)"
   # Remove xattrs that break codesign on copy
   xattr -cr "$src" 2>/dev/null || true
-  rm -rf "$INSTALL_APP"
-  ditto "$src" "$INSTALL_APP"
+  src_abs="$(cd "$src" && pwd)"
+  dest_abs="$(cd "$INSTALL_APP" 2>/dev/null && pwd || true)"
+  if [[ -n "$dest_abs" && "$src_abs" == "$dest_abs" ]]; then
+    echo "Source is already $INSTALL_APP; signing in place"
+  else
+    # Overlay copy. Never `rm -rf` the destination first — a failed or
+    # incomplete replace must not leave them without /Applications/奕枢.app.
+    mkdir -p "$INSTALL_APP"
+    ditto "$src" "$INSTALL_APP"
+  fi
   xattr -cr "$INSTALL_APP" 2>/dev/null || true
+  if [[ -d "$LEGACY_INSTALL_APP" ]]; then
+    echo "Removing leftover $LEGACY_INSTALL_APP"
+    rm -rf "$LEGACY_INSTALL_APP"
+  fi
   local nested_code
   for nested_code in \
-    "$INSTALL_APP/Contents/MacOS/Clicky.debug.dylib" \
+    "$INSTALL_APP/Contents/MacOS/${APP_PRODUCT_NAME}.debug.dylib" \
     "$INSTALL_APP/Contents/MacOS/__preview.dylib"; do
     if [[ -f "$nested_code" ]]; then
       codesign --force --sign "$IDENTITY" --timestamp=none \
@@ -225,7 +240,7 @@ main() {
     echo "System TCC unchanged; pass --system-tcc only when those grants need repair."
   fi
   report_grants
-  echo "Done. Launch only: open -a Clicky  (or $ROOT/scripts/run-local.sh open)"
+  echo "Done. Launch only: open -a 奕枢  (or $ROOT/scripts/run-local.sh open)"
 }
 
 main "$@"

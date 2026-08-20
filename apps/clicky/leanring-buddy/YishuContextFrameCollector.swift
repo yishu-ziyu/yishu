@@ -19,8 +19,8 @@ final class YishuContextFrameCollector {
 
     /// `activeWindowOnly` is reserved for the narrow current-page-to-note
     /// request. Ordinary turns keep their full display evidence unchanged.
-    func capture(activeWindowOnly: Bool = false) async -> YishuCapturedContext {
-        let snapshot = captureMetadata(includePointerTrail: true)
+    func capture(activeWindowOnly: Bool = false, pointerSince: Date? = nil) async -> YishuCapturedContext {
+        let snapshot = captureMetadata(includePointerTrail: true, pointerSince: pointerSince)
         var warnings = snapshot.warnings
         var screenCaptures: [CompanionScreenCapture] = []
         var activeWindowCapture: CompanionWindowCapture?
@@ -109,7 +109,7 @@ final class YishuContextFrameCollector {
     /// Metadata-only capture for ContextTrail background sampling.
     /// Omits screenshot bytes so trail.observe stays cheap and private by default.
     func captureTrailSample() -> YishuContextFrame {
-        let snapshot = captureMetadata(includePointerTrail: false)
+        let snapshot = captureMetadata(includePointerTrail: false, pointerSince: nil)
         let frame = YishuContextFrame(
             capturedAt: snapshot.capturedAt,
             expiresAt: snapshot.capturedAt.addingTimeInterval(30),
@@ -134,7 +134,28 @@ final class YishuContextFrameCollector {
         let warnings: [String]
     }
 
-    private func captureMetadata(includePointerTrail: Bool) -> MetadataSnapshot {
+    /// Keep press-time screenshots; refresh cursor, pointer path, and the
+    /// control under the cursor so a long hold still sees the latest point.
+    func refreshLiveAttention(
+        onto captured: YishuCapturedContext,
+        pointerSince: Date
+    ) -> YishuCapturedContext {
+        let snapshot = captureMetadata(includePointerTrail: true, pointerSince: pointerSince)
+        let frame = YishuContextFrame(
+            capturedAt: snapshot.capturedAt,
+            expiresAt: snapshot.capturedAt.addingTimeInterval(30),
+            cursor: snapshot.cursor,
+            pointerTrail: snapshot.pointerTrail,
+            frontmostApplication: snapshot.frontmostApplication,
+            activeWindow: snapshot.activeWindow,
+            elementUnderCursor: snapshot.elementUnderCursor,
+            screenshots: captured.frame.screenshots,
+            warnings: snapshot.warnings
+        )
+        return YishuCapturedContext(frame: frame, screenCaptures: captured.screenCaptures)
+    }
+
+    private func captureMetadata(includePointerTrail: Bool, pointerSince: Date?) -> MetadataSnapshot {
         let capturedAt = Date()
         // Screenshot display frames use NSScreen/AppKit coordinates. Keep the
         // cursor evidence in that same global bottom-left coordinate space;
@@ -162,9 +183,14 @@ final class YishuContextFrameCollector {
             capturedAt: capturedAt,
             warnings: &warnings
         )
-        let trail = includePointerTrail
-            ? pointerMonitor.recentSamples(since: capturedAt.addingTimeInterval(-2.5))
-            : []
+        let trail: [YishuPointerSample]
+        if includePointerTrail {
+            let cutoff = pointerSince ?? capturedAt.addingTimeInterval(-2.5)
+            let samples = pointerMonitor.recentSamples(since: cutoff)
+            trail = samples.count > 240 ? Array(samples.suffix(240)) : samples
+        } else {
+            trail = []
+        }
 
         return MetadataSnapshot(
             capturedAt: capturedAt,

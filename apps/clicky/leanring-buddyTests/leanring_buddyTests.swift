@@ -42,7 +42,117 @@ struct leanring_buddyTests {
 
         #expect(openAIOption?.sourceLabel == "ChatGPT")
         #expect(xAIOption?.sourceLabel == "xAI")
-        #expect(localOption != nil)
+        #expect(localOption?.sourceLabel == "本机 Grok")
+        #expect(
+            YishuAccountSurfaceCopy.selectedLine(label: "Grok 4.5", source: "本机 Grok")
+                == "Grok 4.5 · 本机 Grok"
+        )
+
+        let sections = YishuConversationModelCatalog.sections(authModels: [
+            YishuAuthModel(provider: .openAICodex, id: "gpt-5.6-sol", name: "GPT-5.6 Sol"),
+        ])
+        #expect(sections.map(\.title) == ["本机 Grok", "ChatGPT"])
+        #expect(YishuConversationModelCatalog.localModels.allSatisfy { $0.sourceLabel == "本机 Grok" })
+        #expect(!YishuConversationModelCatalog.localModels.contains { $0.sourceLabel == "当前连接" })
+        #expect(YishuConversationModelCatalog.defaultModel == "grok-4.6")
+        #expect(YishuConversationModelCatalog.localModels.first?.model == "grok-4.6")
+        #expect(YishuAgentRuntimeClient.supportsModel(
+            provider: YishuConversationModelCatalog.localProvider,
+            model: "grok-4.6"
+        ))
+        #expect(
+            YishuConversationModelCatalog.resolvedSelection(
+                storedModel: "grok-4.5",
+                storedProvider: YishuConversationModelCatalog.localProvider
+            ) == (YishuConversationModelCatalog.localProvider, "grok-4.6")
+        )
+        #expect(
+            YishuConversationModelCatalog.resolvedSelection(
+                storedModel: "grok-4.3",
+                storedProvider: YishuConversationModelCatalog.localProvider
+            ) == (YishuConversationModelCatalog.localProvider, "grok-4.3")
+        )
+    }
+
+    @Test func accountSurfaceNamesLocalGrokAndEachMacSubscription() {
+        let unsigned = YishuAuthPublicStatus(
+            provider: .openAICodex,
+            configured: true,
+            authType: "oauth",
+            models: [],
+            requiresRelogin: false,
+            isExperimental: false,
+            accountLabel: nil
+        )
+        let named = YishuAuthPublicStatus(
+            provider: .openAICodex,
+            configured: true,
+            authType: "oauth",
+            models: [],
+            requiresRelogin: false,
+            isExperimental: false,
+            accountLabel: "you@example.com"
+        )
+
+        #expect(unsigned.statusLabel == "这台 Mac 上的订阅")
+        #expect(named.statusLabel == "这台 Mac 上的 you@example.com")
+        #expect(YishuAccountSurfaceCopy.rowBadge(status: unsigned) == "这台 Mac 上的订阅")
+        #expect(YishuAccountSurfaceCopy.rowBadge(status: named) == "you@example.com")
+        #expect(
+            YishuAccountSurfaceCopy.headerSummary(
+                chatGPTStatus: nil,
+                chatGPTLoading: false,
+                xAIStatus: nil,
+                xAILoading: false
+            ) == "ChatGPT 未登录 · xAI 未登录"
+        )
+        #expect(
+            YishuAccountSurfaceCopy.headerSummary(
+                chatGPTStatus: named,
+                chatGPTLoading: false,
+                xAIStatus: nil,
+                xAILoading: false
+            ) == "ChatGPT you@example.com · xAI 未登录"
+        )
+        #expect(
+            YishuAccountSurfaceCopy.headerSummary(
+                chatGPTStatus: unsigned,
+                chatGPTLoading: false,
+                xAIStatus: nil,
+                xAILoading: false
+            ) == "ChatGPT 这台 Mac 上的订阅 · xAI 未登录"
+        )
+    }
+
+    @Test func authStatusPayloadKeepsAccountLabelAndRejectsBareLoginCopy() {
+        let decoded = YishuAuthEvent.decode(type: "auth.status", payload: [
+            "provider": "openai-codex",
+            "configured": true,
+            "authType": "oauth",
+            "models": [] as [[String: Any]],
+            "accountLabel": "you@example.com",
+        ])
+        guard case let .status(status) = decoded else {
+            Issue.record("expected auth.status")
+            return
+        }
+        #expect(status.accountLabel == "you@example.com")
+        #expect(status.statusLabel == "这台 Mac 上的 you@example.com")
+        #expect(status.statusLabel != "已登录")
+
+        let unsigned = YishuAuthEvent.decode(type: "auth.status", payload: [
+            "provider": "xai",
+            "configured": true,
+            "authType": "oauth",
+            "models": [] as [[String: Any]],
+            "experimental": "experimental_local_subscription",
+        ])
+        guard case let .status(unsignedStatus) = unsigned else {
+            Issue.record("expected unsigned auth.status")
+            return
+        }
+        #expect(unsignedStatus.accountLabel == nil)
+        #expect(unsignedStatus.statusLabel == "这台 Mac 上的订阅")
     }
 
     @Test func runtimeClientAcceptsCurrentAuthenticatedModelsAndRejectsUnknownOnes() {
@@ -510,6 +620,21 @@ struct leanring_buddyTests {
         #expect(namedParameter == "工具参数：")
     }
 
+    @Test func toolMarkupScrubberRemovesVisibleMarkdownEmphasis() async throws {
+        let wrapped = CompanionManager.scrubToolMarkup(
+            from: "**结论：我这边现在查不到实时天气，没法给你准确的深圳今日预报。** 会话里没有可用的全网搜索。"
+        )
+        #expect(!wrapped.contains("*"))
+        #expect(wrapped.hasPrefix("结论：我这边现在查不到实时天气"))
+        #expect(wrapped.contains("会话里没有可用的全网搜索。"))
+
+        let underscore = CompanionManager.scrubToolMarkup(from: "先看 __这里__。")
+        #expect(underscore == "先看 这里。")
+
+        let multiply = CompanionManager.scrubToolMarkup(from: "大约 3 * 4 分钟。")
+        #expect(multiply == "大约 3 * 4 分钟。")
+    }
+
     @Test func toolMarkupScrubberPreservesChineseAndPointTag() async throws {
         let cleaned = CompanionManager.scrubToolMarkup(from: "左上角是新对话。[POINT:54,182:新对话]")
         let parsed = CompanionManager.parsePointingCoordinates(from: cleaned)
@@ -604,8 +729,13 @@ struct leanring_buddyTests {
         #expect(!YishuAgentRuntimeClient.isValidSchemaVersionValue(NSNumber(value: 2)))
         #expect(!YishuAgentRuntimeClient.isValidSchemaVersionValue(NSNumber(value: true)))
         #expect(YishuAgentRuntimeClient.isValidOptionalLabelPayloadValue("New Thread"))
-        #expect(!YishuAgentRuntimeClient.isValidOptionalLabelPayloadValue("   "))
+        #expect(YishuAgentRuntimeClient.isValidOptionalLabelPayloadValue("   "))
+        #expect(YishuAgentRuntimeClient.isValidOptionalLabelPayloadValue(NSNull()))
+        #expect(YishuAgentRuntimeClient.isValidOptionalLabelPayloadValue(nil))
+        #expect(YishuAgentRuntimeClient.normalizedOptionalLabel("   ") == nil)
+        #expect(YishuAgentRuntimeClient.normalizedOptionalLabel("发送") == "发送")
         #expect(!YishuAgentRuntimeClient.isValidOptionalLabelPayloadValue(String(repeating: "x", count: 121)))
+        #expect(!YishuAgentRuntimeClient.isValidOptionalLabelPayloadValue(NSNumber(value: 1)))
         #expect(YishuAgentRuntimeClient.isValidOptionalEffectClassPayloadValue("activate"))
         #expect(!YishuAgentRuntimeClient.isValidOptionalEffectClassPayloadValue("   "))
         #expect(YishuAgentRuntimeClient.isValidOptionalUUIDString(nil))
@@ -685,6 +815,146 @@ struct leanring_buddyTests {
             traceId: traceId,
             schemaVersion: NSNumber(value: 1)
         ) == nil)
+
+        let clickActionId = UUID()
+        let blankLabelClick = try #require(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: [
+                "actionId": clickActionId.uuidString,
+                "action": "left_click",
+                "x": NSNumber(value: 40),
+                "y": NSNumber(value: 20),
+                "label": "   ",
+            ],
+            requestId: requestId,
+            traceId: traceId,
+            schemaVersion: NSNumber(value: 1)
+        ))
+        #expect(blankLabelClick.action == "left_click")
+        #expect(blankLabelClick.label == nil)
+        #expect(blankLabelClick.x == 40)
+        #expect(blankLabelClick.y == 20)
+
+        let missingLabelClick = try #require(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: [
+                "actionId": UUID().uuidString,
+                "action": "left_click",
+                "x": NSNumber(value: 8),
+                "y": NSNumber(value: 16),
+            ],
+            requestId: requestId,
+            traceId: traceId,
+            schemaVersion: NSNumber(value: 1)
+        ))
+        #expect(missingLabelClick.label == nil)
+
+        let nullLabelClick = try #require(YishuAgentRuntimeClient.decodeComputerActionRequest(
+            payload: [
+                "actionId": UUID().uuidString,
+                "action": "left_click",
+                "x": NSNumber(value: 1),
+                "y": NSNumber(value: 2),
+                "label": NSNull(),
+            ],
+            requestId: requestId,
+            traceId: traceId,
+            schemaVersion: NSNumber(value: 1)
+        ))
+        #expect(nullLabelClick.label == nil)
+    }
+
+    @Test @MainActor func invalidComputerActionRequestDoesNotFailTheVoiceTurn() async throws {
+        let client = YishuAgentRuntimeClient()
+        let requestID = UUID()
+        let traceID = UUID()
+        let parked = client.parkTurnForTests(requestId: requestID, traceId: traceID)
+
+        client.dispatchRuntimeEventForTests([
+            "schemaVersion": 1,
+            "type": "computer.action.requested",
+            "eventId": UUID().uuidString,
+            "requestId": requestID.uuidString,
+            "traceId": traceID.uuidString,
+            "sentAt": "2026-08-16T00:00:00Z",
+            "payload": [
+                "actionId": UUID().uuidString,
+                "action": "not_a_real_action",
+                "x": 10,
+                "y": 20,
+            ],
+        ])
+        #expect(client.pendingTurnCountForTests == 1)
+
+        client.dispatchRuntimeEventForTests([
+            "schemaVersion": 1,
+            "type": "response.completed",
+            "eventId": UUID().uuidString,
+            "requestId": requestID.uuidString,
+            "traceId": traceID.uuidString,
+            "sentAt": "2026-08-16T00:00:01Z",
+            "payload": [
+                "text": "这次没找到可点击的目标，我没有执行操作。",
+                "verified": false,
+            ],
+        ])
+
+        var completedText: String?
+        for try await event in parked.turn.events {
+            if case let .completed(text, _, _) = event {
+                completedText = text
+            }
+        }
+        #expect(completedText == "这次没找到可点击的目标，我没有执行操作。")
+        #expect(client.pendingTurnCountForTests == 0)
+    }
+
+    @Test @MainActor func blankClickLabelYieldsTheActionInsteadOfFailingTheTurn() async throws {
+        let client = YishuAgentRuntimeClient()
+        let requestID = UUID()
+        let traceID = UUID()
+        let parked = client.parkTurnForTests(requestId: requestID, traceId: traceID)
+        let actionID = UUID()
+
+        client.dispatchRuntimeEventForTests([
+            "schemaVersion": 1,
+            "type": "computer.action.requested",
+            "eventId": UUID().uuidString,
+            "requestId": requestID.uuidString,
+            "traceId": traceID.uuidString,
+            "sentAt": "2026-08-16T00:00:00Z",
+            "payload": [
+                "actionId": actionID.uuidString,
+                "action": "left_click",
+                "x": 40,
+                "y": 20,
+                "label": "",
+            ],
+        ])
+        #expect(client.pendingTurnCountForTests == 1)
+
+        client.dispatchRuntimeEventForTests([
+            "schemaVersion": 1,
+            "type": "response.completed",
+            "eventId": UUID().uuidString,
+            "requestId": requestID.uuidString,
+            "traceId": traceID.uuidString,
+            "sentAt": "2026-08-16T00:00:01Z",
+            "payload": ["text": "点好了。", "verified": true],
+        ])
+
+        var requestedAction: YishuComputerActionRequest?
+        var completedText: String?
+        for try await event in parked.turn.events {
+            if case let .computerActionRequested(request, _) = event {
+                requestedAction = request
+            }
+            if case let .completed(text, _, _) = event {
+                completedText = text
+            }
+        }
+        #expect(requestedAction?.actionId == actionID)
+        #expect(requestedAction?.label == nil)
+        #expect(completedText == "点好了。")
+        #expect(client.pendingTurnCountForTests == 0)
     }
 
     @Test func desktopTargetAndTextPoliciesFailClosed() {
@@ -1165,12 +1435,61 @@ struct leanring_buddyTests {
         #expect(message.contains("忘记失败") || message.contains("原记忆"))
     }
 
+    @Test @MainActor func runtimeProcessDeathEndsPendingSpeechExcerptWithoutTimeout() async throws {
+        let client = YishuAgentRuntimeClient()
+        let parked = await client.parkSpeechExcerptWaitForTests()
+        #expect(client.pendingHistoryRequestCountForTests == 1)
+
+        let started = ContinuousClock.now
+        client.endAllPendingRuntimeRequests(
+            throwing: YishuAgentRuntimeClientError.runtimeNotRunning
+        )
+        #expect(client.pendingHistoryRequestCountForTests == 0)
+
+        var failed = false
+        do { try await parked.wait.value } catch { failed = true }
+        let elapsed = ContinuousClock.now - started
+        #expect(failed)
+        #expect(elapsed < .seconds(2))
+    }
+
+    @Test @MainActor func speechExcerptFailureDoesNotResumeWithEssay() async throws {
+        let client = YishuAgentRuntimeClient()
+        let parked = await client.parkSpeechExcerptWaitForTests()
+        client.failParkedHistoryRequestForTests(
+            requestId: parked.requestId,
+            error: YishuAgentRuntimeClientError.speechExcerptFailed("暂时无法抽出口播。")
+        )
+        #expect(client.pendingHistoryRequestCountForTests == 0)
+
+        var message = ""
+        do {
+            try await parked.wait.value
+        } catch let error as YishuAgentRuntimeClientError {
+            message = error.localizedDescription
+        }
+        #expect(message.contains("抽出口播"))
+        #expect(!message.contains("第一句"))
+    }
+
+    @Test @MainActor func speechExcerptSuccessReturnsSpokenTextOnly() async throws {
+        let client = YishuAgentRuntimeClient()
+        let parked = await client.parkSpeechExcerptWaitForTests()
+        client.completeParkedSpeechExcerptForTests(
+            requestId: parked.requestId,
+            spokenText: "今天多云。出门带件外套。"
+        )
+        #expect(client.pendingHistoryRequestCountForTests == 0)
+        let spoken = try await parked.wait.value
+        #expect(spoken == "今天多云。出门带件外套。")
+    }
+
     @Test func memoryForgetUIPolicyDoesNotMutateOnCancelOrBusy() async throws {
         // Product rules Codex asked to verify without spinning the full manager graph.
         #expect(YishuMemoryForgetUIPolicy.shouldMutateStoreOnCancel == false)
         #expect(YishuMemoryForgetUIPolicy.shouldMutateStoreWhenBusy == false)
         #expect(YishuMemoryForgetUIPolicy.shouldRemoveRowOnlyAfterStoreSuccess == true)
-        #expect(YishuMemoryForgetUIPolicy.busyRefuseNotice.contains("回答结束"))
+        #expect(YishuMemoryForgetUIPolicy.busyRefuseNotice.contains("说完"))
     }
 
     @Test @MainActor func selectConversationRequiresIdleTurnsAndPersistsId() throws {
@@ -1316,9 +1635,7 @@ struct leanring_buddyTests {
         #expect(defaults.string(forKey: keys[1]) == YishuSessionScopeKind.project.rawValue)
 
         let restarted = YishuAgentRuntimeClient()
-        #expect(restarted.currentConversationId == persistedProjectConversation)
-        #expect(restarted.currentSessionScope.kind == .project)
-        #expect(restarted.currentSessionScope.projectId == projectID)
+        #expect(restarted.currentSessionScope.kind == .personal)
     }
 
     @Test func transcriptionReducerSubmitsFinalExactlyOnceAfterRelease() {

@@ -54,7 +54,7 @@ pnpm product:verify # 再加正式 Clicky Xcode 测试与构建脚本 self-test
 pnpm product:build:clicky
 ```
 
-构建、安装到 `/Applications/Clicky.app` 并启动真实产品：
+构建、安装到 `/Applications/奕枢.app` 并启动真实产品：
 
 ```bash
 ./apps/clicky/scripts/run-local.sh

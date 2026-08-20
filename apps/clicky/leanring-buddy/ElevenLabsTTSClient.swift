@@ -4,7 +4,7 @@
 //
 //  Requests MiniMax text-to-speech audio through the local 奕枢 proxy and
 //  plays it through the system output. The type name remains for source and
-//  project-file compatibility with the original Clicky implementation.
+//  project-file compatibility with the original overlay implementation.
 //
 
 import AVFoundation

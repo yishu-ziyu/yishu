@@ -113,7 +113,11 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   async getAuth(providerId: string): Promise<unknown> {
     if (providerId === LOCAL_GROK_PROVIDER) return { apiKey: this.options.localGrokBearer.value() };
     const credential = await this.usableCredential(providerId);
-    return credential ? { apiKey: credential.access } : undefined;
+    if (!credential) return undefined;
+    const email = typeof credential.email === "string" ? credential.email : undefined;
+    return email
+      ? { apiKey: credential.access, email }
+      : { apiKey: credential.access };
   }
 
   async login(providerId: string, _type: "oauth", interaction: OAuthInteraction): Promise<unknown> {
@@ -200,7 +204,11 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
           // Another process may have refreshed while we waited on the lock.
           if (current?.type === "oauth" && !isExpiring(current)) return current;
           if (current?.type !== "oauth") return undefined;
-          return flow.refresh(current.refresh);
+          const next = await flow.refresh(current.refresh);
+          if (typeof current.email === "string" && typeof next.email !== "string") {
+            return { ...next, email: current.email };
+          }
+          return next;
         },
       );
       if (refreshed?.type === "oauth") credential = refreshed;

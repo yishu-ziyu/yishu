@@ -5,8 +5,15 @@ import {
 } from "./loop-adapter.js";
 import { ProductKernelRuntime } from "./product-kernel-runtime.js";
 import { createCompletionsExtractionModel } from "./memory-extraction-model.js";
+import { createSpeechExcerptModel } from "./speech-excerpt-model.js";
+import {
+  createProductEverOS,
+  resolveEverOSPendingSessionsPath,
+} from "./everos-sidecar.js";
 import type { ComputerUsePort } from "./computer-use-port.js";
 import type { AgentRuntime } from "./runtime-port.js";
+import { LOCAL_GROK_DEFAULT_MODEL, LOCAL_GROK_PROVIDER } from "./protocol.js";
+import { FileEverOSPendingSessionStore } from "./everos-pending-sessions.js";
 
 /**
  * Pi is the only production agent loop. Mock is a deterministic protocol test
@@ -65,9 +72,37 @@ export function createAgentRuntime(
   if (!productKernelEnabled(process.env, ports.productKernel)) {
     return inner;
   }
+  const everos = mode === "pi" && providerRuntime !== undefined
+    ? createProductEverOS(process.env, {
+        llmEnvResolver: async () => {
+          const model = await providerRuntime.resolveModel(
+            LOCAL_GROK_PROVIDER,
+            LOCAL_GROK_DEFAULT_MODEL,
+          );
+          return {
+            apiKey: await providerRuntime.bearer(LOCAL_GROK_PROVIDER),
+            baseUrl: model.baseUrl,
+            model: model.id,
+          };
+        },
+      })
+    : undefined;
   return new ProductKernelRuntime(inner, undefined, ports.computerUse, {
     ...(providerRuntime !== undefined
-      ? { memoryExtractionModel: createCompletionsExtractionModel(providerRuntime) }
+      ? {
+          speechExcerptModel: createSpeechExcerptModel(providerRuntime),
+          ...(everos === undefined
+            ? { memoryExtractionModel: createCompletionsExtractionModel(providerRuntime) }
+            : {}),
+        }
+      : {}),
+    ...(everos !== undefined ? { everos } : {}),
+    ...(everos !== undefined
+      ? {
+          everosPendingStore: new FileEverOSPendingSessionStore(
+            resolveEverOSPendingSessionsPath(process.env),
+          ),
+        }
       : {}),
   });
 }

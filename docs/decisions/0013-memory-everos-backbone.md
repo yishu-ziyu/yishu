@@ -1,7 +1,7 @@
 # ADR 0013: 记忆系统采用 EverOS 架构骨干
 
 Type: decision
-Status: current
+Status: current (homemade implementation superseded by [0017](0017-memory-uses-everos.md); invariants remain)
 Verified: 34c0eaa 2026-08-15
 Review: 记忆层存储骨干、提取管线或检索分层变化时（只能由新 ADR supersede）
 

@@ -5,7 +5,9 @@ Status: current
 Verified: 34c0eaa 2026-08-15
 Review: P1 交付物、队列行为或预筛白名单变化时
 
-面向实现记忆层 P1（写入侧 PR-1 / 读取侧 PR-2）的工程师。决策依据 → [ADR 0013](../decisions/0013-memory-everos-backbone.md)（骨干）、[0015](../decisions/0015-turn-assembly-in-engine.md)（装配与 PR 切分）、[0016](../decisions/0016-memory-p1-implementation.md)（P1 实施决定）。本手册只写"怎么做、怎么验"。
+面向实现记忆层 P1（写入侧 PR-1 / 读取侧 PR-2）的工程师。决策依据 → [ADR 0013](../decisions/0013-memory-everos-backbone.md)（骨干）、[0015](../decisions/0015-turn-assembly-in-engine.md)（装配与 PR 切分）、[0016](../decisions/0016-memory-p1-implementation.md)（P1 实施决定）。产品热路径已改为直接跑 EverOS，见 [ADR 0017](../decisions/0017-memory-uses-everos.md)。本手册只写"怎么做、怎么验"。
+
+> 当前定位：下文是 `YISHU_EVEROS=0` 时的兼容回退与历史迁移说明。正式产品路径以 ADR 0017 的 EverOS 会话缓冲、空闲 flush 和用户可见权威层为准。
 
 ## 目标与范围
 

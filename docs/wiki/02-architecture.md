@@ -60,7 +60,7 @@ flowchart LR
 ## 进程拓扑
 
 ```text
-/Applications/Clicky.app
+/Applications/奕枢.app
 ├── Clicky 主进程（Swift）
 │     ├── CompanionManager（编排）
 │     ├── YishuAgentRuntimeClient ──spawn──▶ node dist/stdio-server.js（packages/runtime）

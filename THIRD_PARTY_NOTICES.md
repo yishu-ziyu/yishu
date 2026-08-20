@@ -1,5 +1,13 @@
 # Third-party notices
 
+## EverOS — long-term memory
+
+Yishu runs [EverOS](https://github.com/EverMind-AI/EverOS) 1.2.3 as the
+long-term memory runtime (Apache-2.0). The source is vendored at
+`vendor/everos`. Copyright 2025 EverMind AI. See `vendor/everos/LICENSE`
+and `vendor/everos/NOTICE`. Do not ship the LoCoMo CC BY-NC fixture from
+that tree.
+
 ## Clicky provenance
 
 `apps/clicky` is Yishu's formal Clicky source and installation source. The

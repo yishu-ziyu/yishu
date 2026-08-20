@@ -60,17 +60,20 @@ struct YishuConversationModelOption: Identifiable, Equatable {
 
 enum YishuConversationModelCatalog {
     static let localProvider = "yishu-local-grok"
+    static let localSourceLabel = YishuAccountSurfaceCopy.localGrokSource
+    static let defaultModel = "grok-4.6"
 
     static let localModels: [YishuConversationModelOption] = [
-        .init(provider: localProvider, model: "grok-4.5", label: "Grok 4.5", sourceLabel: "当前连接"),
-        .init(provider: localProvider, model: "grok-4.3", label: "Grok 4.3", sourceLabel: "当前连接"),
-        .init(provider: localProvider, model: "grok-4.20-0309-reasoning", label: "Grok 4.20 Reasoning", sourceLabel: "当前连接"),
-        .init(provider: localProvider, model: "grok-4.20-0309-non-reasoning", label: "Grok 4.20 Fast", sourceLabel: "当前连接"),
-        .init(provider: localProvider, model: "grok-4.20-multi-agent-0309", label: "Grok 4.20 Multi-Agent", sourceLabel: "当前连接"),
-        .init(provider: localProvider, model: "grok-3-mini", label: "Grok 3 Mini", sourceLabel: "当前连接"),
-        .init(provider: localProvider, model: "grok-3-mini-fast", label: "Grok 3 Mini Fast", sourceLabel: "当前连接"),
-        .init(provider: localProvider, model: "grok-composer-2.5-fast", label: "Grok Composer 2.5 Fast", sourceLabel: "当前连接"),
-        .init(provider: localProvider, model: "grok-build-0.1", label: "Grok Build 0.1", sourceLabel: "当前连接"),
+        .init(provider: localProvider, model: "grok-4.6", label: "Grok 4.6", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-4.5", label: "Grok 4.5", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-4.3", label: "Grok 4.3", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-4.20-0309-reasoning", label: "Grok 4.20 Reasoning", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-4.20-0309-non-reasoning", label: "Grok 4.20 Fast", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-4.20-multi-agent-0309", label: "Grok 4.20 Multi-Agent", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-3-mini", label: "Grok 3 Mini", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-3-mini-fast", label: "Grok 3 Mini Fast", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-composer-2.5-fast", label: "Grok Composer 2.5 Fast", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-build-0.1", label: "Grok Build 0.1", sourceLabel: localSourceLabel),
     ]
 
     static func available(authModels: [YishuAuthModel]) -> [YishuConversationModelOption] {
@@ -79,9 +82,134 @@ enum YishuConversationModelCatalog {
                 provider: model.provider.rawValue,
                 model: model.id,
                 label: model.name,
-                sourceLabel: model.provider == .openAICodex ? "ChatGPT" : "xAI"
+                sourceLabel: model.provider == .openAICodex
+                    ? YishuAccountSurfaceCopy.chatgptSource
+                    : YishuAccountSurfaceCopy.xaiSource
             )
         }
+    }
+
+    static func sections(
+        authModels: [YishuAuthModel]
+    ) -> [(title: String, models: [YishuConversationModelOption])] {
+        var order: [String] = []
+        var buckets: [String: [YishuConversationModelOption]] = [:]
+        for option in available(authModels: authModels) {
+            if buckets[option.sourceLabel] == nil {
+                order.append(option.sourceLabel)
+                buckets[option.sourceLabel] = []
+            }
+            buckets[option.sourceLabel, default: []].append(option)
+        }
+        return order.map { title in (title, buckets[title] ?? []) }
+    }
+
+    /// Default-visible local brains. The rest stay behind "更多本机模型".
+    static let featuredLocalModelIDs: Set<String> = [defaultModel]
+
+    static func isDefaultVisibleLocal(
+        _ option: YishuConversationModelOption,
+        selectedModel: String,
+        selectedProvider: String
+    ) -> Bool {
+        featuredLocalModelIDs.contains(option.model)
+            || (selectedProvider == localProvider && option.model == selectedModel)
+    }
+
+    static func featuredLocalModels(
+        selectedModel: String,
+        selectedProvider: String
+    ) -> [YishuConversationModelOption] {
+        localModels.filter {
+            isDefaultVisibleLocal($0, selectedModel: selectedModel, selectedProvider: selectedProvider)
+        }
+    }
+
+    static func moreLocalModels(
+        selectedModel: String,
+        selectedProvider: String
+    ) -> [YishuConversationModelOption] {
+        localModels.filter {
+            !isDefaultVisibleLocal($0, selectedModel: selectedModel, selectedProvider: selectedProvider)
+        }
+    }
+
+    static func authSections(
+        authModels: [YishuAuthModel]
+    ) -> [(title: String, models: [YishuConversationModelOption])] {
+        sections(authModels: authModels).filter { $0.title != localSourceLabel }
+    }
+
+    /// Local Grok 4.5 was the previous product default. Replace it with 4.6.
+    /// Leave ChatGPT / xAI selections and any other explicit local pick alone.
+    static func resolvedSelection(
+        storedModel: String?,
+        storedProvider: String?
+    ) -> (provider: String, model: String) {
+        let supportedProviders = Set([
+            localProvider,
+            YishuAuthProvider.openAICodex.rawValue,
+            YishuAuthProvider.xAI.rawValue,
+        ])
+        let provider = storedProvider.flatMap { supportedProviders.contains($0) ? $0 : nil }
+            ?? localProvider
+        let candidate = storedModel?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = (candidate?.isEmpty == false) ? candidate! : defaultModel
+        if provider == localProvider, model == "grok-4.5" || model == "step-3.7-flash" {
+            return (localProvider, defaultModel)
+        }
+        return (provider, model)
+    }
+}
+
+enum YishuAccountSurfaceCopy {
+    static let localGrokSource = "本机 Grok"
+    static let chatgptSource = "ChatGPT"
+    static let xaiSource = "xAI"
+
+    static func selectedLine(label: String, source: String) -> String {
+        "\(label) · \(source)"
+    }
+
+    static func headerSummary(
+        chatGPTStatus: YishuAuthPublicStatus?,
+        chatGPTLoading: Bool,
+        xAIStatus: YishuAuthPublicStatus?,
+        xAILoading: Bool
+    ) -> String {
+        [
+            partyLine(name: chatgptSource, status: chatGPTStatus, isLoading: chatGPTLoading),
+            partyLine(name: xaiSource, status: xAIStatus, isLoading: xAILoading),
+        ].joined(separator: " · ")
+    }
+
+    static func partyLine(
+        name: String,
+        status: YishuAuthPublicStatus?,
+        isLoading: Bool
+    ) -> String {
+        if isLoading, status == nil {
+            return "\(name) 正在检查"
+        }
+        if status?.requiresRelogin == true {
+            return "\(name) 需要重新登录"
+        }
+        let configured = status?.configured == true && status?.requiresRelogin != true
+        if configured {
+            if let accountLabel = status?.accountLabel, !accountLabel.isEmpty {
+                return "\(name) \(accountLabel)"
+            }
+            return "\(name) 这台 Mac 上的订阅"
+        }
+        return "\(name) 未登录"
+    }
+
+    static func rowBadge(status: YishuAuthPublicStatus?) -> String {
+        if let accountLabel = status?.accountLabel, !accountLabel.isEmpty {
+            return accountLabel
+        }
+        return "这台 Mac 上的订阅"
     }
 }
 
@@ -92,12 +220,19 @@ struct YishuAuthPublicStatus: Equatable {
     let models: [YishuAuthModel]
     let requiresRelogin: Bool
     let isExperimental: Bool
+    let accountLabel: String?
 
     var statusLabel: String {
         if requiresRelogin {
             return "需要重新登录"
         }
-        return configured ? "已登录" : "未登录"
+        if !configured {
+            return "未登录"
+        }
+        if let accountLabel, !accountLabel.isEmpty {
+            return "这台 Mac 上的 \(accountLabel)"
+        }
+        return "这台 Mac 上的订阅"
     }
 }
 
@@ -391,7 +526,7 @@ private extension YishuAuthPublicStatus {
         guard YishuAuthPayloadRules.hasOnlyKeys(
             payload,
             required: ["provider", "configured", "authType", "models"],
-            optional: ["requiresRelogin", "experimental"]
+            optional: ["requiresRelogin", "experimental", "accountLabel"]
         ),
               let provider = YishuAuthProvider(payloadValue: payload["provider"]),
               let configured = YishuAuthPayloadRules.bool(payload["configured"]),
@@ -435,13 +570,24 @@ private extension YishuAuthPublicStatus {
             isExperimental = false
         }
 
+        let accountLabel: String?
+        if let rawAccountLabel = payload["accountLabel"] {
+            guard let parsed = YishuAuthPayloadRules.requiredString(rawAccountLabel, maxLength: 120) else {
+                return nil
+            }
+            accountLabel = parsed
+        } else {
+            accountLabel = nil
+        }
+
         self.init(
             provider: provider,
             configured: configured,
             authType: authType,
             models: models,
             requiresRelogin: requiresRelogin,
-            isExperimental: isExperimental
+            isExperimental: isExperimental,
+            accountLabel: accountLabel
         )
     }
 }

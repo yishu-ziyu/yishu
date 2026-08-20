@@ -14,6 +14,7 @@ import {
   AssistantOutputGenerationProjector,
   isDirectComputerActionUtterance,
 } from "./assistant-output.js";
+import { intentAllowsComputerEffect } from "./intent-frame.js";
 import {
   createComputerControlTool,
   type ComputerControlToolAction,
@@ -999,10 +1000,14 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       return;
     }
 
-    const directComputerAction = isDirectComputerActionUtterance(command.payload.utterance);
+    const intentAllowsEffect = intentAllowsComputerEffect(command);
+    const directComputerAction = intentAllowsEffect
+      && isDirectComputerActionUtterance(command.payload.utterance);
     const observedFrontmost = command.payload.contextFrame.frontmostApplication?.value;
     const taskContract = taskExecutionContractFromCommand(command);
-    const authorizedText = authorizedTextForUtterance(command.payload.utterance);
+    const authorizedText = intentAllowsEffect
+      ? authorizedTextForUtterance(command.payload.utterance)
+      : undefined;
     const allowsFollowupClick = authorizedText !== undefined
       && actionSequencePattern.test(command.payload.utterance)
       && clickOrPressPattern.test(command.payload.utterance);
@@ -1169,6 +1174,8 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
             generation,
           }));
         }
+
+        if (this.isRequestCancelled(command.requestId)) return;
 
         if (generationState.isDirectAction(generation) && computerTurn.actionCount > 0) {
           emitVisibleDelta(generation, this.conciseActionResult(computerTurn.lastResult));

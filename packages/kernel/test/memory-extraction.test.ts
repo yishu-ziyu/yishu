@@ -88,6 +88,7 @@ test("pipeline writes episode + active fact with truthRef, then replay adds noth
     truth: memory.truth,
     store: kernel.store,
     model: scriptedModel({ newFacts: ["用户偏好要点列表"], confirmedFactIds: [] }, calls),
+    visible: memory.visible,
   });
   assert.deepEqual(stats, { processed: 1, skippedModel: 0, discardedSensitive: 0, failed: 0 });
   assert.deepEqual(calls, ["openai/gpt-test"], "extraction follows the turn's provider/model");
@@ -101,6 +102,8 @@ test("pipeline writes episode + active fact with truthRef, then replay adds noth
     "utf8",
   );
   assert.match(factsFile, /用户偏好要点列表/);
+  const visibleFile = await readFile(memory.visible.filePath, "utf8");
+  assert.match(visibleFile, /用户偏好要点列表/);
 
   // Crash replay: re-enqueue is a no-op; a second pass over the same row
   // cannot duplicate the fact (deterministic fx- id -> confirm, not create).

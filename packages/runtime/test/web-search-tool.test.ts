@@ -18,6 +18,8 @@ test("web_search uses anonymous read-only search and wraps external results as u
     }), { status: 200, headers: { "content-type": "application/json" } });
   });
 
+  assert.equal(tool.executionMode, "parallel");
+
   const result = await tool.execute(
     "tool-call",
     { query: "current public fact" },
