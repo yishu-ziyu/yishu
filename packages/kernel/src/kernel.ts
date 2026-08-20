@@ -32,6 +32,7 @@ import {
 import { SqliteYishuStore } from "./store/sqlite-store.js";
 import { TaskTruthProjector } from "./task-truth.js";
 import { MemoryTruthLayer } from "./memory/truth-layer.js";
+import { VisibleMemoryFile } from "./memory/visible-file.js";
 import {
   InMemoryExtractionQueue,
   JsonExtractionQueue,
@@ -44,6 +45,8 @@ export type YishuStoreBackend = "memory" | "json" | "sqlite";
 export interface YishuMemoryLayer {
   readonly truth: MemoryTruthLayer;
   readonly queue: ExtractionQueuePort;
+  /** The one user-visible file. Agent writes; user edits. */
+  readonly visible: VisibleMemoryFile;
 }
 
 export interface CreateYishuKernelOptions {
@@ -61,6 +64,12 @@ export interface CreateYishuKernelOptions {
    * wired: remember writes the index only (test/embedded hosts).
    */
   memoryDir?: string;
+  /**
+   * User-visible memory file (ADR 0018). Product default is
+   * ~/Documents/Yishu/记忆.md. Tests that pass memoryDir without this
+   * get `<memoryDir>/记忆.md` so they never touch the user's file.
+   */
+  visibleMemoryPath?: string;
   trail?: ContextTrailOptions;
   /** Extra product actions to register after the defaults. */
   extraActions?: AnyYishuAction[];
@@ -119,6 +128,9 @@ function buildMemoryLayer(
 ): YishuMemoryLayer | undefined {
   if (options.memoryDir === undefined) return undefined;
   const truth = new MemoryTruthLayer(options.memoryDir);
+  const visiblePath = options.visibleMemoryPath
+    ?? path.join(options.memoryDir, "记忆.md");
+  const visible = new VisibleMemoryFile(visiblePath);
   let queue: ExtractionQueuePort;
   if (resolved.backend === "sqlite" && resolved.sqlitePath !== undefined) {
     queue = new SqliteExtractionQueue(resolved.sqlitePath);
@@ -127,7 +139,7 @@ function buildMemoryLayer(
   } else {
     queue = new InMemoryExtractionQueue();
   }
-  return { truth, queue };
+  return { truth, queue, visible };
 }
 
 /**
@@ -146,8 +158,8 @@ export function createYishuKernel(
   const registry = new YishuActionRegistry();
 
   const defaults: AnyYishuAction[] = [
-    createRememberAction(store, memory?.truth),
-    createForgetAction(store, memory?.truth),
+    createRememberAction(store, memory?.truth, memory?.visible),
+    createForgetAction(store, memory?.truth, memory?.visible),
     createRememberHowAction({ store, trail }),
     createShareContextAction(trail),
     createRecordLearningAction(store),
@@ -183,8 +195,10 @@ export function createYishuKernel(
 
 /**
  * Product host default: SQLite under ~/.yishu (or YISHU_STORE_DIR /
- * YISHU_SQLITE_PATH) and markdown memory under ~/Documents/Yishu/Memory
- * (or YISHU_MEMORY_DIR, ADR 0016 #1).
+ * YISHU_SQLITE_PATH), the legacy fallback truth layer under
+ * ~/Documents/Yishu/Memory (or YISHU_MEMORY_DIR), and the one user-visible file
+ * ~/Documents/Yishu/记忆.md (or YISHU_VISIBLE_MEMORY_FILE, ADR 0018).
+ * EverOS engine storage is owned by the runtime sidecar (ADR 0017).
  */
 export function createDefaultProductKernel(
   environment: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
@@ -204,5 +218,7 @@ export function createDefaultProductKernel(
   }
   options.memoryDir = environment.YISHU_MEMORY_DIR
     ?? path.join(homedir(), "Documents", "Yishu", "Memory");
+  options.visibleMemoryPath = environment.YISHU_VISIBLE_MEMORY_FILE
+    ?? path.join(homedir(), "Documents", "Yishu", "记忆.md");
   return createYishuKernel(options);
 }

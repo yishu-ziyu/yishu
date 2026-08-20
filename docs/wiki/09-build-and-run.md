@@ -35,7 +35,7 @@ Review: 脚本或验证流程变化时
 # 或分步：build | install | open | pin | self-test
 ```
 
-一次完成：xcodebuild Debug 构建（Manual signing：`Shangqiuko Local Code Signing`）→ `pnpm build` kernel/runtime 并打包进 bundle（`Resources/YishuRuntime/`，含 node 二进制，保留 V8/JIT entitlements 重签）→ bundle worker → 安装到 `/Applications/Clicky.app` → TCC 权限钉住 → 语音代理凭据播种（`~/Library/Application Support/Yishu/Worker/.dev.vars`）→ 孤儿 8787 回收 → 启动。
+一次完成：xcodebuild Debug 构建（Manual signing：`Shangqiuko Local Code Signing`）→ `pnpm build` kernel/runtime 并打包进 bundle（`Resources/YishuRuntime/`，含 node 二进制，保留 V8/JIT entitlements 重签）→ bundle worker → 安装到 `/Applications/奕枢.app` → TCC 权限钉住 → 语音代理凭据播种（`~/Library/Application Support/Yishu/Worker/.dev.vars`）→ 孤儿 8787 回收 → 启动。
 
 首次使用需授予四项 TCC 权限：辅助功能、屏幕录制、麦克风、语音识别（与 bundle identity + 签名身份绑定；授权漂移用 `pin-local-permissions.sh` 修复）。
 
@@ -77,7 +77,7 @@ CI（.github/workflows/ci.yml，macos-15）
 | 8787 bearer token | 进程内 32 字节（SecRandomCopyBytes） | App 启动时生成，不持久不 log |
 | provider OAuth（Pi） | runtime 凭据存储 | App 内 OAuth 流程；奕枢不复制不打印 |
 
-模型路由默认：chat 走本机 8317 代理（`grok-4.5` 默认），ASR 走 StepFun，TTS 走 MiniMax——全部经 8787 worker 中转，key 不进 Swift 二进制。
+模型路由默认：chat 走本机 8317 代理（`grok-4.6` 默认），ASR 走 StepFun，TTS 走 MiniMax——全部经 8787 worker 中转，key 不进 Swift 二进制。
 
 ## 常用调试入口
 

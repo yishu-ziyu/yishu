@@ -53,7 +53,7 @@ const CLI_PROXY_CHAT_BASE_DEFAULT = "http://127.0.0.1:8317/v1";
 const MINIMAX_TTS_URL_DEFAULT = "https://api.minimaxi.com/v1/t2a_v2";
 const MINIMAX_VOICE_DEFAULT = "shangqiuzi_v3_20260717";
 const MINIMAX_TTS_MODEL_DEFAULT = "speech-2.8-hd";
-const CHAT_MODEL_DEFAULT = "grok-4.5";
+const CHAT_MODEL_DEFAULT = "grok-4.6";
 
 /**
  * Return only non-content metadata for an upstream failure. Provider bodies

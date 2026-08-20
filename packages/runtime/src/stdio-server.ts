@@ -13,6 +13,10 @@ import {
 import { runAuthWatchdog, resolveAuthWatchdogTimeoutMs } from "./auth-watchdog.js";
 import type { AgentRuntime } from "./runtime-port.js";
 
+if (process.env.YISHU_EVEROS === undefined) {
+  process.env.YISHU_EVEROS = "1";
+}
+
 const runtimeMode = selectedRuntimeMode();
 const authWatchdogTimeoutMs = resolveAuthWatchdogTimeoutMs();
 const RUNTIME_INITIALIZATION_TIMEOUT_MS = 10_000;
@@ -393,6 +397,40 @@ lineReader.on("line", (line) => {
       emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
         code: "product_kernel_disabled",
         message: "memory.forget requires product kernel (YISHU_PRODUCT_KERNEL not off).",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "memory.remember") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.rememberMemory(command, emit).catch((error) => {
+        emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+          code: "memory_remember_failed",
+          message: safeRuntimeErrorMessage(error, "这次没有记下。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("memory.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "这次没有记下。",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "speech.excerpt") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.excerptSpeech(command, emit).catch((error) => {
+        emit(runtimeEvent("speech.failed", command.requestId, command.traceId, {
+          code: "excerpt_failed",
+          message: safeRuntimeErrorMessage(error, "暂时无法抽出口播。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("speech.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "speech.excerpt requires product kernel (YISHU_PRODUCT_KERNEL not off).",
       }));
     }
     return;

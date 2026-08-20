@@ -5,7 +5,7 @@ compatibility_date = "2024-01-01"
 # Non-secret defaults. Secrets go in .dev.vars (local) or wrangler secret (deploy).
 [vars]
 CHAT_BASE = "http://127.0.0.1:8317/v1"
-CHAT_MODEL = "grok-4.5"
+CHAT_MODEL = "grok-4.6"
 STEPFUN_CHAT_MODEL = "step-3.7-flash"
 STEPFUN_TTS_MODEL = "stepaudio-2.5-tts"
 STEPFUN_VOICE_ID = "voice-tone-T3kYPt9kmW"

@@ -43,6 +43,10 @@ struct YishuVoiceProxySupervisorTests {
         #expect(busy.recoveryMessage.contains("8787"))
         #expect(busy.recoveryMessage.contains("重试"))
         #expect(busy.statusChip == "语音不可用")
+
+        let missingBundle = YishuVoiceProxyAvailability.missingBundle
+        #expect(missingBundle.recoveryMessage.contains("/Applications/奕枢.app"))
+        #expect(missingBundle.recoveryMessage.contains("临时编译"))
     }
 
     @Test func preferredCredentialsPathIsOutsideAppBundle() {
@@ -65,8 +69,8 @@ struct YishuVoiceProxySupervisorTests {
             + "/Users/me/.build/clicky-derived-data/Build/Products/Debug/Clicky.app/"
             + "Contents/Resources/YishuVoiceProxy/local-server.mjs"
         let formal =
-            "/Applications/Clicky.app/Contents/Resources/YishuRuntime/bin/node "
-            + "/Applications/Clicky.app/Contents/Resources/YishuVoiceProxy/local-server.mjs"
+            "/Applications/奕枢.app/Contents/Resources/YishuRuntime/bin/node "
+            + "/Applications/奕枢.app/Contents/Resources/YishuVoiceProxy/local-server.mjs"
         let worker =
             "/opt/homebrew/bin/node /Users/me/Documents/repo/apps/clicky/worker/local-server.mjs"
         let foreign = "/usr/local/bin/node /tmp/other-service.mjs"
@@ -79,7 +83,7 @@ struct YishuVoiceProxySupervisorTests {
         #expect(!YishuVoiceProxyProcessPolicy.isYishuVoiceProxyCommandLine(empty))
 
         let preferred =
-            "/Applications/Clicky.app/Contents/Resources/YishuVoiceProxy/local-server.mjs"
+            "/Applications/奕枢.app/Contents/Resources/YishuVoiceProxy/local-server.mjs"
         #expect(
             YishuVoiceProxyProcessPolicy.disposition(
                 commandLine: formal,
@@ -100,11 +104,27 @@ struct YishuVoiceProxySupervisorTests {
         )
         #expect(YishuVoiceProxyProcessPolicy.looksLikeBuildProductPath(buildOrphan))
         #expect(!YishuVoiceProxyProcessPolicy.looksLikeBuildProductPath(formal))
+        #expect(
+            YishuVoiceProxyProcessPolicy.looksLikeBuildProductPath(
+                "/Users/me/.jcode/scratch/yishu-orb-build/Build/Products/Debug/Clicky.app"
+            )
+        )
+        #expect(
+            YishuVoiceProxyProcessPolicy.isFormalAppBundlePath("/Applications/奕枢.app")
+        )
+        #expect(
+            !YishuVoiceProxyProcessPolicy.isFormalAppBundlePath(
+                "/Users/me/.jcode/scratch/yishu-orb-build/Build/Products/Debug/Clicky.app"
+            )
+        )
+        #expect(
+            YishuVoiceProxyProcessPolicy.nonFormalInstallWarning.contains("/Applications/奕枢.app")
+        )
     }
 
     @Test func onlyTrueOrphansAreReclaimableLiveParentIsPreserved() {
         let preferred =
-            "/Applications/Clicky.app/Contents/Resources/YishuVoiceProxy/local-server.mjs"
+            "/Applications/奕枢.app/Contents/Resources/YishuVoiceProxy/local-server.mjs"
         let buildProxy =
             "/Users/me/.build/clicky-derived-data/Build/Products/Debug/Clicky.app/"
             + "Contents/Resources/YishuRuntime/bin/node "
@@ -113,7 +133,7 @@ struct YishuVoiceProxySupervisorTests {
         let shellWorker =
             "/opt/homebrew/bin/node /Users/me/repo/apps/clicky/worker/local-server.mjs"
         let formal =
-            "/Applications/Clicky.app/Contents/Resources/YishuRuntime/bin/node "
+            "/Applications/奕枢.app/Contents/Resources/YishuRuntime/bin/node "
             + preferred
         let selfPID: Int32 = 9001
         let otherClickyPID: Int32 = 8002

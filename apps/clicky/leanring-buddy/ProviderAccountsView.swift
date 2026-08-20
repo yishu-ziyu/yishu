@@ -451,7 +451,7 @@ final class ProviderAccountsViewModel: ObservableObject {
             update(provider) { state in
                 state.phase = .idle
                 state.failure = nil
-                state.message = "Runtime 尚未连接，请稍后重试。"
+                state.message = YishuPanelRuntimeCopy.unavailable
                 state.clearTransientAuthSurface()
             }
         } else {
@@ -459,7 +459,7 @@ final class ProviderAccountsViewModel: ObservableObject {
                 update(provider) { state in
                     state.phase = .idle
                     state.failure = nil
-                    state.message = "Runtime 尚未连接，请稍后重试。"
+                    state.message = YishuPanelRuntimeCopy.unavailable
                 }
             }
         }
@@ -488,7 +488,7 @@ final class ProviderAccountsViewModel: ObservableObject {
             case .authTimedOut:
                 details = ("unavailable", "Provider 状态刷新超时。")
             default:
-                details = ("unavailable", "Runtime 尚未连接，请稍后重试。")
+                details = ("unavailable", YishuPanelRuntimeCopy.unavailable)
             }
         } else {
             // Do not surface arbitrary transport descriptions: runtime stderr
@@ -510,13 +510,13 @@ final class ProviderAccountsViewModel: ObservableObject {
         if let provider {
             update(provider) { state in
                 state.phase = .idle
-                state.message = "Runtime 尚未连接，请稍后重试。"
+                state.message = YishuPanelRuntimeCopy.unavailable
             }
         } else {
             for provider in YishuAuthProvider.allCases {
                 update(provider) { state in
                     state.phase = .idle
-                    state.message = "Runtime 尚未连接，请稍后重试。"
+                    state.message = YishuPanelRuntimeCopy.unavailable
                 }
             }
         }
@@ -587,10 +587,10 @@ struct ProviderAccountsView: View {
                         Text("账号")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(DS.Colors.textSecondary)
-                        Text("登录后，可用模型会出现在下方的“对话模型”")
+                        Text(headerSummary)
                             .font(.system(size: 10))
                             .foregroundColor(DS.Colors.textTertiary)
-                            .lineLimit(1)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     Spacer()
@@ -602,6 +602,9 @@ struct ProviderAccountsView: View {
             }
             .buttonStyle(.plain)
             .pointerCursor()
+            .accessibilityLabel("账号")
+            .accessibilityValue(headerSummary)
+            .accessibilityAddTraits(.isButton)
 
             Button {
                 viewModel.refreshStatus()
@@ -615,6 +618,17 @@ struct ProviderAccountsView: View {
             .pointerCursor()
             .help("刷新账号状态")
         }
+    }
+
+    private var headerSummary: String {
+        let chatGPT = viewModel.state(for: .openAICodex)
+        let xAI = viewModel.state(for: .xAI)
+        return YishuAccountSurfaceCopy.headerSummary(
+            chatGPTStatus: chatGPT.status,
+            chatGPTLoading: chatGPT.phase == .loading,
+            xAIStatus: xAI.status,
+            xAILoading: xAI.phase == .loading
+        )
     }
 }
 
@@ -692,9 +706,10 @@ private struct ProviderAccountRow: View {
             Spacer()
 
             if state.isConfigured {
-                Text("已登录")
+                Text(YishuAccountSurfaceCopy.rowBadge(status: state.status))
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(DS.Colors.success)
+                    .lineLimit(1)
             } else {
                 Text(state.status?.statusLabel ?? "待检查")
                     .font(.system(size: 10, weight: .medium))

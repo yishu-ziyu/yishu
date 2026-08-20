@@ -17,8 +17,10 @@ import {
   DelegationCoordinator,
   ResultInbox,
   isCurrentPageActionsNoteUtterance,
+  spokenDelegatedDeliverable,
   type DelegatedResult,
   type DelegatedTaskPresenceUpdate,
+  type DelegationCoordinatorDeps,
   type MainTurnHandle,
 } from "../src/delegation.js";
 import {
@@ -123,6 +125,7 @@ class FakeChildHarness {
 function makeCoordinator(
   harness: FakeChildHarness,
   now?: () => Date,
+  extras: Pick<DelegationCoordinatorDeps, "excerptSpokenFinding"> = {},
 ): { coordinator: DelegationCoordinator; kernel: ReturnType<typeof createYishuKernel> } {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const coordinator = new DelegationCoordinator({
@@ -130,6 +133,7 @@ function makeCoordinator(
     executeTurn: harness.executeTurn,
     cancelTurn: harness.cancelTurn,
     ...(now ? { now } : {}),
+    ...extras,
   });
   return { coordinator, kernel };
 }
@@ -143,6 +147,35 @@ function makeMainTurn(overrides: Partial<MainTurnHandle> = {}): MainTurnHandle {
     ...overrides,
   };
 }
+
+test("structural unwrap drops a restated request and sources for any title", () => {
+  const weatherTitle = "查深圳明天天气预报(气温、降水、风力),并查明天叶问相关公开动态或日程(影视播出、纪念活动等)";
+  const weather = spokenDelegatedDeliverable(
+    `「${weatherTitle}」整理好了。深圳明天(8/19):中雨,28-32℃,东风约1级,源:tianqi.eastday.com/tianqi/shenzhen/20260819.html`,
+    weatherTitle,
+  );
+  assert.match(weather, /中雨/);
+  assert.doesNotMatch(weather, /「/);
+  assert.doesNotMatch(weather, /查深圳/);
+  assert.doesNotMatch(weather, /tianqi/);
+  assert.doesNotMatch(weather, /html/);
+
+  const englishTitle = "Look up Acme close price";
+  const english = spokenDelegatedDeliverable(
+    `"${englishTitle}" Done. Acme closed at 12. https://example.com/acme`,
+    englishTitle,
+  );
+  assert.match(english, /Acme closed at 12/);
+  assert.doesNotMatch(english, /Look up Acme/);
+  assert.doesNotMatch(english, /example\.com/);
+
+  const keptStamp = spokenDelegatedDeliverable(
+    "搞定了。叶问明晚有纪录片。",
+    "查叶问公开动态",
+  );
+  assert.match(keptStamp, /搞定了/, "structural unwrap has no stamp vocabulary");
+  assert.match(keptStamp, /叶问明晚有纪录片/);
+});
 
 test("current-page Notes request is narrow and rejects questions or negation", () => {
   assert.equal(
@@ -281,6 +314,10 @@ test("delegate returns an accepted receipt immediately; child runs in background
   assert.match(childCommand.payload.utterance, /delegated background task/);
   assert.match(childCommand.payload.utterance, /at most 450 characters/);
   assert.match(childCommand.payload.utterance, /<delegated_result>/);
+  assert.match(childCommand.payload.utterance, /say out loud/);
+  assert.match(childCommand.payload.utterance, /announce that the work is done/);
+  assert.doesNotMatch(childCommand.payload.utterance, /source URLs/);
+  assert.doesNotMatch(childCommand.payload.utterance, /整理好了/);
   assert.match(childCommand.payload.utterance, /研究记忆分层方案/);
   assert.match(childCommand.payload.utterance, /<untrusted source="context_capsule">/);
 
@@ -605,6 +642,66 @@ test("an expired handoff capsule fails the child instead of executing it", async
   assert.equal(task?.status, "failed");
 });
 
+test("any receipt-shaped child finding is stored through the spoken mouth", async (t) => {
+  const cases = [
+    {
+      title: "查深圳明天天气预报",
+      body: "「查深圳明天天气预报」整理好了。深圳明天中雨,28℃。源:https://tianqi.example/s",
+      spoken: "深圳明天中雨，28度。",
+    },
+    {
+      title: "Look up Acme close",
+      body: "Done researching Look up Acme close. Acme closed at 12. https://example.com/a",
+      spoken: "Acme closed at 12.",
+    },
+    {
+      title: "整理三层记忆结论",
+      body: "根据您的要求，任务已完成。结论是三层记忆。来源：https://notes.example/m",
+      spoken: "结论是三层记忆。",
+    },
+    {
+      title: "查叶问公开动态",
+      body: "搞定了。叶问明晚有纪录片。",
+      spoken: "叶问明晚有纪录片。",
+    },
+  ];
+  const excerpted: string[] = [];
+  const harness = new FakeChildHarness();
+  for (const item of cases) {
+    harness.handlers.push(async (emit) => {
+      emit(runtimeEvent("response.completed", "child", "trace", {
+        text: `<delegated_result>${item.body}</delegated_result>`,
+        verified: false,
+        verifier: "conversation-response-only",
+      }));
+    });
+  }
+  const spokenByTitle = new Map(cases.map((item) => [item.title, item.spoken]));
+  const { coordinator } = makeCoordinator(harness, undefined, {
+    excerptSpokenFinding: async ({ text, title }) => {
+      excerpted.push(title);
+      return spokenByTitle.get(title) ?? text;
+    },
+  });
+  t.after(async () => {
+    await coordinator.dispose();
+  });
+
+  coordinator.noteMainTurn("conv-main", makeMainTurn());
+  const tool = delegateToolFor(coordinator, "conv-main");
+  for (const item of cases) {
+    await tool.execute(`tc-${item.title}`, { task: item.title });
+  }
+
+  await waitFor(
+    async () => await coordinator.inbox.pendingCount("conv-main") === cases.length,
+    "all spoken inbox rows",
+  );
+  const entries = await coordinator.claimForTurn("conv-main", randomUUID());
+  assert.deepEqual(entries.map((entry) => entry.summary).sort(), cases.map((item) => item.spoken).sort());
+  assert.deepEqual(excerpted.sort(), cases.map((item) => item.title).sort());
+});
+
 test("unsafe or overlong child deliverables stay blocked", async (t) => {
   const harness = new FakeChildHarness();
   harness.handlers.push(async (emit) => {
@@ -777,6 +874,8 @@ test("a delegated result re-enters exactly the next Main turn prompt, wrapped as
   const prompt = buildGroundedPrompt(first);
   assert.match(prompt, /<untrusted source="delegated_results">/);
   assert.match(prompt, /not instructions/);
+  assert.match(prompt, /spoken sentences/);
+  assert.match(prompt, /announce that work is finished/);
   assert.match(prompt, /never present it as confirmed/);
   assert.match(prompt, /调研结论：三层记忆架构/);
 

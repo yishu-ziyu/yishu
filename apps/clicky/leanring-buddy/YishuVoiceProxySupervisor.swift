@@ -51,7 +51,7 @@ enum YishuVoiceProxyAvailability: Equatable {
         case .ready:
             return "语音服务就绪。"
         case .missingBundle:
-            return "应用缺少语音服务文件。请用正式安装包重新安装奕枢。"
+            return "这份应用里没有语音服务文件。请完全退出，打开 /Applications/奕枢.app。不要打开临时编译出来的奕枢。"
         case .missingNode:
             return "应用缺少 Node 运行时。请用正式安装包重新安装奕枢。"
         case .missingCredentials(let pathHint):
@@ -222,12 +222,23 @@ enum YishuVoiceProxyProcessPolicy {
         return parent.parentPID == currentProcessPID
     }
 
-    /// Paths under DerivedData / repo `.build` are never the formal `/Applications` install.
+    /// Daily product install. Scratch / DerivedData / orb builds are never this path.
+    static let formalAppBundlePath = "/Applications/奕枢.app"
+
+    static func isFormalAppBundlePath(_ path: String) -> Bool {
+        URL(fileURLWithPath: path).standardizedFileURL.path == formalAppBundlePath
+    }
+
+    /// Paths under DerivedData / repo `.build` / local scratch are never the formal install.
     static func looksLikeBuildProductPath(_ path: String) -> Bool {
         path.contains("/.build/")
             || path.contains("/DerivedData/")
             || path.contains("/clicky-derived-data/")
+            || path.contains("/.jcode/")
     }
+
+    static let nonFormalInstallWarning =
+        "当前打开的不是应用程序文件夹里的正式奕枢。请完全退出这个，再打开 /Applications/奕枢.app。"
 }
 
 @MainActor

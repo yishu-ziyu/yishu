@@ -12,7 +12,7 @@ Review: 仓库顶层结构变化时
 产品的三条根本约束（见根 [README.md](../../README.md) 与 [AGENTS.md](../../AGENTS.md)）：
 
 - **一个身份**：奕枢是唯一用户可见人格；Hanako 是已被吸收的人格设计来源，不是第二个产品。
-- **一个常驻应用**：`apps/clicky` 是唯一 macOS App 源码/构建/安装/验收入口（bundle id `com.yishu.yishu-buddy`，安装于 `/Applications/Clicky.app`）。
+- **一个常驻应用**：`apps/clicky` 是唯一 macOS App 源码/构建/安装/验收入口（bundle id `com.yishu.yishu-buddy`，安装于 `/Applications/奕枢.app`）。
 - **一条任务真相**：任务状态只来自 typed Pi `AgentRuntime` 事件经 Kernel `TaskTruth` 的投影；工具成功不等于任务完成。
 
 ## 技术栈

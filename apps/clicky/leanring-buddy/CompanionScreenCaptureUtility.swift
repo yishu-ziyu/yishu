@@ -133,7 +133,7 @@ enum CompanionScreenCaptureUtility {
         for (displayIndex, display) in sortedDisplays.enumerated() {
             // Use NSScreen.frame (AppKit coordinates, bottom-left origin) so
             // displayFrame is in the same coordinate system as NSEvent.mouseLocation
-            // and the overlay window's screenFrame in BlueCursorView.
+            // and the overlay window's screenFrame in YishuPresenceView.
             let displayFrame = nsScreenByDisplayID[display.displayID]?.frame
                 ?? CGRect(x: display.frame.origin.x, y: display.frame.origin.y,
                           width: CGFloat(display.width), height: CGFloat(display.height))

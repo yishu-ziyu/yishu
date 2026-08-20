@@ -27,8 +27,8 @@ bundle ID、权限提示与打包脚本。同时，正式 Clicky 使用的 `Yish
 - `YishuContext` 是跨 App/Runtime 的 Swift 证据协议，放在根 Swift package 的
   `Sources/YishuContext`；它不属于任何 App。
 - 单元测试可使用 mock、headless 或测试 target，但不得重新建立第二个 `.app`。
-- 正式 Clicky 保留 `com.yishu.yishu-buddy`、`/Applications/Clicky.app`、签名身份、
-  UserDefaults、登录项与现有 TCC 连续性。
+- 正式壳保留 `com.yishu.yishu-buddy`、`/Applications/奕枢.app`、签名身份、
+  UserDefaults、登录项与现有 TCC 连续性。磁盘上的应用名是奕枢；`apps/clicky` 只是源码目录。
 
 ## Alternatives considered
 

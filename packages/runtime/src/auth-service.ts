@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   AUTH_CONTROLLED_MODEL_IDS,
   AUTH_PROVIDER_IDS,
+  sanitizePublicAccountLabel,
   type AuthDeviceCodePayload,
   type AuthFailureCode,
   type AuthFailurePayload,
@@ -111,6 +112,41 @@ function safeText(value: unknown, fallback: string, maxLength = 500): string {
   const text = typeof value === "string" ? value.trim() : "";
   if (!text) return fallback;
   return text.slice(0, maxLength);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
+  const parts = token.split(".");
+  if (parts.length !== 3) return undefined;
+  try {
+    const decoded = Buffer.from(parts[1] ?? "", "base64url").toString("utf8");
+    const claims: unknown = JSON.parse(decoded);
+    return isRecord(claims) ? claims : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Public login name only. Tokens, JWTs, and provider account ids stay off the wire. */
+export function publicAccountLabelFromAuth(resolved: unknown): string | undefined {
+  if (!isRecord(resolved)) return undefined;
+  const direct = sanitizePublicAccountLabel(resolved.email)
+    ?? sanitizePublicAccountLabel(resolved.accountLabel);
+  if (direct) return direct;
+  for (const key of ["id_token", "idToken", "apiKey", "access"] as const) {
+    const token = resolved[key];
+    if (typeof token !== "string") continue;
+    const claims = decodeJwtPayload(token);
+    if (!claims) continue;
+    const label = sanitizePublicAccountLabel(claims.email)
+      ?? sanitizePublicAccountLabel(claims.preferred_username)
+      ?? sanitizePublicAccountLabel(claims.name);
+    if (label) return label;
+  }
+  return undefined;
 }
 
 const SENSITIVE_MESSAGE_MARKER = /access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|client[_-]?secret|private[_-]?key|account[_-]?id|credential|authorization|password|secret|bearer|\btoken\b|jwt|\beyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/i;
@@ -462,6 +498,7 @@ export class YishuAuthService {
   private async statusOne(runtime: AuthModelRuntime, provider: AuthProviderId): Promise<AuthPublicStatus> {
     let configured = false;
     let requiresRelogin = false;
+    let resolvedAuth: unknown;
     try {
       // checkAuth is provider-scoped and therefore cannot treat an ambient
       // OPENAI_API_KEY/XAI_API_KEY as a subscription after the policy wrapper.
@@ -469,10 +506,10 @@ export class YishuAuthService {
       configured = check?.type === "oauth";
       if (configured) {
         try {
-          // getAuth owns refresh under Pi's credential-store lock.  We discard
-          // the result immediately and only expose the boolean outcome.
-          const resolved = await runtime.getAuth(provider);
-          if (!resolved) {
+          // getAuth owns refresh under Pi's credential-store lock.  The
+          // credential itself stays here; only a public email/name may leave.
+          resolvedAuth = await runtime.getAuth(provider);
+          if (!resolvedAuth) {
             configured = false;
             requiresRelogin = true;
           }
@@ -504,12 +541,15 @@ export class YishuAuthService {
       }
     }
 
+    const accountLabel = configured ? publicAccountLabelFromAuth(resolvedAuth) : undefined;
+
     return {
       provider,
       configured,
       authType: "oauth",
       models,
       ...(requiresRelogin ? { requiresRelogin: true } : {}),
+      ...(accountLabel ? { accountLabel } : {}),
       ...(provider === "xai" ? { experimental: "experimental_local_subscription" as const } : {}),
     };
   }

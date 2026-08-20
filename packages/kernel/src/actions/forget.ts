@@ -3,6 +3,7 @@ import { defineYishuAction } from "../action/define.js";
 import { ActionCancelledError } from "../action/types.js";
 import type { YishuStorePort } from "../store/yishu-store.js";
 import type { MemoryTruthLayer } from "../memory/truth-layer.js";
+import type { VisibleMemoryFile } from "../memory/visible-file.js";
 
 const forgetInputSchema = z.object({
   memoryId: z.string().uuid(),
@@ -15,7 +16,11 @@ export type ForgetInput = z.infer<typeof forgetInputSchema>;
  * key; the markdown fact line is removed from the truth layer so a future
  * index rebuild cannot resurrect a forgotten fact.
  */
-export function createForgetAction(store: YishuStorePort, truth?: MemoryTruthLayer) {
+export function createForgetAction(
+  store: YishuStorePort,
+  truth?: MemoryTruthLayer,
+  visible?: VisibleMemoryFile,
+) {
   return defineYishuAction({
     name: "forget",
     description:
@@ -36,6 +41,9 @@ export function createForgetAction(store: YishuStorePort, truth?: MemoryTruthLay
           : await store.retireMemory(ctx.input.memoryId, mutationOptions);
       if (!ok) {
         throw new Error(`Memory not found: ${ctx.input.memoryId}`);
+      }
+      if (visible !== undefined && claim !== undefined) {
+        await visible.removeFactsMatching(claim.claim).catch(() => undefined);
       }
       if (truth !== undefined && claim !== undefined) {
         const match = /#mem:([^\s]+)$/.exec(claim.truthRef ?? "");

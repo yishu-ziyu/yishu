@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -3367,6 +3367,72 @@ test("memory.list returns personal only; memory.forget hard-deletes and rejects 
   );
 });
 
+test("memory.remember writes personal notes through the same store; empty and unverified stay honest", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+
+  const savedEvents: RuntimeEvent[] = [];
+  await runtime.rememberMemory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "memory.remember",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { text: "周四把钥匙放在抽屉第二格", sessionScope: { kind: "personal" } },
+  }, (event) => savedEvents.push(event));
+  const remembered = savedEvents.find((event) => event.type === "memory.remembered");
+  assert.ok(remembered, "confirmed write must emit memory.remembered");
+  assert.equal((remembered?.payload as { confirmed?: boolean }).confirmed, true);
+  assert.match(String((remembered?.payload as { summary?: string }).summary ?? ""), /钥匙放在抽屉/);
+  const listed = await kernel.store.listMemories({ scope: "personal" });
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]?.id, (remembered?.payload as { memoryId?: string }).memoryId);
+
+  const beforeCount = (await kernel.store.searchMemory("", { scope: "personal" })).length;
+  const projectEvents: RuntimeEvent[] = [];
+  await runtime.rememberMemory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "memory.remember",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      text: "项目纸条不该走这条路",
+      sessionScope: {
+        kind: "project",
+        projectId: "77777777-7777-4777-8777-777777777777",
+        projectLabel: "P",
+      },
+    },
+  }, (event) => projectEvents.push(event));
+  assert.ok(projectEvents.some((event) => event.type === "memory.failed"));
+  assert.equal(
+    (await kernel.store.searchMemory("", { scope: "personal" })).length,
+    beforeCount,
+  );
+
+  const originalSearch = kernel.store.searchMemory.bind(kernel.store);
+  kernel.store.searchMemory = async () => [];
+  try {
+    const unconfirmedEvents: RuntimeEvent[] = [];
+    await runtime.rememberMemory({
+      schemaVersion: PROTOCOL_VERSION,
+      type: "memory.remember",
+      requestId: randomUUID(),
+      traceId: randomUUID(),
+      sentAt: new Date().toISOString(),
+      payload: { text: "可能写下但读不回来", sessionScope: { kind: "personal" } },
+    }, (event) => unconfirmedEvents.push(event));
+    const failed = unconfirmedEvents.find((event) => event.type === "memory.failed");
+    assert.ok(failed);
+    assert.equal((failed?.payload as { code?: string }).code, "memory_unconfirmed");
+    assert.match(String((failed?.payload as { message?: string }).message ?? ""), /没能确认/);
+    assert.ok(!unconfirmedEvents.some((event) => event.type === "memory.remembered"));
+  } finally {
+    kernel.store.searchMemory = originalSearch;
+  }
+});
+
 class CapturingRuntime implements AgentRuntime {
   lastCommand: TurnStartCommand | undefined;
 
@@ -3426,6 +3492,30 @@ test("ordinary personal turn recalls related memory, emits memory.used, does not
   // PR-2: recall stays on the turn cache; the engine prepends the block.
   assert.equal(attached.payload.__yishuRecalledMemories, undefined);
   assert.equal(attached.payload.utterance, "我希望你怎么回答？");
+});
+
+test("ordinary turn recalls a user-edited line from the visible memory file", async (t) => {
+  const memoryDir = await mkdtemp(path.join(tmpdir(), "yishu-vis-recall-pkr-"));
+  t.after(() => rm(memoryDir, { recursive: true, force: true }));
+  const kernel = createYishuKernel({ storeBackend: "memory", memoryDir });
+  assert.ok(kernel.memory);
+  await writeFile(
+    kernel.memory.visible.filePath,
+    "# 记忆\n\n- 验收回答先给结论\n",
+    "utf8",
+  );
+
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  t.after(() => runtime.dispose());
+  const events: RuntimeEvent[] = [];
+  const command = makeCommand("我希望你怎么回答？");
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = { kind: "personal" };
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  const used = events.find((event) => event.type === "memory.used");
+  assert.ok(used, "user-edited file must be recalled");
+  assert.match(String(used?.payload.summary1 ?? ""), /验收回答先给结论/);
 });
 
 test("unrelated ordinary turn does not emit memory.used", async () => {
@@ -3791,4 +3881,84 @@ test("prompt bytes are identical when no mind lesson is attached", async () => {
   const prompt = buildGroundedPrompt(capturing.lastCommand!);
   assert.equal(prompt, buildGroundedPrompt(command));
   assert.doesNotMatch(prompt, /mind_lessons/);
+});
+
+test("speech.excerpt uses the turn provider/model and never falls back to the essay", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const essay = "第一句。第二句。第三句。第四句。第五句。第六句。第七句。第八句。";
+  let seenProvider = "";
+  let seenModel = "";
+  let seenVisible = "";
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel, undefined, {
+    speechExcerptModel: {
+      async excerpt(input) {
+        seenProvider = input.providerId;
+        seenModel = input.modelId;
+        seenVisible = input.visibleText;
+        return "今天多云。出门带件外套。";
+      },
+    },
+  });
+
+  const events: RuntimeEvent[] = [];
+  await runtime.excerptSpeech({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "speech.excerpt",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      visibleText: essay,
+      modelPreference: { provider: "xai", model: "grok-4.3" },
+    },
+  }, (event) => events.push(event));
+
+  const excerpted = events.find((event) => event.type === "speech.excerpted");
+  assert.ok(excerpted);
+  assert.equal(seenProvider, "xai");
+  assert.equal(seenModel, "grok-4.3");
+  assert.equal(seenVisible, essay);
+  assert.equal((excerpted?.payload as { spokenText?: string }).spokenText, "今天多云。出门带件外套。");
+  assert.notEqual((excerpted?.payload as { spokenText?: string }).spokenText, essay);
+
+  const failing = new ProductKernelRuntime(new MockAgentRuntime(), kernel, undefined, {
+    speechExcerptModel: {
+      async excerpt() {
+        throw new Error(`model exploded: ${essay}`);
+      },
+    },
+  });
+  const failedEvents: RuntimeEvent[] = [];
+  await failing.excerptSpeech({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "speech.excerpt",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      visibleText: essay,
+      modelPreference: { provider: "xai", model: "grok-4.3" },
+    },
+  }, (event) => failedEvents.push(event));
+  const failed = failedEvents.find((event) => event.type === "speech.failed");
+  assert.ok(failed);
+  assert.equal(failedEvents.some((event) => event.type === "speech.excerpted"), false);
+  assert.doesNotMatch(JSON.stringify(failed?.payload ?? {}), /第一句/);
+  assert.doesNotMatch(JSON.stringify(failed?.payload ?? {}), /第八句/);
+
+  const missing = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const missingEvents: RuntimeEvent[] = [];
+  await missing.excerptSpeech({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "speech.excerpt",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      visibleText: essay,
+      modelPreference: { provider: "xai", model: "grok-4.3" },
+    },
+  }, (event) => missingEvents.push(event));
+  assert.ok(missingEvents.some((event) => event.type === "speech.failed"));
+  assert.equal(missingEvents.some((event) => event.type === "speech.excerpted"), false);
 });

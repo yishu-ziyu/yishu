@@ -21,10 +21,11 @@ export const PROTOCOL_VERSION = 1 as const;
  */
 export const LOCAL_GROK_PROVIDER = "yishu-local-grok" as const;
 export const LOCAL_GROK_BASE_URL = "http://127.0.0.1:8787/v1" as const;
-export const LOCAL_GROK_DEFAULT_MODEL = "grok-4.5" as const;
+export const LOCAL_GROK_DEFAULT_MODEL = "grok-4.6" as const;
 
 /** Current Grok choices exposed by Clicky's model picker. */
 export const LOCAL_GROK_MODEL_IDS = [
+  "grok-4.6",
   "grok-4.5",
   "grok-4.3",
   "grok-4.20-0309-reasoning",
@@ -595,6 +596,38 @@ export const memoryForgetCommandSchema = z.object({
   }),
 });
 
+/**
+ * Explicit personal note from the product panel. Same store as voice
+ * "记住…"; empty/whitespace text is rejected and must not persist.
+ */
+export const memoryRememberCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("memory.remember"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    text: z.string().trim().min(1).max(2000),
+    sessionScope: sessionScopeSchema.default({ kind: "personal" }),
+  }),
+});
+
+/**
+ * Ask the same turn provider/model for at most two spoken sentences
+ * from a scrubbed visible reply. Failure must not fall back to the essay.
+ */
+export const speechExcerptCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("speech.excerpt"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    visibleText: z.string().trim().min(1).max(8000),
+    modelPreference: modelPreferenceSchema,
+  }),
+});
+
 export const clientCommandSchema = z.discriminatedUnion("type", [
   turnStartCommandSchema,
   turnInterruptCommandSchema,
@@ -615,6 +648,8 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   historyDeleteCommandSchema,
   memoryListCommandSchema,
   memoryForgetCommandSchema,
+  memoryRememberCommandSchema,
+  speechExcerptCommandSchema,
 ]);
 
 export type ContextFrame = z.infer<typeof contextFrameSchema>;
@@ -647,6 +682,8 @@ export type HistoryOpenCommand = z.infer<typeof historyOpenCommandSchema>;
 export type HistoryDeleteCommand = z.infer<typeof historyDeleteCommandSchema>;
 export type MemoryListCommand = z.infer<typeof memoryListCommandSchema>;
 export type MemoryForgetCommand = z.infer<typeof memoryForgetCommandSchema>;
+export type MemoryRememberCommand = z.infer<typeof memoryRememberCommandSchema>;
+export type SpeechExcerptCommand = z.infer<typeof speechExcerptCommandSchema>;
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 
 /**
@@ -691,9 +728,12 @@ export type RuntimeEventType =
   | "history.failed"
   | "memory.listed"
   | "memory.forgotten"
+  | "memory.remembered"
   | "memory.failed"
   /** Controlled durable-memory use notice for the product UI (not full claim dumps). */
-  | "memory.used";
+  | "memory.used"
+  | "speech.excerpted"
+  | "speech.failed";
 
 export interface RuntimeEvent<Payload = Record<string, unknown>> {
   schemaVersion: typeof PROTOCOL_VERSION;

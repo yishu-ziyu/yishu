@@ -97,6 +97,73 @@ const MISSING_RESULT_NOTICE = "[delegated result unavailable: child did not prov
 const DELEGATED_RESULT_OPEN = "<delegated_result>";
 const DELEGATED_RESULT_CLOSE = "</delegated_result>";
 const STATUS_ONLY_RESULT = /^(?:任务|研究|后台任务|工作)?\s*(?:已(?:经)?|正在)?\s*(?:开始|完成|结束|进行中|处理(?:中|完毕)?)[。！!?？:：\s]*$/u;
+const QUOTE_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ["「", "」"],
+  ["『", "』"],
+  ["“", "”"],
+  ["\"", "\""],
+  ["'", "'"],
+];
+
+export interface SpokenFindingExcerptInput {
+  text: string;
+  title: string;
+  providerId?: string;
+  modelId?: string;
+}
+
+/** Structural unwrap only. Wrapper language is the spoken mouth's job. */
+export function spokenDelegatedDeliverable(rawSummary: string, title = ""): string {
+  let text = rawSummary.replace(/\r\n?/gu, "\n").trim();
+  if (!text) return "";
+  text = text.replace(
+    /\[([^\]\n]+)\]\(\s*(?:https?:\/\/|www\.)[^)\n]+\)/giu,
+    "$1",
+  );
+  text = text.replace(
+    /(?:https?:\/\/|www\.)[^\s<>()（）[\]{}，。！？；、“”‘’]+/giu,
+    "",
+  );
+  text = text.replace(
+    /(?:[a-z0-9-]+\.)+(?:com|cn|net|org|io|co|info)(?:\/[^\s<>()（）[\]{}，。！？；、“”‘’]*)?/giu,
+    "",
+  );
+  text = text.replace(/(?:来源|来源链接|网址|链接|source)\s*[:：]/giu, "");
+  text = stripLeadingQuotedRequest(text, title);
+  text = text.replace(/[`*_>#~]+/gu, " ");
+  text = text.split(/\s+/u).filter(Boolean).join(" ");
+  text = text.replace(/[,，](?:\s*[,，])+/gu, "，");
+  text = text.replace(/^[ ，、:：;；]+|[ ，、:：;；]+$/gu, "");
+  return text;
+}
+
+export function stripLeadingQuotedRequest(text: string, title: string): string {
+  const normalizedTitle = title.replace(/\s+/gu, " ").trim();
+  if (!normalizedTitle) return text;
+  for (const [open, close] of QUOTE_PAIRS) {
+    if (!text.startsWith(open)) continue;
+    const end = text.indexOf(close, open.length);
+    if (end < 0) continue;
+    const quoted = text
+      .slice(open.length, end)
+      .replace(/[.…]+$/u, "")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (!quotedMatchesRequest(quoted, normalizedTitle)) continue;
+    return text
+      .slice(end + close.length)
+      .replace(/^[。.!！，,\s]+/u, "")
+      .trim();
+  }
+  return text;
+}
+
+function quotedMatchesRequest(quoted: string, title: string): boolean {
+  if (!quoted) return false;
+  const q = quoted.toLocaleLowerCase();
+  const t = title.toLocaleLowerCase();
+  return t.startsWith(q) || q.startsWith(t);
+}
 
 async function waitAtMost(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -121,8 +188,8 @@ const RESULT_KIND_FOR: Record<DelegatedTerminalKind, DelegatedResultKind> = {
   cancelled: "cancelled",
 };
 
-function boundedResultSummary(rawSummary: string) {
-  const raw = rawSummary.replace(/\r\n?/gu, "\n").trim();
+function boundedResultSummary(rawSummary: string, title = "") {
+  const raw = spokenDelegatedDeliverable(rawSummary, title);
   if (!raw || raw.length > MAX_RESULT_SUMMARY) {
     return { summary: OMITTED_RESULT_NOTICE, hasSafeDeliverableResult: false };
   }
@@ -267,6 +334,14 @@ function normalizeCurrentPageNoteInput(input: CurrentPageNoteInput): CurrentPage
   return { title, items };
 }
 
+export interface SettledDelegatedTask {
+  readonly taskId: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly resultKind: DelegatedResultKind;
+  readonly sessionScope: SessionScope;
+}
+
 export interface DelegationCoordinatorDeps {
   kernel: YishuKernel;
   /** Execute a turn on the shared execution harness (the inner runtime). */
@@ -275,6 +350,10 @@ export interface DelegationCoordinatorDeps {
   cancelTurn: (command: TurnCancelCommand, emit: (event: RuntimeEvent) => void) => Promise<void>;
   /** Release one completed child Pi session without touching Main sessions. */
   releaseConversationSession?: (conversationId: string) => void;
+  /** Same spoken mouth as a live turn. Wrapper language is not a word list. */
+  excerptSpokenFinding?: (input: SpokenFindingExcerptInput) => Promise<string>;
+  /** Optional observer after TaskTruth and the inbox row exist. */
+  onSettledTask?: (task: SettledDelegatedTask) => void;
   now?: () => Date;
 }
 
@@ -310,6 +389,8 @@ export class DelegationCoordinator {
   private readonly executeTurn: DelegationCoordinatorDeps["executeTurn"];
   private readonly cancelTurn: DelegationCoordinatorDeps["cancelTurn"];
   private readonly releaseConversationSession: ((conversationId: string) => void) | undefined;
+  private readonly excerptSpokenFinding: DelegationCoordinatorDeps["excerptSpokenFinding"];
+  private readonly onSettledTask: DelegationCoordinatorDeps["onSettledTask"];
   private readonly now: () => Date;
   readonly inbox: ResultInbox;
   private readonly mainTurns = new Map<string, MainTurnHandle>();
@@ -325,6 +406,8 @@ export class DelegationCoordinator {
     this.executeTurn = deps.executeTurn;
     this.cancelTurn = deps.cancelTurn;
     this.releaseConversationSession = deps.releaseConversationSession;
+    this.excerptSpokenFinding = deps.excerptSpokenFinding;
+    this.onSettledTask = deps.onSettledTask;
     this.now = deps.now ?? (() => new Date());
     this.inbox = new ResultInbox(deps.kernel.store);
   }
@@ -512,6 +595,7 @@ export class DelegationCoordinator {
         "Start an independent background task and continue the conversation immediately.",
         "Use when the user asks for research or work that can run in the background",
         "while you keep talking. The result will be delivered in a later turn.",
+        "May run alongside other non-screen work in the same turn.",
       ].join(" "),
       promptSnippet: "Delegate a background task and reply right away without waiting for it.",
       promptGuidelines: [
@@ -520,7 +604,7 @@ export class DelegationCoordinator {
         "Never delegate a relative-time reminder such as 'N minutes from now'. That is a product action, not background work.",
       ],
       parameters,
-      executionMode: "sequential",
+      executionMode: "parallel",
       async execute(_toolCallId: string, params: { task: string }) {
         const mainTurn = coordinator.mainTurns.get(conversationId);
         if (!mainTurn) {
@@ -718,7 +802,7 @@ export class DelegationCoordinator {
             && event.payload.verifier !== undefined
             && event.payload.verifier !== "conversation-response-only"
           ) {
-            const result = boundedResultSummary(summaryForTerminalEvent(event));
+            const result = boundedResultSummary(summaryForTerminalEvent(event), input.title);
             observed = { kind: "unverified", summary: result.summary };
             return;
           }
@@ -730,7 +814,7 @@ export class DelegationCoordinator {
               observed = { kind: "unverified", summary: MISSING_RESULT_NOTICE };
               return;
             }
-            const result = boundedResultSummary(deliverable);
+            const result = boundedResultSummary(deliverable, input.title);
             const completion = evaluateTaskCompletion(input.contract, {
               responseText: result.hasSafeDeliverableResult ? deliverable : "",
             });
@@ -740,7 +824,7 @@ export class DelegationCoordinator {
             };
             return;
           }
-          const result = boundedResultSummary(summaryForTerminalEvent(event));
+          const result = boundedResultSummary(summaryForTerminalEvent(event), input.title);
           observed = { kind: ordinaryKind, summary: result.summary };
         });
         terminal = observed ?? (this.disposing
@@ -770,7 +854,7 @@ export class DelegationCoordinator {
     if (runningChild) runningChild.pendingTerminal = { kind, summary: rawSummary };
 
     const observedAt = this.now().toISOString();
-    const summary = boundedResultSummary(rawSummary).summary || `[${RESULT_KIND_FOR[kind]}]`;
+    const summary = await this.spokenFindingSummary(input, kind, rawSummary);
     let projected: TaskTruth | null;
     try {
       projected = await this.kernel.taskTruth.recordWithDelegatedResult({
@@ -817,6 +901,47 @@ export class DelegationCoordinator {
       summary: result.summary,
       sequence: result.sequence,
     });
+    this.onSettledTask?.({
+      taskId: result.taskId,
+      title: input.title,
+      summary: result.summary,
+      resultKind: result.resultKind,
+      sessionScope: input.sessionScope,
+    });
+  }
+
+  private async spokenFindingSummary(
+    input: ChildExecutionInput,
+    kind: DelegatedTerminalKind,
+    rawSummary: string,
+  ): Promise<string> {
+    const structural = boundedResultSummary(rawSummary, input.title).summary
+      || `[${RESULT_KIND_FOR[kind]}]`;
+    if (!this.shouldSpeakFinding(kind, structural) || !this.excerptSpokenFinding) {
+      return structural;
+    }
+    try {
+      const spoken = await this.excerptSpokenFinding({
+        text: structural,
+        title: input.title,
+        ...(input.modelPreference
+          ? {
+              providerId: input.modelPreference.provider,
+              modelId: input.modelPreference.model,
+            }
+          : {}),
+      });
+      return boundedResultSummary(spoken, input.title).summary || structural;
+    } catch {
+      return structural;
+    }
+  }
+
+  private shouldSpeakFinding(kind: DelegatedTerminalKind, summary: string): boolean {
+    if (kind === "cancelled" || kind === "failed") return false;
+    const lower = summary.toLowerCase();
+    return !lower.includes("[result summary omitted")
+      && !lower.includes("[delegated result unavailable");
   }
 
   private buildChildCommand(input: {
@@ -856,9 +981,10 @@ export class DelegationCoordinator {
       payload: {
         utterance: [
           "You are running a delegated background task. Complete it and report a concise result.",
-          "Put only the actual deliverable in <delegated_result>...</delegated_result> at the end of your response.",
-          "The text inside must be at most 450 characters and contain complete findings for every requested point; never put a plan or progress update there.",
-          "For current or external facts, use web_search and include compact source URLs in the deliverable.",
+          "Put only the spoken answer in <delegated_result>...</delegated_result> at the end of your response.",
+          "The text inside must be at most 450 characters.",
+          "Write it as 奕枢 would say out loud: one or two spoken sentences with the actual findings.",
+          "Do not quote the task. Do not announce that the work is done. Keep URLs and source lists out of the deliverable.",
           "If you cannot complete the task with the available capabilities, explain the blocker without emitting a delegated_result block.",
           "",
           `task: ${input.title}`,

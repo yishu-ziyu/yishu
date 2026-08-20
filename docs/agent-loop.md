@@ -34,7 +34,7 @@ flowchart LR
 
 | 阶段 | 已确认的产品规则 | Pi 判断 | 奕枢正式落点 |
 |---|---|---|---|
-| 1. 用户提出目标 | 清楚且低风险直接开始；歧义只问真正阻塞的问题；长任务、高风险或不可逆动作先确认目标、边界和验收结果 | **Pi 原生 + 产品拥有**。`prompt`、`steer` 和 `followUp` 能接收或修正自然语言目标；是否必须提问、是否可行动是产品权限与风险政策 | Clicky 收口输入；Kernel 用不可变 `TaskExecutionContract` 固定 objective、success mode、authority、risk 和一次产品 attempt；Pi 负责理解与下一步决策 |
+| 1. 用户提出目标 | 清楚且低风险直接开始；歧义只问真正阻塞的问题；长任务、高风险或不可逆动作先确认目标、边界和验收结果 | **Pi 原生 + 产品拥有**。`prompt`、`steer` 和 `followUp` 能接收或修正自然语言目标；是否必须提问、是否可行动是产品权限与风险政策 | Clicky 收口输入；Kernel 先产出唯一不可变 `TurnIntentFrame`，再生成 `TaskExecutionContract`固定 objective、success mode、authority、risk 和一次产品 attempt；Pi 负责循环内的下一步决策，不重新扩大 effect 边界 |
 | 2. 获取当前现场 | 默认使用完成任务所需的最小新鲜现场；扩大到其他窗口、历史、私密或敏感内容时受范围和权限控制 | **Pi 扩展**。Pi 接受文本、图片、custom message 和 context hook，但不提供奕枢的桌面传感器、证据来源、置信度和过期语义 | Clicky 采集 `ContextFrame`；Kernel `ContextTrail` 保存脱敏证据；Runtime 把有界现场注入 Pi |
 | 3. 判断下一步 | 不逐步播报隐藏推理；直接做低风险可逆步骤，只在关键检查点、阻塞、风险变化或需要决定时更新用户 | **Pi 原生**。Pi 自带 model-tool 循环、turn events、steering/follow-up 队列和上下文压缩 | Pi 选择执行步骤；Kernel/Clicky 只投影短、可见、可追踪的任务状态，不暴露链式思考 |
 | 4. 选择并调用工具 | 用户不需要挑选工具、Skill、MCP 或后台 Agent；能力扩大、敏感访问和高风险动作必须经过产品授权 | **Pi 原生 + Pi 扩展**。内置工具选择、custom tools、Skills、extensions 和运行时 active-tool 切换均已存在 | Runtime 用 capability profile 和 session tool policy 装配 Pi；Kernel Action/authority 决定产品权限；Swift 执行 macOS 动作 |

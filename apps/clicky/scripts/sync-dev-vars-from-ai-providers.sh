@@ -35,7 +35,7 @@ fi
 
 # Chat defaults to Grok via local cli-proxy (8317). Override with env if needed.
 CHAT_BASE="${CHAT_BASE:-http://127.0.0.1:8317/v1}"
-CHAT_MODEL="${CHAT_MODEL:-grok-4.5}"
+CHAT_MODEL="${CHAT_MODEL:-grok-4.6}"
 
 # Prefer explicit chat key, then cli-proxy OPENAI_API_KEY, then XAI, else StepFun.
 CHAT_API_KEY="${CHAT_API_KEY:-${OPENAI_API_KEY:-${XAI_API_KEY:-$STEPFUN_API_KEY}}}"

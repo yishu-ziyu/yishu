@@ -14,7 +14,7 @@ class ClaudeAPI {
     var model: String
     private let session: URLSession
 
-    init(proxyURL: String, model: String = "grok-4.5") {
+    init(proxyURL: String, model: String = "grok-4.6") {
         self.apiURL = URL(string: proxyURL)!
         self.model = model
 

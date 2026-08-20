@@ -106,12 +106,12 @@ enum YishuBargeInPolicy {
               YishuProductUtteranceRouter.classify(text) == .conversation else {
             return false
         }
-        // Keep this at least as conservative as ProductKernelRuntime's
-        // COMPUTER_EFFECT_INTENT. Classifier drift must cost a fresh frame,
-        // never a rejected steer that leaves the user waiting.
-        let runtimeEffect = #"(?:\b(?:click|press|open|close|type|enter|select|drag|scroll|send|delete|move|rename|create|save|execute|copy|paste|cut)\b|点击|打开|关闭|输入|选择|拖动|滚动|发送|删除|移动|重命名|创建|保存|执行|复制|粘贴|剪切|拷贝)"#
+        // This shell-only preflight is deliberately more conservative than
+        // Kernel's authoritative IntentFrame: any likely desktop dependency
+        // pays for a fresh frame instead of risking a stale same-session steer.
+        let freshFrameEffect = #"(?:\b(?:click|press|open|close|type|enter|select|drag|scroll|send|delete|move|rename|create|save|execute|copy|paste|cut)\b|点击|打开|关闭|输入|选择|拖动|滚动|发送|删除|移动|重命名|创建|保存|执行|复制|粘贴|剪切|拷贝)"#
         guard text.range(
-            of: runtimeEffect,
+            of: freshFrameEffect,
             options: [.regularExpression, .caseInsensitive]
         ) == nil else { return false }
         let screenDependency = #"(?:这个|那个|这些|那些|这里|那里|刚才那个|刚刚那个|上一段|上一个|前一个|刚才的|当前|现在这个|屏幕|页面|网页|窗口|按钮|菜单|光标|鼠标|左边|右边|上面|下面|前台|选中|高亮|图里|截图|\b(?:this|that|these|those|here|there|last|previous|current\s+(?:screen|page|window)|screen|page|window|button|menu|cursor|selected)\b)"#
@@ -149,6 +149,15 @@ private struct DirectClickPrewarmCache {
     let screenCaptures: [CompanionScreenCapture]
     let match: YishuDirectClickMatch
     let capturedAtUptimeNanoseconds: UInt64
+    let frontmostProcessIdentifier: pid_t?
+    let displayFingerprint: String
+    let traceID: String
+}
+
+private struct HeldSceneCache {
+    let context: YishuCapturedContext
+    let capturedAtUptimeNanoseconds: UInt64
+    let startedAt: Date
     let frontmostProcessIdentifier: pid_t?
     let displayFingerprint: String
     let traceID: String
@@ -250,6 +259,7 @@ final class CompanionManager: ObservableObject {
     /// Pending forget confirmation for one personal memory row.
     @Published private(set) var memoryForgetCandidate: YishuMemoryListItem?
     @Published private(set) var memoryForgetInFlight = false
+    @Published private(set) var personalNoteSaving = false
     /// Local 8787 voice proxy health. Panel "在线" requires this ready.
     @Published private(set) var voiceProxyAvailability: YishuVoiceProxyAvailability = .stopped
     /// Pi sidecar health. A healthy voice proxy alone must never make the menu
@@ -257,14 +267,14 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var agentRuntimeAvailability: YishuAgentRuntimeAvailability = .stopped
 
     /// Screen location (global AppKit coords) of a detected UI element the
-    /// buddy should fly to and point at. Parsed from Claude's response;
-    /// observed by BlueCursorView to trigger the flight animation.
+    /// thinking-orb should fly to and point at. Parsed from Claude's response;
+    /// observed by YishuPresenceView to trigger the flight animation.
     @Published var detectedElementScreenLocation: CGPoint?
     /// The display frame (global AppKit coords) of the screen the detected
-    /// element is on, so BlueCursorView knows which screen overlay should animate.
+    /// element is on, so YishuPresenceView knows which screen overlay should animate.
     @Published var detectedElementDisplayFrame: CGRect?
     /// Custom speech bubble text for the pointing animation. When set,
-    /// BlueCursorView uses this instead of a random pointer phrase.
+    /// YishuPresenceView uses this instead of a random pointer phrase.
     @Published var detectedElementBubbleText: String?
 
     // MARK: - Onboarding Video State (shared across all screen overlays)
@@ -341,6 +351,7 @@ final class CompanionManager: ObservableObject {
         return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
     }()
     private var activeSentenceSpeechPipeline: YishuSentenceSpeechPipeline?
+    private var coverSpeechTask: Task<Void, Never>?
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
@@ -381,6 +392,9 @@ final class CompanionManager: ObservableObject {
     private var directClickPrewarmCache: DirectClickPrewarmCache?
     private var directClickPrewarmTraceID: String?
     private var didAttemptDirectClickPrewarm = false
+    /// Press-time scene capture. Listening and looking start together.
+    private var heldSceneTask: Task<Void, Never>?
+    private var heldSceneCache: HeldSceneCache?
     private var partialTranscriptCount = 0
     private var firstPartialTranscriptAt: UInt64?
     /// Origin for the next keyboard PTT transcript. The trace ID is created
@@ -452,8 +466,8 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// A scope change always creates a new conversation and drops Clicky's
-    /// fallback cache, so neither Pi nor the local fallback can retain another
+    /// A scope change always creates a new conversation and drops Yishu's
+    /// fallback cache, so neither the runtime nor the local fallback can retain another
     /// project's/private session's text.
     func activateSessionScope(_ kind: YishuSessionScopeKind) {
         guard canSwitchSessionScope else {
@@ -559,7 +573,7 @@ final class CompanionManager: ObservableObject {
             return
         }
         guard yishuAgentRuntimeClient.isRunning else {
-            memoryNotice = "运行时尚未就绪，稍后再看记忆。"
+            memoryNotice = YishuPersonalNotesCopy.runtimeNotReadyRead
             return
         }
         personalMemoryLoading = true
@@ -739,7 +753,7 @@ final class CompanionManager: ObservableObject {
             return
         }
         guard sessionScope.kind == .personal else {
-            memoryNotice = "先切到「我的」再管理个人记忆。"
+            memoryNotice = YishuPersonalNotesCopy.needPersonal
             return
         }
         guard !memoryForgetInFlight else { return }
@@ -764,12 +778,12 @@ final class CompanionManager: ObservableObject {
             return
         }
         guard sessionScope.kind == .personal else {
-            memoryNotice = "先切到「我的」再管理个人记忆。"
+            memoryNotice = YishuPersonalNotesCopy.needPersonal
             memoryForgetCandidate = nil
             return
         }
         guard yishuAgentRuntimeClient.isRunning else {
-            memoryNotice = "运行时尚未就绪，忘记未执行。"
+            memoryNotice = YishuPersonalNotesCopy.runtimeNotReadyForget
             memoryForgetCandidate = nil
             return
         }
@@ -794,13 +808,66 @@ final class CompanionManager: ObservableObject {
                     self.personalMemoryEmpty = self.personalMemoryItems.isEmpty
                 }
                 self.memoryNotice = forgotten.alreadyGone
-                    ? "这条记忆本来就不在列表里。"
-                    : "已忘记「\(item.summary)」。"
+                    ? YishuPersonalNotesCopy.alreadyGone
+                    : YishuPersonalNotesCopy.forgot(item.summary)
             } catch {
                 // Keep the original row on any failure (do not remove).
                 self.memoryNotice = error.localizedDescription.isEmpty
-                    ? "忘记失败，原记忆仍保留。"
+                    ? YishuPersonalNotesCopy.forgetFailed
                     : error.localizedDescription
+            }
+        }
+    }
+
+    /// Write one personal note through the existing memory store.
+    /// Empty text never creates a row. The draft clears only after confirmed success.
+    func savePersonalNote(_ raw: String, onConfirmed: @escaping () -> Void = {}) {
+        let text = YishuPersonalNoteWritePolicy.normalizedText(raw)
+        guard YishuPersonalNoteWritePolicy.shouldCreate(text) else {
+            memoryNotice = YishuPersonalNotesCopy.emptyDraft
+            return
+        }
+        guard canChangeConversation else {
+            memoryNotice = YishuPersonalNotesCopy.busyWrite
+            return
+        }
+        guard sessionScope.kind == .personal else {
+            memoryNotice = YishuPersonalNotesCopy.needPersonal
+            return
+        }
+        guard yishuAgentRuntimeClient.isRunning else {
+            memoryNotice = YishuPersonalNotesCopy.runtimeNotReadyWrite
+            return
+        }
+        guard !personalNoteSaving else { return }
+        personalNoteSaving = true
+        memoryNotice = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.personalNoteSaving = false }
+            do {
+                let remembered = try await self.yishuAgentRuntimeClient.rememberMemory(
+                    text: text,
+                    scope: .personal
+                )
+                guard remembered.confirmed else {
+                    self.memoryNotice = YishuPersonalNotesCopy.unconfirmed
+                    self.refreshPersonalMemories(clearNotice: false)
+                    return
+                }
+                self.personalMemoryItems.removeAll { $0.id == remembered.item.id }
+                self.personalMemoryItems.insert(remembered.item, at: 0)
+                if self.personalMemoryItems.count > 50 {
+                    self.personalMemoryItems.removeLast()
+                }
+                self.personalMemoryEmpty = false
+                self.memoryNotice = YishuPersonalNotesCopy.saved
+                onConfirmed()
+            } catch {
+                self.memoryNotice = error.localizedDescription.isEmpty
+                    ? YishuPersonalNotesCopy.notSaved
+                    : error.localizedDescription
+                self.refreshPersonalMemories(clearNotice: false)
             }
         }
     }
@@ -809,47 +876,45 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    private static let defaultChatModel = "grok-4.5"
     private static let selectedModelDefaultsKey = "selectedClaudeModel"
     private static let selectedModelProviderDefaultsKey = "selectedModelProvider"
 
-    @Published private(set) var selectedModelProvider: String = {
-        let stored = UserDefaults.standard.string(
-            forKey: CompanionManager.selectedModelProviderDefaultsKey
+    private static let bootSelection: (provider: String, model: String) = {
+        let resolved = YishuConversationModelCatalog.resolvedSelection(
+            storedModel: UserDefaults.standard.string(forKey: selectedModelDefaultsKey),
+            storedProvider: UserDefaults.standard.string(forKey: selectedModelProviderDefaultsKey)
         )
-        let supported = Set([
-            YishuConversationModelCatalog.localProvider,
-            YishuAuthProvider.openAICodex.rawValue,
-            YishuAuthProvider.xAI.rawValue,
-        ])
-        return stored.flatMap { supported.contains($0) ? $0 : nil }
-            ?? YishuConversationModelCatalog.localProvider
+        UserDefaults.standard.set(resolved.provider, forKey: selectedModelProviderDefaultsKey)
+        UserDefaults.standard.set(resolved.model, forKey: selectedModelDefaultsKey)
+        return resolved
     }()
 
-    @Published private(set) var selectedModel: String = {
-        let stored = UserDefaults.standard.string(forKey: CompanionManager.selectedModelDefaultsKey)
-        let candidate = (stored?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-            ?? CompanionManager.defaultChatModel
-        // Migrate hard-locked StepFun default to Grok when user never chose otherwise.
-        if candidate == "step-3.7-flash",
-           UserDefaults.standard.object(forKey: "clicky.chatModel.userPicked.v1") == nil {
-            return CompanionManager.defaultChatModel
-        }
-        return candidate
-    }()
+    @Published private(set) var selectedModelProvider: String = CompanionManager.bootSelection.provider
 
-    var availableConversationModels: [YishuConversationModelOption] {
-        let authModels = YishuAuthProvider.allCases.flatMap { provider -> [YishuAuthModel] in
+    @Published private(set) var selectedModel: String = CompanionManager.bootSelection.model
+
+    var configuredAuthModels: [YishuAuthModel] {
+        YishuAuthProvider.allCases.flatMap { provider -> [YishuAuthModel] in
             let state = providerAccountsViewModel.state(for: provider)
             return state.isConfigured ? state.models : []
         }
-        return YishuConversationModelCatalog.available(authModels: authModels)
+    }
+
+    var availableConversationModels: [YishuConversationModelOption] {
+        YishuConversationModelCatalog.available(authModels: configuredAuthModels)
+    }
+
+    var conversationModelSections: [(title: String, models: [YishuConversationModelOption])] {
+        YishuConversationModelCatalog.sections(authModels: configuredAuthModels)
     }
 
     var selectedModelLabel: String {
-        availableConversationModels.first(where: {
+        guard let option = availableConversationModels.first(where: {
             $0.provider == selectedModelProvider && $0.model == selectedModel
-        })?.label ?? "\(selectedModel) · 需登录"
+        }) else {
+            return "\(selectedModel) · 需登录"
+        }
+        return YishuAccountSurfaceCopy.selectedLine(label: option.label, source: option.sourceLabel)
     }
 
     func setSelectedModel(_ option: YishuConversationModelOption) {
@@ -862,10 +927,11 @@ final class CompanionManager: ObservableObject {
         print("🧠 奕枢 model → \(option.provider)/\(option.model)")
     }
 
-    /// User preference for whether the Clicky cursor should be shown.
+    /// User preference for whether Yishu's thinking-orb should be shown.
     /// When toggled off, the overlay is hidden and push-to-talk is disabled.
     /// Persisted to UserDefaults so the choice survives app restarts.
-    @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
+    /// The defaults key stays `isClickyCursorEnabled` so existing installs keep their choice.
+    @Published var isYishuCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
         ? true
         : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
 
@@ -874,8 +940,8 @@ final class CompanionManager: ObservableObject {
 
     private var speechSpeedPreviewTask: Task<Void, Never>?
 
-    func setClickyCursorEnabled(_ enabled: Bool) {
-        isClickyCursorEnabled = enabled
+    func setYishuCursorEnabled(_ enabled: Bool) {
+        isYishuCursorEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "isClickyCursorEnabled")
         transientHideTask?.cancel()
         transientHideTask = nil
@@ -921,6 +987,7 @@ final class CompanionManager: ObservableObject {
     func stopSpeechPlayback() {
         speechSpeedPreviewTask?.cancel()
         speechSpeedPreviewTask = nil
+        stopCoverSpeech()
         cancelActiveSentenceSpeechPipeline()
         elevenLabsTTSClient.stopPlayback()
     }
@@ -943,10 +1010,11 @@ final class CompanionManager: ObservableObject {
     }
 
     func start() {
-        sessionScope = yishuAgentRuntimeClient.currentSessionScope
-        projectScopeDraft = sessionScope.projectLabel
-            ?? yishuAgentRuntimeClient.lastProjectScope?.projectLabel
-            ?? ""
+        if yishuAgentRuntimeClient.currentSessionScope.kind != .personal {
+            _ = yishuAgentRuntimeClient.beginNewConversation(scope: .personal)
+        }
+        sessionScope = .personal
+        projectScopeDraft = ""
         refreshAllPermissions()
         print("🔑 奕枢 start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
@@ -978,13 +1046,12 @@ final class CompanionManager: ObservableObject {
             guard let self else { return }
             self.interruptDelegatedTaskReturnForForegroundTurn()
             self.suppressDelegatedTaskReturn(task.id)
-            self.responseOverlayManager.showStaticMessage(
-                task.summary ?? task.statusLabel,
-                autoHideAfter: 12
-            )
             Task { @MainActor [weak self] in
+                guard let self else { return }
+                let text = await self.spokenTextForDelegatedReturn(task)
+                self.responseOverlayManager.showStaticMessage(text, autoHideAfter: 12)
                 try? await Task.sleep(nanoseconds: 12_000_000_000)
-                self?.scheduleDelegatedTaskReturnProcessing()
+                self.scheduleDelegatedTaskReturnProcessing()
             }
         }
         agentPresenceWindowManager.onRetryFromBeginning = { [weak self] task in
@@ -1050,7 +1117,7 @@ final class CompanionManager: ObservableObject {
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
         // panel will show the permissions UI instead.
-        if hasCompletedOnboarding && allPermissionsGranted && isClickyCursorEnabled {
+        if hasCompletedOnboarding && allPermissionsGranted && isYishuCursorEnabled {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
@@ -1234,6 +1301,24 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    private func spokenTextForDelegatedReturn(
+        _ task: YishuDelegatedTaskPresenceEvent
+    ) async -> String {
+        let fallback = task.returnAnnouncementText ?? task.statusLabel
+        guard task.shouldExcerptSpokenFinding else { return fallback }
+        do {
+            let spoken = try await yishuAgentRuntimeClient.excerptSpeech(
+                visibleText: fallback,
+                provider: task.provider ?? selectedModelProvider,
+                model: task.model ?? selectedModel
+            )
+            let trimmed = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? fallback : trimmed
+        } catch {
+            return fallback
+        }
+    }
+
     private func enqueueDelegatedTaskReturn(_ task: YishuDelegatedTaskPresenceEvent) {
         guard task.mainConversationId == yishuAgentRuntimeClient.currentConversationId,
               task.returnAnnouncementText != nil,
@@ -1344,8 +1429,9 @@ final class CompanionManager: ObservableObject {
                 guard !Task.isCancelled,
                       self.yishuAgentRuntimeClient.currentConversationId == conversationID,
                       self.delegatedTaskReturnQueues[conversationID]?.first?.id == task.id,
-                      let text = task.returnAnnouncementText else { continue }
+                      task.returnAnnouncementText != nil else { continue }
 
+                let text = await self.spokenTextForDelegatedReturn(task)
                 self.activeDelegatedTaskReturnID = task.id
                 self.ensureOverlayVisibleForVoiceFeedback()
                 self.responseOverlayManager.showStaticMessage(text, autoHideAfter: 12)
@@ -1478,13 +1564,13 @@ final class CompanionManager: ObservableObject {
     }
     #endif
 
-    /// Called by BlueCursorView after the buddy finishes its pointing
+    /// Called by YishuPresenceView after the orb finishes its pointing
     /// animation and returns to cursor-following mode.
     /// Triggers the onboarding sequence — dismisses the panel and restarts
     /// the overlay so the welcome animation and intro video play.
     func triggerOnboarding() {
         // Post notification so the panel manager can dismiss the panel
-        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+        NotificationCenter.default.post(name: .yishuDismissPanel, object: nil)
 
         // Mark onboarding as completed so the Start button won't appear
         // again on future launches — the cursor will auto-show instead
@@ -1505,7 +1591,7 @@ final class CompanionManager: ObservableObject {
     /// footer link. Same flow as triggerOnboarding but the cursor overlay
     /// is already visible so we just restart the welcome animation and video.
     func replayOnboarding() {
-        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+        NotificationCenter.default.post(name: .yishuDismissPanel, object: nil)
         ClickyAnalytics.trackOnboardingReplayed()
         startOnboardingMusic()
         // Tear down any existing overlays and recreate with isFirstAppearance = true
@@ -1524,7 +1610,7 @@ final class CompanionManager: ObservableObject {
     private func startOnboardingMusic() {
         stopOnboardingMusic()
         guard let musicURL = Bundle.main.url(forResource: "ff", withExtension: "mp3") else {
-            print("⚠️ Clicky: ff.mp3 not found in bundle")
+            print("⚠️ 奕枢: ff.mp3 not found in bundle")
             return
         }
 
@@ -1539,7 +1625,7 @@ final class CompanionManager: ObservableObject {
                 self?.fadeOutOnboardingMusic()
             }
         } catch {
-            print("⚠️ Clicky: Failed to play onboarding music: \(error)")
+            print("⚠️ 奕枢: Failed to play onboarding music: \(error)")
         }
     }
 
@@ -1604,6 +1690,7 @@ final class CompanionManager: ObservableObject {
         voiceProxyAvailabilityCancellable = nil
         delegatedPresenceCancellable?.cancel()
         delegatedPresenceCancellable = nil
+        clearHeldSceneCapture()
         yishuPointerTrailMonitor.stop()
         responseOverlayManager.hideOverlay()
         agentPresenceWindowManager.stop()
@@ -1664,6 +1751,60 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    /// Walk remaining permissions in order. macOS still shows one system
+    /// dialog at a time; this only sequences the prompts the panel can start.
+    func requestPermissionsInGuidedSequence() {
+        Task { @MainActor in
+            refreshAllPermissions()
+
+            let microphoneStatus: YishuPermissionGuidance.MicrophoneStatus
+            switch AVCaptureDevice.authorizationStatus(for: .audio) {
+            case .authorized:
+                microphoneStatus = .authorized
+            case .notDetermined:
+                microphoneStatus = .notDetermined
+            default:
+                microphoneStatus = .denied
+            }
+            switch YishuPermissionGuidance.nextStep(
+                microphone: microphoneStatus,
+                accessibilityGranted: hasAccessibilityPermission,
+                screenRecordingGranted: hasScreenRecordingPermission,
+                screenContentGranted: hasScreenContentPermission
+            ) {
+            case .microphone:
+                if microphoneStatus == .notDetermined {
+                    let granted = await withCheckedContinuation { continuation in
+                        AVCaptureDevice.requestAccess(for: .audio) { granted in
+                            continuation.resume(returning: granted)
+                        }
+                    }
+                    hasMicrophonePermission = granted
+                    if granted {
+                        requestPermissionsInGuidedSequence()
+                    } else {
+                        WindowPositionManager.openMicrophoneSettings()
+                    }
+                } else {
+                    WindowPositionManager.openMicrophoneSettings()
+                }
+            case .accessibility:
+                _ = WindowPositionManager.requestAccessibilityPermission()
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                refreshAllPermissions()
+                if hasAccessibilityPermission {
+                    requestPermissionsInGuidedSequence()
+                }
+            case .screenRecording:
+                _ = WindowPositionManager.requestScreenRecordingPermission()
+            case .screenContent:
+                requestScreenContentPermission()
+            case .done:
+                break
+            }
+        }
+    }
+
     /// Triggers the macOS screen content picker by performing a dummy
     /// screenshot capture. Once the user approves, we persist the grant
     /// so they're never asked again during onboarding.
@@ -1696,7 +1837,7 @@ final class CompanionManager: ObservableObject {
                     ClickyAnalytics.trackPermissionGranted(permission: "screen_content")
 
                     // If onboarding was already completed, show the cursor overlay now
-                    if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isClickyCursorEnabled {
+                    if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isYishuCursorEnabled {
                         overlayWindowManager.hasShownOverlayBefore = true
                         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
                         isOverlayVisible = true
@@ -1838,7 +1979,7 @@ final class CompanionManager: ObservableObject {
             transientHideTask?.cancel()
             transientHideTask = nil
 
-            // Always surface the buddy for PTT feedback (waveform/spinner).
+            // Always surface the thinking-orb for PTT feedback (waveform/spinner).
             // Previously only restored when cursor preference was OFF — if the
             // preference was ON but overlay never mounted (permission race,
             // multi-space, ad-hoc re-sign), hold-to-talk had no UI at all.
@@ -1850,7 +1991,7 @@ final class CompanionManager: ObservableObject {
             livePartialTranscript = ""
 
             // Dismiss the menu bar panel so it doesn't cover the screen
-            NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            NotificationCenter.default.post(name: .yishuDismissPanel, object: nil)
 
             // A pure, effect-free Runtime turn stays alive only after its old
             // generation has been synchronously fenced. Every other path keeps
@@ -1877,6 +2018,7 @@ final class CompanionManager: ObservableObject {
 
 
             ClickyAnalytics.trackPushToTalkStarted()
+            startHeldSceneCapture(traceID: voiceTurnTraceID)
 
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = Task { [weak self] in
@@ -2197,6 +2339,7 @@ final class CompanionManager: ObservableObject {
     /// Show a short failure on the cursor overlay; do not write a completed
     /// assistant answer, do not start TTS, do not call the runtime.
     private func presentUnclearHearingFailure(traceID: String) {
+        clearHeldSceneCapture()
         clearBargeInAttempt()
         invalidateActiveVoiceTurn()
         currentResponseTask?.cancel()
@@ -2300,12 +2443,13 @@ final class CompanionManager: ObservableObject {
                 timing.mark("runtime_fallback_start", reason: reason.rawValue)
             }
             turnVisualPhase = .observingContext
-            let capturedContext = await yishuContextFrameCollector.capture(
-                activeWindowOnly: Self.requiresCurrentPageNoteWindow(transcript)
+            let (capturedContext, captureReason) = await resolveHeldScene(
+                transcript: transcript,
+                traceID: origin?.traceID
             )
             timing.mark(
                 "context_capture",
-                reason: "ok",
+                reason: captureReason,
                 sourceDimensions: Self.telemetryDimensions(for: capturedContext.screenCaptures)
             )
             // ContextTrail append happens in Node ProductKernelRuntime on turn.start
@@ -2479,6 +2623,79 @@ final class CompanionManager: ObservableObject {
             totalMS: totalMS,
             reason: "shadow_partial_count_\(partialTranscriptCount)"
         )
+    }
+
+    private func startHeldSceneCapture(traceID: String) {
+        heldSceneTask?.cancel()
+        heldSceneCache = nil
+        let startedAt = Date()
+        let capturedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let displayFingerprint = Self.currentDisplayFingerprint()
+        heldSceneTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let context = await self.yishuContextFrameCollector.capture(pointerSince: startedAt)
+            guard !Task.isCancelled else { return }
+            self.heldSceneCache = HeldSceneCache(
+                context: context,
+                capturedAtUptimeNanoseconds: capturedAtUptimeNanoseconds,
+                startedAt: startedAt,
+                frontmostProcessIdentifier: frontmost,
+                displayFingerprint: displayFingerprint,
+                traceID: traceID
+            )
+        }
+    }
+
+    private func clearHeldSceneCapture() {
+        heldSceneTask?.cancel()
+        heldSceneTask = nil
+        heldSceneCache = nil
+    }
+
+    private func resolveHeldScene(
+        transcript: String,
+        traceID: String?
+    ) async -> (YishuCapturedContext, String) {
+        if let heldSceneTask {
+            await heldSceneTask.value
+        }
+        let held = heldSceneCache
+        let decision = YishuHeldScenePolicy.decide(
+            requiresActiveWindowOnly: Self.requiresCurrentPageNoteWindow(transcript),
+            heldTraceID: held?.traceID,
+            turnTraceID: traceID,
+            heldFrontmost: held?.frontmostProcessIdentifier,
+            currentFrontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            heldDisplay: held?.displayFingerprint ?? "",
+            currentDisplay: Self.currentDisplayFingerprint(),
+            capturedAt: held?.capturedAtUptimeNanoseconds,
+            now: DispatchTime.now().uptimeNanoseconds
+        )
+        defer { clearHeldSceneCapture() }
+        switch decision {
+        case .reuse:
+            if let held {
+                let refreshed = yishuContextFrameCollector.refreshLiveAttention(
+                    onto: held.context,
+                    pointerSince: held.startedAt
+                )
+                return (refreshed, decision.rawValue)
+            }
+            let fresh = await yishuContextFrameCollector.capture()
+            return (fresh, YishuHeldSceneDecision.recaptureMissingBasis.rawValue)
+        case .recaptureActiveWindow:
+            let fresh = await yishuContextFrameCollector.capture(
+                activeWindowOnly: true,
+                pointerSince: held?.startedAt
+            )
+            return (fresh, decision.rawValue)
+        case .recaptureSceneChanged, .recaptureStale, .recaptureMissingBasis:
+            let fresh = await yishuContextFrameCollector.capture(
+                pointerSince: held?.startedAt
+            )
+            return (fresh, decision.rawValue)
+        }
     }
 
     private func startDirectClickPrewarmIfEligible(_ partialText: String, traceID: String) {
@@ -2883,6 +3100,8 @@ final class CompanionManager: ObservableObject {
         var isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
         var presentationTranscript = transcript
         var didStartStreamingSpeech = false
+        var didSpeakSearchCover = false
+        var didSpeakAnswer = false
         func makeSentenceSpeechPipeline(for utterance: String) -> YishuSentenceSpeechPipeline? {
             guard YishuSentenceSpeechPolicy.allowsStreaming(for: utterance) else {
                 return nil
@@ -2894,6 +3113,7 @@ final class CompanionManager: ObservableObject {
                     }
                     let ttsText = Self.speechText(from: sentence)
                     guard !ttsText.isEmpty else { throw CancellationError() }
+                    self.stopCoverSpeech()
                     try await self.elevenLabsTTSClient.speakText(
                         ttsText,
                         speed: self.speechSpeed
@@ -2907,7 +3127,9 @@ final class CompanionManager: ObservableObject {
             return pipeline
         }
         var sentenceSpeechPipeline = makeSentenceSpeechPipeline(for: transcript)
+        var lastPresentedText = ""
         defer {
+            stopCoverSpeech()
             if let sentenceSpeechPipeline,
                activeSentenceSpeechPipeline === sentenceSpeechPipeline {
                 sentenceSpeechPipeline.cancel()
@@ -2939,11 +3161,15 @@ final class CompanionManager: ObservableObject {
                         presentationTranscript
                     )
                     didStartStreamingSpeech = false
+                    didSpeakSearchCover = false
+                    didSpeakAnswer = false
+                    stopCoverSpeech()
                     activeTurnConsumedComputerAction = false
                     activeTurnLastComputerActionResult = nil
                     activeTurnLastComputerActionName = nil
                     activeTurnEffectInFlight = false
                     clearMemorySourceNotice()
+                    lastPresentedText = ""
                     responseOverlayManager.showOverlayAndBeginStreaming()
                     sentenceSpeechPipeline = makeSentenceSpeechPipeline(
                         for: presentationTranscript
@@ -2953,8 +3179,20 @@ final class CompanionManager: ObservableObject {
                 case let .started(generation):
                     guard generation == presentationReducer.generation else { continue }
                     updateTurnVisualPhase(for: event)
-                case .toolStarted:
+                case let .toolStarted(name, generation):
+                    guard generation == presentationReducer.generation else { continue }
                     updateTurnVisualPhase(for: event)
+                    if beginSearchCoverSpeech(
+                        toolName: name,
+                        didSpeakCover: didSpeakSearchCover,
+                        didSpeakAnswer: didSpeakAnswer,
+                        hasVisibleAnswerText: !presentationReducer.accumulatedText
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .isEmpty,
+                        turnToken: turnToken
+                    ) {
+                        didSpeakSearchCover = true
+                    }
                 case .toolCompleted:
                     updateTurnVisualPhase(for: event)
                 case let .memoryUsed(items, _):
@@ -2968,6 +3206,7 @@ final class CompanionManager: ObservableObject {
                     }
                     // Once a desktop effect enters the turn, stop speculative
                     // speech and wait for the verified final confirmation.
+                    stopCoverSpeech()
                     if let sentenceSpeechPipeline {
                         sentenceSpeechPipeline.cancel()
                         if activeSentenceSpeechPipeline === sentenceSpeechPipeline {
@@ -3027,22 +3266,34 @@ final class CompanionManager: ObservableObject {
                     // Direct-click turns stay buffered until the action/result
                     // decision is known; this prevents model tool markup from
                     // flashing in the overlay before `presentVoiceResponse`.
+                    let presented = Self.scrubToolMarkup(
+                        from: presentationReducer.accumulatedText
+                    )
                     if !isDirectClickTurn {
-                        responseOverlayManager.updateStreamingText(
-                            Self.scrubToolMarkup(from: presentationReducer.accumulatedText)
-                        )
+                        responseOverlayManager.updateStreamingText(presented)
                     }
+                    let speechDelta: String
+                    if presented.hasPrefix(lastPresentedText) {
+                        speechDelta = String(presented.dropFirst(lastPresentedText.count))
+                    } else {
+                        speechDelta = ""
+                    }
+                    lastPresentedText = presented
                     if let sentenceSpeechPipeline,
                        activeSentenceSpeechPipeline === sentenceSpeechPipeline,
                        !activeTurnConsumedComputerAction,
-                       sentenceSpeechPipeline.consume(delta) > 0,
-                       !didStartStreamingSpeech {
-                        didStartStreamingSpeech = true
-                        voiceState = .responding
-                        timing?.mark("tts_start", reason: "streaming_sentence")
+                       sentenceSpeechPipeline.consume(speechDelta) > 0 {
+                        didSpeakAnswer = true
+                        stopCoverSpeech()
+                        if !didStartStreamingSpeech {
+                            didStartStreamingSpeech = true
+                            voiceState = .responding
+                            timing?.mark("tts_start", reason: "streaming_sentence")
+                        }
                     }
                 case let .completed(text, _, _):
                     updateTurnVisualPhase(for: event)
+                    stopCoverSpeech()
                     presentationReducer.completeCurrent(with: text)
                 case .cancelled:
                     updateTurnVisualPhase(for: event)
@@ -3079,7 +3330,6 @@ final class CompanionManager: ObservableObject {
         if !isDirectClickTurn {
             responseOverlayManager.updateStreamingText(finalText)
         }
-        responseOverlayManager.finishStreaming()
         turnVisualPhase = .shapingOutput
         var speechAlreadyPresented = false
         if let sentenceSpeechPipeline,
@@ -3264,7 +3514,6 @@ final class CompanionManager: ObservableObject {
         guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
         responseOverlayManager.updateStreamingText(spokenText)
         turnVisualPhase = .shapingOutput
-        responseOverlayManager.finishStreaming()
         // The spoken answer begins here. Previously this flipped only after
         // playback completed, making the visible state lag behind the voice.
         voiceState = .responding
@@ -3277,11 +3526,19 @@ final class CompanionManager: ObservableObject {
         ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
         let ttsText = Self.speechText(from: spokenText)
-        if speechAlreadyPresented {
-            // `response.completed` reconciled and drained the sentence queue;
-            // replaying this final text would speak every sentence twice.
-        } else if !ttsText.isEmpty {
+        switch YishuSpokenReplyBudget.route(
+            speechAlreadyPresented: speechAlreadyPresented,
+            visibleText: spokenText
+        ) {
+        case .alreadySpoken:
+            break
+        case .speakInFull:
+            guard !ttsText.isEmpty else {
+                timing?.mark("tts_complete", reason: "skipped_empty")
+                break
+            }
             guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
+            stopCoverSpeech()
             timing?.mark("tts_start", reason: "speech")
             do {
                 try await elevenLabsTTSClient.speakText(
@@ -3301,9 +3558,40 @@ final class CompanionManager: ObservableObject {
                 print("⚠️ MiniMax TTS failed")
                 speakCreditsErrorFallback()
             }
-        } else {
-            timing?.mark("tts_complete", reason: "skipped_empty")
+        case .requestExcerpt:
+            guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
+            stopCoverSpeech()
+            do {
+                let excerpt = try await yishuAgentRuntimeClient.excerptSpeech(
+                    visibleText: spokenText,
+                    provider: selectedModelProvider,
+                    model: selectedModel
+                )
+                let excerptTts = Self.speechText(from: excerpt)
+                guard !excerptTts.isEmpty else {
+                    timing?.mark("tts_complete", reason: "excerpt_empty")
+                    break
+                }
+                guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
+                timing?.mark("tts_start", reason: "excerpt")
+                try await elevenLabsTTSClient.speakText(
+                    excerptTts,
+                    speed: speechSpeed
+                )
+                guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
+                turnVisualPhase = .shapingOutput
+                voiceState = .responding
+                timing?.mark("tts_complete", reason: "excerpt_ok")
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Failure must not fall back to reading the full essay.
+                guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
+                timing?.mark("tts_complete", reason: "excerpt_failed")
+            }
         }
+        guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
+        responseOverlayManager.finishStreaming()
     }
 
     /// Keeps citations in the visual response while making the TTS copy
@@ -3412,8 +3700,16 @@ final class CompanionManager: ObservableObject {
             pattern: #"(?is)\[\s*(?:tool[ _-]?call|computer[ _-]?control|function[ _-]?call)\b[^\]]*\].*?$"#
         )
 
-        return scrubbed
+        return scrubVisibleMarkup(in: scrubbed)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The overlay paints characters. Emphasis markers are not a visible
+    /// format, so they leave before any user-facing surface or spoken copy.
+    /// Fenced code and inline backticks stay; a naive tick strip would eat ```.
+    private static func scrubVisibleMarkup(in text: String) -> String {
+        text.replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
     }
 
     private static func replacingMatches(
@@ -3734,6 +4030,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func cancelActiveRuntimeTurn(reason: String) {
+        stopCoverSpeech()
         cancelActiveSentenceSpeechPipeline()
         clearBargeInAttempt()
         guard let requestId = activeRuntimeRequestId else { return }
@@ -3745,8 +4042,48 @@ final class CompanionManager: ObservableObject {
     }
 
     private func cancelActiveSentenceSpeechPipeline() {
+        stopCoverSpeech()
         activeSentenceSpeechPipeline?.cancel()
         activeSentenceSpeechPipeline = nil
+    }
+
+    /// Cancel only the cover task. `speakText` cancellation stops that
+    /// playback id; do not call `stopPlayback()` here or a later answer
+    /// can be killed if it already owns the channel.
+    private func stopCoverSpeech() {
+        coverSpeechTask?.cancel()
+        coverSpeechTask = nil
+    }
+
+    /// Product cover for a waiting search. Not an answer. Once per turn.
+    @discardableResult
+    private func beginSearchCoverSpeech(
+        toolName: String,
+        didSpeakCover: Bool,
+        didSpeakAnswer: Bool,
+        hasVisibleAnswerText: Bool,
+        turnToken: UUID
+    ) -> Bool {
+        guard YishuSearchCoverSpeech.shouldSpeak(
+            toolName: toolName,
+            didSpeakCover: didSpeakCover,
+            didSpeakAnswer: didSpeakAnswer,
+            hasVisibleAnswerText: hasVisibleAnswerText
+        ) else { return false }
+        let line = YishuSearchCoverSpeech.line
+        if !hasVisibleAnswerText {
+            responseOverlayManager.updateStreamingText(line)
+        }
+        coverSpeechTask?.cancel()
+        coverSpeechTask = Task { @MainActor [weak self] in
+            guard let self, self.ownsVoiceTurn(turnToken) else { return }
+            do {
+                try await self.elevenLabsTTSClient.speakText(line, speed: self.speechSpeed)
+            } catch {
+                // Cover is optional; answer or barge-in may stop it.
+            }
+        }
+        return true
     }
 
     private static func globalAppKitPoint(
@@ -3773,12 +4110,12 @@ final class CompanionManager: ObservableObject {
         )
     }
 
-    /// If the cursor is in transient mode (user toggled "Show Clicky" off),
+    /// If the cursor is in transient mode (user toggled "显示奕枢光标" off),
     /// waits for TTS playback and any pointing animation to finish, then
     /// fades out the overlay after a 1-second pause. Cancelled automatically
     /// if the user starts another push-to-talk interaction.
     private func scheduleTransientHideIfNeeded() {
-        guard !isClickyCursorEnabled && isOverlayVisible else { return }
+        guard !isYishuCursorEnabled && isOverlayVisible else { return }
 
         transientHideTask?.cancel()
         transientHideTask = Task {
@@ -3789,7 +4126,7 @@ final class CompanionManager: ObservableObject {
             }
 
             // Wait for pointing animation to finish (location is cleared
-            // when the buddy flies back to the cursor)
+            // when the orb flies back to the cursor)
             while detectedElementScreenLocation != nil {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard !Task.isCancelled else { return }
@@ -3873,7 +4210,7 @@ final class CompanionManager: ObservableObject {
     // MARK: - Onboarding Video
 
     /// Sets up the onboarding video player, starts playback, and schedules
-    /// the demo interaction at 40s. Called by BlueCursorView when onboarding starts.
+    /// the demo interaction at 40s. Called by YishuPresenceView when onboarding starts.
     func setupOnboardingVideo() {
         guard let videoURL = URL(string: "https://stream.mux.com/e5jB8UuSrtFABVnTHCR7k3sIsmcUHCyhtLu1tzqLlfs.m3u8") else { return }
 
@@ -3897,7 +4234,7 @@ final class CompanionManager: ObservableObject {
         }
 
         // At 40 seconds into the video, trigger the onboarding demo where
-        // Clicky flies to something interesting on screen and comments on it
+        // Yishu flies to something interesting on screen and comments on it
         let demoTriggerTime = CMTime(seconds: 40, preferredTimescale: 600)
         onboardingDemoTimeObserver = player.addBoundaryTimeObserver(
             forTimes: [NSValue(time: demoTriggerTime)],
@@ -4125,5 +4462,5 @@ enum YishuMemoryForgetUIPolicy {
     static let shouldMutateStoreWhenBusy = false
     /// Row drops only after memory.forgotten success.
     static let shouldRemoveRowOnlyAfterStoreSuccess = true
-    static let busyRefuseNotice = "请等当前回答结束后再忘记记忆。"
+    static let busyRefuseNotice = YishuPersonalNotesCopy.busyForget
 }

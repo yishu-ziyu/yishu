@@ -173,7 +173,7 @@ export class StdioComputerUsePort implements ComputerUsePort {
       try {
         this.emit(runtimeEvent("computer.action.requested", context.requestId, context.traceId, {
           actionId,
-          ...action,
+          ...actionForWire(action),
           intentId,
           attemptId,
           ...(context.basisFrameId === undefined ? {} : { basisFrameId: context.basisFrameId }),
@@ -260,6 +260,17 @@ export class StdioComputerUsePort implements ComputerUsePort {
     );
     return pendingAction;
   }
+}
+
+/** Blank labels are absent. Icon buttons must not poison the Swift decoder. */
+function actionForWire(action: ComputerAction): ComputerAction {
+  if (action.action !== "left_click") return action;
+  const label = action.label?.trim();
+  if (label === undefined || label.length === 0) {
+    const { label: _omit, ...rest } = action;
+    return rest;
+  }
+  return label === action.label ? action : { ...action, label };
 }
 
 export class UnavailableComputerUsePort implements ComputerUsePort {

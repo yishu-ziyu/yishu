@@ -26,7 +26,7 @@ pnpm product:verify       # 发版前：+ Clicky Xcode 测试 + 构建脚本 sel
 ./apps/clicky/scripts/run-local.sh   # 构建安装启动真实产品
 ```
 
-**验收纪律**：build 通过 ≠ 产品验收。用户可见变更必须启动真实 App 检查真实 floating presence；统一核心变更必须确认用户行为走 `Clicky → 协议 → Kernel → 执行 → verified receipt → presence` 全链。
+**验收纪律**：build 通过 ≠ 产品验收。用户可见变更必须启动真实 App 检查真实 floating presence；统一核心变更必须确认用户行为走 `Clicky → 协议 → Kernel → 执行 → verified receipt → presence` 全链。实现收尾、合并前跑 [Matt 双轴 code-review](./code-review.md)（Standards 与 Spec 分开汇报）。
 
 ## 2. 改动定位矩阵
 
@@ -60,15 +60,15 @@ pnpm product:verify       # 发版前：+ Clicky Xcode 测试 + 构建脚本 sel
 5. Clicky 侧镜像路由（若第 3 步有）+ 测试（kernel 契约 + Clicky 行为）。
 6. 验收：真机一句话走通；不可逆动作确认 needs_approval/显式触发；取消路径报 `cancelled_after_commit` 而非静默。
 
-## 5. 记忆层开发指引（ADR 0013）
+## 5. 记忆层开发指引（ADR 0017 / 0018）
 
-存储骨干：episodes/facts/profile/skills = **Markdown 真相层**（`~/Library/Application Support/Yishu/Memory/<scope>/`）；账本/TaskTruth/队列/索引 = SQLite。写入流：显式"记住"热路径（已有）+ 普通对话 turn 终态自动提取（candidate → 敏感 fail-closed + scope 校验 → active）。整理：Reflection（簇合并 + supersedes，后台数据加工）。检索：token → +向量 → +rerank 渐进，经 worker 代理。
+EverOS 是正式长期记忆引擎，私有根目录为 `~/Library/Application Support/Yishu/EverOS`。Kernel 掌握 scope、private/secret 拒绝、用户覆盖和 prompt 准入；`~/Documents/Yishu/记忆.md` 是唯一可读的用户表面。普通对话按 conversation 进入 durable buffer，空闲或退出时 flush；显式"记住"立即 flush。EverOS 搜索只返回候选，不得反写可见文件。
 
-边界：private scope 提取前拒绝；秘密只在 worker/Pi 凭据存储；profile 可覆盖、episodes 恒 append。
+边界：private scope 不读不写；现有实例只通过明确 URL 连接；用户和 assistant 身份必须分离；用户删除形成内容指纹 suppression；用户可见事实覆盖 derived profile/search。当前 profile 只采用 explicit items，implicit traits 与 Agent Skill 尚不进入正式产品决策。
 
 注入拓扑（system vs prompt 装配 vs 末尾状态栏）与实施顺序见 [agent-book-product-alignment.md](../research/agent-book-product-alignment.md) 对齐清单——动手前先读，与本手册冲突时以对齐清单为准。
 
-验收清单（不降标）：重启后正确 scope 回忆 + 显示来源；北京→上海版本链（新答用上海、历史可解释）；跨项目隔离；private 不读不写；删除源对话后派生记忆不可召回；secret 拒入。
+验收清单：重启后正确 scope 回忆；用户修改优先；删除后同一 derived fact 不再召回；跨项目隔离；private 不读不写；secret 拒入；EverOS 停机时普通对话仍能继续。
 
 ## 6. 文档纪律
 

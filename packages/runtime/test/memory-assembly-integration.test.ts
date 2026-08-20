@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { createYishuKernel } from "@yishu/kernel";
+import { createYishuKernel, type EverOSMemoryPort, type RecalledMemory } from "@yishu/kernel";
 import { ProductKernelRuntime } from "../src/product-kernel-runtime.js";
 import { YishuLoopRuntimeAdapter } from "../src/loop-adapter.js";
 import type {
@@ -155,7 +155,7 @@ test("engine prepends cached recall once; private turns get no memory block", as
     1,
     "memory block must be assembled once, not also attached onto the command",
   );
-  assert.match(personalUser, /^The user previously asked you to remember/);
+  assert.match(personalUser, /^These are relevant memory candidates/);
 
   const privateEvents: RuntimeEvent[] = [];
   await runtime.startTurn(
@@ -173,4 +173,46 @@ test("engine prepends cached recall once; private turns get no memory block", as
   const privateUser = firstUserText(fetchStub.requests[1]);
   assert.doesNotMatch(privateUser, /durable_memories/);
   assert.doesNotMatch(privateUser, /验收回答先给结论/);
+});
+
+test("an explicit EverOS profile fact shapes a later unrelated turn", async (t) => {
+  const fetchStub = installFetchStub();
+  t.after(fetchStub.restore);
+
+  const everos: EverOSMemoryPort = {
+    add: async () => undefined,
+    flush: async () => undefined,
+    search: async () => [],
+    profile: async () => [{
+      id: "profile:yishu:0",
+      claim: "用户现居深圳。",
+      summary: "用户在深圳",
+      source: "observation",
+      capturedAt: "2026-08-18T00:00:00.000Z",
+      scope: "personal",
+      confidence: 0.9,
+    } satisfies RecalledMemory],
+  };
+
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), undefined, {
+    modelRuntimePromise: Promise.resolve(providerRuntime),
+  });
+  const runtime = new ProductKernelRuntime(adapter, kernel, undefined, { everos });
+  t.after(() => runtime.dispose());
+
+  const events: RuntimeEvent[] = [];
+  await runtime.startTurn(commandFor("明天天气怎么样？", "personal"), (event) => {
+    if (event.type === "turn.failed") {
+      assert.fail(`unexpected turn failure: ${JSON.stringify(event.payload)}`);
+    }
+    events.push(event);
+  });
+
+  const user = firstUserText(fetchStub.requests[0]);
+  assert.match(user, /<durable_persona>/);
+  assert.match(user, /用户现居深圳/);
+  assert.match(user, /derived explicit profile facts/);
+  assert.doesNotMatch(user, /recite this list unless asked.\n+$/);
+  assert.ok(!events.some((event) => event.type === "memory.used"));
 });

@@ -5,6 +5,7 @@ import { ActionCancelledError } from "../action/types.js";
 import type { YishuStorePort } from "../store/yishu-store.js";
 import type { MemoryClaim } from "../store/types.js";
 import type { MemoryTruthLayer } from "../memory/truth-layer.js";
+import type { VisibleMemoryFile } from "../memory/visible-file.js";
 
 const rememberInputSchema = z.object({
   claim: z.string().trim().min(1).max(2000),
@@ -31,7 +32,11 @@ export type RememberInput = z.infer<typeof rememberInputSchema>;
  * truthRef. Hosts without a memory directory keep index-only writes for
  * tests/embedded use.
  */
-export function createRememberAction(store: YishuStorePort, truth?: MemoryTruthLayer) {
+export function createRememberAction(
+  store: YishuStorePort,
+  truth?: MemoryTruthLayer,
+  visible?: VisibleMemoryFile,
+) {
   return defineYishuAction({
     name: "remember",
     description:
@@ -45,6 +50,9 @@ export function createRememberAction(store: YishuStorePort, truth?: MemoryTruthL
       const now = ctx.now.toISOString();
       const input = ctx.input;
       let truthRef: string | undefined;
+      if (visible !== undefined) {
+        await visible.appendFacts([input.claim]);
+      }
       // The markdown line is the truth; write it before the index row so a
       // crash between the two leaves a rebuildable gap, not a lost fact.
       if (truth !== undefined) {

@@ -7,7 +7,7 @@ Review: apps/clicky 源码结构变化时
 
 ## 模块职责
 
-`apps/clicky`（[apps/clicky](../../apps/clicky)）是奕枢唯一 macOS App 源码、构建、安装与可见验收入口（ADR 0012）。保留历史命名（工程 `leanring-buddy.xcodeproj`、bundle id `com.yishu.yishu-buddy`、安装路径 `/Applications/Clicky.app`、签名身份 `Shangqiuko Local Code Signing`）以维系 TCC 连续性与签名稳定。它是纯菜单栏应用（`LSUIElement=true`）：无 Dock 图标，状态栏驻留图标 + 浮动面板 + 屏幕级透明 overlay（跟随光标的 thinking-orb）。
+`apps/clicky`（[apps/clicky](../../apps/clicky)）是奕枢唯一 macOS App 源码、构建、安装与可见验收入口（ADR 0012）。工程目录和 bundle id 仍用历史命名（`leanring-buddy.xcodeproj`、`com.yishu.yishu-buddy`、签名身份 `Shangqiuko Local Code Signing`）以维系 TCC 连续性；安装路径是 `/Applications/奕枢.app`。它是纯菜单栏应用（`LSUIElement=true`）：无 Dock 图标，状态栏驻留图标 + 浮动面板 + 屏幕级透明 overlay（跟随光标的 thinking-orb）。
 
 ```text
 apps/clicky/
@@ -24,7 +24,7 @@ apps/clicky/
 - [leanring_buddyApp.swift](../../apps/clicky/leanring-buddy/leanring_buddyApp.swift)：`@main` + `CompanionAppDelegate`。启动时 `YishuSingleInstanceLock`（`~/Library/Application Support/Yishu/clicky-instance.lock` 文件 flock）保证全局单例；`SMAppService.mainApp` 注册登录项（UserDefaults 标记一次成功后不再静默重开）。
 - 三层窗口：
   - **菜单栏面板**：[MenuBarPanelManager.swift](../../apps/clicky/leanring-buddy/MenuBarPanelManager.swift)（`NSStatusBar` 自绘三角图标 + 非激活 `NSPanel`，内嵌 `CompanionPanelView`，外部点击关闭带 0.3s 延迟防误关）。
-  - **屏幕 overlay**：[OverlayWindow.swift](../../apps/clicky/leanring-buddy/OverlayWindow.swift)（每屏一个 `.screenSaver` 级透明 click-through 窗口，渲染 `BlueCursorView` 光标伴随）。
+  - **屏幕 overlay**：[OverlayWindow.swift](../../apps/clicky/leanring-buddy/OverlayWindow.swift)（每屏一个 `.screenSaver` 级透明 click-through 窗口，渲染 `YishuPresenceView` 光标伴随）。
   - **后台任务气泡**：[AgentPresence.swift](../../apps/clicky/leanring-buddy/AgentPresence.swift)（anchor chip / pocket / label 三层 `NSPanel`，是 TaskTruth 的可见投影）。
 - entitlements：非沙盒、Apple Events（备忘录自动化）、网络客户端、音频输入、ScreenCaptureKit picker mach-lookup 例外。`NSAppTransportSecurity` 允许连本机 8787。
 - [AppBundleConfiguration.swift](../../apps/clicky/leanring-buddy/AppBundleConfiguration.swift)：统一读 Info.plist 键（`VoiceTranscriptionProvider` 默认 `stepfun` 等）。
@@ -48,7 +48,7 @@ Ctrl+Option（GlobalPushToTalkShortcutMonitor，CGEvent tap）
 ## 3. TTS 与句级流水线
 
 - [ElevenLabsTTSClient.swift](../../apps/clicky/leanring-buddy/ElevenLabsTTSClient.swift)：类名历史保留，实际走本机代理 `/tts` → MiniMax `t2a_v2`；单物理通道、watchdog、错误不回显 upstream body。
-- [YishuSentenceSpeechPipeline.swift](../../apps/clicky/leanring-buddy/YishuSentenceSpeechPipeline.swift)：把 presentation-safe 的 delta 切成严格串行句子流；保守句号边界（拒绝小数点/URL 内句号）、markup 尾巴 hold、final 单调性校验（违反则退 final-only）；`YishuSentenceSpeechPolicy` 对含桌面效果动词的输入禁流式（语音不可逆）。
+- [YishuSentenceSpeechPipeline.swift](../../apps/clicky/leanring-buddy/YishuSentenceSpeechPipeline.swift)：把 presentation-safe 的 delta 切成严格串行句子流；最多念 2 个完整句（气泡仍收全文）；超约 80 字无句号当长墙、不流式念，改走 `speech.excerpt`；保守句号边界（拒绝小数点/URL 内句号）、markup 尾巴 hold、final 单调性校验（违反则退 final-only）；`YishuSentenceSpeechPolicy` 对含桌面效果动词的输入禁流式（语音不可逆）。`web_search` 开始时垫一句「好的，我去查查看。」（不算答案，可被答案或打断停掉）。
 - [YishuSpeechSpeed.swift](../../apps/clicky/leanring-buddy/YishuSpeechSpeed.swift)：MiniMax 语速 [0.5, 2.0] 的 clamp/持久化（Swift/worker 共用范围）。
 
 ## 4. 运行时客户端与编排器
@@ -56,7 +56,7 @@ Ctrl+Option（GlobalPushToTalkShortcutMonitor，CGEvent tap）
 - [YishuAgentRuntimeClient.swift](../../apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift)（@MainActor）：spawn bundled node + `stdio-server.js`，NDJSON 双向通信。职责：
   - 会话身份：`currentConversationId` 持久 UserDefaults；`SessionScope`（personal/project/private，private 重启不恢复）；
   - turn 协议：`startTurn/interruptTurn/steerTurn/cancelTurn` + `YishuTurnProjectionReducer`（客户端 generation 闸，打断期间旧 delta 丢弃）；
-  - RPC：task.list/cancel、历史/记忆列表与删除、OAuth；
+  - RPC：task.list/cancel、历史/记忆列表与删除、`speech.excerpt`、OAuth；
   - `observeTrail`（每 5s 后台采样）与 `computer.action.result` 回填；
   - 崩溃恢复：`terminationHandler` 立即结束所有 pending 请求；`terminateForRecovery` 驱动有界重启。
 - [CompanionManager.swift](../../apps/clicky/leanring-buddy/CompanionManager.swift)（~4100 行，@MainActor ObservableObject）：核心编排器——权限管理、PTT 绑定、voice proxy 启动、runtime 启动/重启（诚实报失败，不谎称进度）、`runVoiceTurnTask` 主响应流、后台任务安静窗口返回（3s 空闲后口播一次，不伪造 turn）、时间提醒送达回声、视觉状态路由、onboarding。
@@ -104,7 +104,7 @@ Ctrl+Option（GlobalPushToTalkShortcutMonitor，CGEvent tap）
 
 | 脚本 | 作用 |
 |------|------|
-| `run-local.sh` | 构建签名 App + 打包 YishuRuntime（kernel/runtime 构建产物 + node 二进制，保留 V8/JIT entitlements 重签）+ 安装 `/Applications/Clicky.app` + 启动。模式：run/build/install/open/pin/self-test。严格只 quit 正式 App 树（禁 `pgrep/pkill -x Clicky`），内置自测 |
+| `run-local.sh` | 构建签名 App + 打包 YishuRuntime（kernel/runtime 构建产物 + node 二进制，保留 V8/JIT entitlements 重签）+ 安装 `/Applications/奕枢.app` + 启动。模式：run/build/install/open/pin/self-test。严格只 quit 正式 App 树（禁 `pgrep/pkill -x` 产品名），内置自测 |
 | `pin-local-permissions.sh` | 用 csreq blob 钉 TCC 权限（麦克风/屏幕录制/辅助功能），修复签名重授权漂移 |
 | `sync-dev-vars-from-ai-providers.sh` | 从本机 provider 配置生成 `worker/.dev.vars`（绝不打印 secret 值） |
 

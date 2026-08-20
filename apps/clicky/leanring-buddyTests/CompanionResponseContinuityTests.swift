@@ -21,6 +21,11 @@ struct CompanionResponseContinuityTests {
 
         manager.finishStreaming()
         #expect(manager.viewModel.presentationPhase == .response)
+        #expect(manager.hasScheduledHide)
+
+        manager.updateStreamingText("你好")
+        #expect(manager.viewModel.presentationPhase == .response)
+        #expect(!manager.hasScheduledHide)
     }
 
     @Test func staticFeedbackUsesMessagePhaseAndHideResetsTheTurn() {

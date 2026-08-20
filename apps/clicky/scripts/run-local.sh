@@ -4,13 +4,13 @@
 # TCC (mic / accessibility / screen) survives rebuilds when:
 #   - identity stays "Shangqiuko Local Code Signing" (never adhoc "-")
 #   - bundle id stays com.yishu.yishu-buddy
-#   - daily launch is /Applications/Clicky.app (not a random DerivedData path)
+#   - daily launch is /Applications/奕枢.app (not a random DerivedData path)
 #
 # Usage:
 #   ./scripts/run-local.sh          # build + install /Applications + open
 #   ./scripts/run-local.sh build    # build only
 #   ./scripts/run-local.sh install  # install last Debug product, preserve TCC
-#   ./scripts/run-local.sh open     # open /Applications/Clicky.app only
+#   ./scripts/run-local.sh open     # open /Applications/奕枢.app only
 #   ./scripts/run-local.sh pin      # explicitly repair system TCC (may ask admin)
 set -euo pipefail
 
@@ -20,7 +20,9 @@ PROJECT="$ROOT/leanring-buddy.xcodeproj"
 SCHEME="leanring-buddy"
 CONFIG="Debug"
 IDENTITY="Shangqiuko Local Code Signing"
-INSTALL_APP="/Applications/Clicky.app"
+APP_PRODUCT_NAME="奕枢"
+INSTALL_APP="/Applications/${APP_PRODUCT_NAME}.app"
+LEGACY_INSTALL_APP="/Applications/Clicky.app"
 YISHU_CLICKY_DERIVED_DATA="${YISHU_CLICKY_DERIVED_DATA:-$YISHU_REPO_ROOT_DEFAULT/.build/clicky-derived-data}"
 YISHU_RUNTIME_ROOT="${YISHU_RUNTIME_ROOT:-$YISHU_REPO_ROOT_DEFAULT}"
 YISHU_NODE_SOURCE="${YISHU_NODE_SOURCE:-$(command -v node || true)}"
@@ -39,9 +41,9 @@ need_identity() {
 }
 
 resolve_derived_app() {
-  local candidate="$YISHU_CLICKY_DERIVED_DATA/Build/Products/Debug/Clicky.app"
-  if [[ ! -x "$candidate/Contents/MacOS/Clicky" ]]; then
-    echo "Clicky.app not found in $YISHU_CLICKY_DERIVED_DATA. Run: $0 build" >&2
+  local candidate="$YISHU_CLICKY_DERIVED_DATA/Build/Products/Debug/${APP_PRODUCT_NAME}.app"
+  if [[ ! -x "$candidate/Contents/MacOS/${APP_PRODUCT_NAME}" ]]; then
+    echo "${APP_PRODUCT_NAME}.app not found in $YISHU_CLICKY_DERIVED_DATA. Run: $0 build" >&2
     exit 1
   fi
   echo "$candidate"
@@ -72,7 +74,7 @@ bundle_yishu_runtime() {
   node_entitlements="$YISHU_RUNTIME_TEMP_ROOT/Node.entitlements.plist"
   node_source="$(realpath "$YISHU_NODE_SOURCE")"
 
-  echo "Bundling Yishu Runtime + Pi into Clicky.app"
+  echo "Bundling Yishu Runtime + Pi into ${APP_PRODUCT_NAME}.app"
   (
     cd "$YISHU_RUNTIME_ROOT"
     # Build only the packages embedded in Clicky. The workspace also contains
@@ -82,6 +84,9 @@ bundle_yishu_runtime() {
     pnpm --filter @yishu/kernel build
     pnpm --filter @yishu/runtime build
     pnpm --filter=@yishu/runtime deploy --prod --legacy "$runtime_deploy"
+    if [[ -x "$YISHU_RUNTIME_ROOT/packages/runtime/scripts/ensure-everos.sh" ]]; then
+      bash "$YISHU_RUNTIME_ROOT/packages/runtime/scripts/ensure-everos.sh"
+    fi
   )
 
   # pnpm deploy adds a workspace self-link that points outside the deployed
@@ -180,29 +185,33 @@ build() {
   bundle_yishu_runtime
 }
 
-# Formal install only. Dev/DerivedData Clicky must never match this path.
-FORMAL_CLICKY_EXE="${INSTALL_APP}/Contents/MacOS/Clicky"
+# Formal install only. Dev/DerivedData builds must never match this path.
+FORMAL_APP_EXE="${INSTALL_APP}/Contents/MacOS/${APP_PRODUCT_NAME}"
+LEGACY_APP_EXE="${LEGACY_INSTALL_APP}/Contents/MacOS/Clicky"
 
-# True when process args or txt path is the formal /Applications Clicky binary.
+# True when process args or txt path is the formal /Applications binary.
+# Also matches the leftover Clicky.app path during the one-time rename.
 # Never matches DerivedData / .build / other same-named binaries.
 is_formal_clicky_pid() {
   local pid="$1"
   local args txt
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   args="$(ps -p "$pid" -ww -o args= 2>/dev/null || true)"
-  if [[ "$args" == "$FORMAL_CLICKY_EXE" || "$args" == "$FORMAL_CLICKY_EXE "* ]]; then
+  if [[ "$args" == "$FORMAL_APP_EXE" || "$args" == "$FORMAL_APP_EXE "* ]]; then
+    return 0
+  fi
+  if [[ "$args" == "$LEGACY_APP_EXE" || "$args" == "$LEGACY_APP_EXE "* ]]; then
     return 0
   fi
   # Fallback: binary path via lsof txt (covers short argv forms).
-  txt="$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | grep -E '/Clicky\.app/Contents/MacOS/Clicky$' | head -1 || true)"
-  if [[ "$txt" == "$FORMAL_CLICKY_EXE" ]]; then
+  txt="$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | grep -E "/(${APP_PRODUCT_NAME}|Clicky)\\.app/Contents/MacOS/(${APP_PRODUCT_NAME}|Clicky)$" | head -1 || true)"
+  if [[ "$txt" == "$FORMAL_APP_EXE" || "$txt" == "$LEGACY_APP_EXE" ]]; then
     return 0
   fi
   return 1
 }
 
-# PIDs of the formal /Applications/Clicky.app only (never pgrep -x Clicky).
-# Fast path: only inspect processes whose args mention Clicky.
+# PIDs of the formal /Applications install only (never pgrep -x by product name).
 list_formal_clicky_pids() {
   local pid args
   while IFS= read -r line; do
@@ -210,17 +219,21 @@ list_formal_clicky_pids() {
     pid="$(printf '%s\n' "$line" | awk '{print $1}')"
     args="$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
-    if [[ "$args" == "$FORMAL_CLICKY_EXE" || "$args" == "$FORMAL_CLICKY_EXE "* ]]; then
+    if [[ "$args" == "$FORMAL_APP_EXE" || "$args" == "$FORMAL_APP_EXE "* ]]; then
       echo "$pid"
       continue
     fi
-    # Short argv "Clicky" — resolve via txt path before accepting.
-    if [[ "$args" == "Clicky" || "$args" == "Clicky "* ]]; then
+    if [[ "$args" == "$LEGACY_APP_EXE" || "$args" == "$LEGACY_APP_EXE "* ]]; then
+      echo "$pid"
+      continue
+    fi
+    # Short argv — resolve via txt path before accepting.
+    if [[ "$args" == "$APP_PRODUCT_NAME" || "$args" == "$APP_PRODUCT_NAME "* || "$args" == "Clicky" || "$args" == "Clicky "* ]]; then
       if is_formal_clicky_pid "$pid"; then
         echo "$pid"
       fi
     fi
-  done < <(ps -ax -o pid= -o args= 2>/dev/null | grep -F 'Clicky' || true)
+  done < <(ps -ax -o pid= -o args= 2>/dev/null | grep -E "${APP_PRODUCT_NAME}|Clicky.app" || true)
 }
 
 # True (exit 0) only when a confirmed Yishu voice-proxy PID is a *true orphan*:
@@ -288,8 +301,8 @@ reclaim_yishu_voice_proxy_orphans() {
   )
 }
 
-# Quit only the formal /Applications/Clicky.app tree. Never pkill -x Clicky.
-# Dev/DerivedData Clicky and unrelated same-named processes are preserved.
+# Quit only the formal /Applications install tree. Never pkill -x by product name.
+# Dev/DerivedData builds and unrelated same-named processes are preserved.
 quit_running_clicky() {
   local app_pid
   local -a formal_pids=()
@@ -301,18 +314,18 @@ quit_running_clicky() {
   done < <(list_formal_clicky_pids)
 
   if ((${#formal_pids[@]} == 0)); then
-    echo "No formal $INSTALL_APP running (dev Clicky left untouched)."
+    echo "No formal $INSTALL_APP running (dev builds left untouched)."
     reclaim_yishu_voice_proxy_orphans
     return 0
   fi
 
-  echo "Quitting formal Clicky only (path=$FORMAL_CLICKY_EXE) pids=${formal_pids[*]}..."
+  echo "Quitting formal ${APP_PRODUCT_NAME} only (path=$FORMAL_APP_EXE) pids=${formal_pids[*]}..."
   while IFS= read -r app_pid; do
     [[ "$app_pid" =~ ^[0-9]+$ ]] || continue
     runtime_tree+=("$app_pid")
   done < <(collect_clicky_descendants)
 
-  # SIGTERM formal tree only — never pgrep/pkill -x Clicky.
+  # SIGTERM formal tree only — never pgrep/pkill -x by product name.
   if ((${#runtime_tree[@]} > 0)); then
     kill "${runtime_tree[@]}" 2>/dev/null || true
   fi
@@ -362,8 +375,8 @@ reclaim_voice_proxy_orphans() {
   sleep 0.2
 }
 
-# Collect formal /Applications/Clicky.app + its descendants only.
-# Never seeds the queue with pgrep -x Clicky (would include dev builds).
+# Collect formal /Applications install + its descendants only.
+# Never seeds the queue with pgrep -x by product name (would include dev builds).
 collect_clicky_descendants() {
   local -a queue=()
   local -a all=()
@@ -421,15 +434,15 @@ open_app() {
   codesign -dv "$app" 2>&1 | grep -E 'Authority=|Signature=|Identifier=' || true
 
   # Must quit the running *formal* instance before open, otherwise the old binary
-  # keeps running while /Applications/Clicky.app on disk is already newer.
-  # Never pkill -x Clicky — dev builds must survive.
+  # keeps running while /Applications/奕枢.app on disk is already newer.
+  # Never pkill -x by product name — dev builds must survive.
   while IFS= read -r pid; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
     runtime_tree+=("$pid")
   done < <(collect_clicky_descendants)
 
   if ((${#runtime_tree[@]} > 0)); then
-    echo "Stopping formal Clicky tree only: ${runtime_tree[*]}"
+    echo "Stopping formal ${APP_PRODUCT_NAME} tree only: ${runtime_tree[*]}"
     kill "${runtime_tree[@]}" 2>/dev/null || true
   fi
   reclaim_voice_proxy_orphans
@@ -483,15 +496,15 @@ run_local_self_test() {
   tmpdir="$(mktemp -d /tmp/yishu-run-local-selftest.XXXXXX)"
   formal_stub="$tmpdir/formal_args.txt"
   dev_stub="$tmpdir/dev_args.txt"
-  printf '%s\n' "$FORMAL_CLICKY_EXE" >"$formal_stub"
-  printf '%s\n' "$YISHU_CLICKY_DERIVED_DATA/Build/Products/Debug/Clicky.app/Contents/MacOS/Clicky" >"$dev_stub"
+  printf '%s\n' "$FORMAL_APP_EXE" >"$formal_stub"
+  printf '%s\n' "$YISHU_CLICKY_DERIVED_DATA/Build/Products/Debug/${APP_PRODUCT_NAME}.app/Contents/MacOS/${APP_PRODUCT_NAME}" >"$dev_stub"
 
   # Unit: string match helpers via synthetic args (is_formal_clicky_pid needs live PID;
   # test the path constants and pure orphan predicate with known-good math).
-  assert_true "formal exe path is under /Applications/Clicky.app" \
-    bash -c "[[ \"$FORMAL_CLICKY_EXE\" == /Applications/Clicky.app/Contents/MacOS/Clicky ]]"
+  assert_true "formal exe path is under /Applications/奕枢.app" \
+    bash -c "[[ \"$FORMAL_APP_EXE\" == /Applications/奕枢.app/Contents/MacOS/奕枢 ]]"
   assert_false "derived-data path must not equal formal exe" \
-    bash -c "[[ \"$YISHU_CLICKY_DERIVED_DATA/Build/Products/Debug/Clicky.app/Contents/MacOS/Clicky\" == \"$FORMAL_CLICKY_EXE\" ]]"
+    bash -c "[[ \"$YISHU_CLICKY_DERIVED_DATA/Build/Products/Debug/${APP_PRODUCT_NAME}.app/Contents/MacOS/${APP_PRODUCT_NAME}\" == \"$FORMAL_APP_EXE\" ]]"
 
   # 2) No *executable* pgrep/pkill -x Clicky (comments and this self-test may mention the ban).
   # Only flag lines that invoke the tools, not prose in echo/assert strings.

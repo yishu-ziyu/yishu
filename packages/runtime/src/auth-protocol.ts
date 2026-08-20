@@ -78,12 +78,36 @@ export const authPublicModelSchema = z.object({
 }).strict();
 export type AuthPublicModel = z.infer<typeof authPublicModelSchema>;
 
+const PUBLIC_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const PUBLIC_NAME = /^[\p{L}\p{N}][\p{L}\p{N}._+\-@ ]{0,62}[\p{L}\p{N}.]$/u;
+const BLOCKED_ACCOUNT_LABEL
+  = /access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|account[_-]?id|credential|authorization|password|secret|bearer|\btoken\b|jwt/i;
+const LOOKS_LIKE_ACCOUNT_ID
+  = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|acct[_-]|user[_-]?id|org[_-]|sess[_-])/i;
+
+/** Email or a short login name. Never a token, JWT, or provider account id. */
+export function sanitizePublicAccountLabel(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (!text || text.length > 120) return undefined;
+  if (BLOCKED_ACCOUNT_LABEL.test(text)) return undefined;
+  if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text)) return undefined;
+  if (PUBLIC_EMAIL.test(text)) return text;
+  if (LOOKS_LIKE_ACCOUNT_ID.test(text)) return undefined;
+  if (PUBLIC_NAME.test(text)) return text;
+  return undefined;
+}
+
 export const authPublicStatusSchema = z.object({
   provider: authProviderSchema,
   configured: z.boolean(),
   authType: authTypeSchema,
   models: z.array(authPublicModelSchema).max(16),
   requiresRelogin: z.boolean().optional(),
+  /** Safe email or login name only. Never an account id or credential. */
+  accountLabel: z.string().trim().min(1).max(120).refine(
+    (value) => sanitizePublicAccountLabel(value) === value,
+  ).optional(),
   /** xAI OAuth is a local Pi subscription bridge, not a stable direct API contract. */
   experimental: z.literal("experimental_local_subscription").optional(),
 }).strict();

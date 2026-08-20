@@ -158,7 +158,7 @@ struct YishuTurnProjectionReducer: Equatable {
 
 struct YishuRuntimeTurn {
     let requestId: UUID
-    /// Stable user-session scope shared by all turns from this Clicky client.
+    /// Stable user-session scope shared by all turns from this Yishu client.
     let conversationId: UUID
     let events: AsyncThrowingStream<YishuRuntimeTurnEvent, Error>
 }
@@ -195,6 +195,9 @@ enum YishuAgentRuntimeClientError: LocalizedError {
     case memoryFailed(String)
     case memoryTimedOut
     case invalidMemoryEvent
+    case speechExcerptFailed(String)
+    case speechExcerptTimedOut
+    case invalidSpeechExcerptEvent
     case taskListFailed(String)
     case taskListTimedOut
     case invalidTaskListEvent
@@ -204,13 +207,13 @@ enum YishuAgentRuntimeClientError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .runtimeEntryMissing: return "找不到奕枢 Runtime。"
+        case .runtimeEntryMissing: return "找不到奕枢后台。"
         case .nodeExecutableMissing: return "找不到可用的 Node.js。"
-        case .launchFailed: return "奕枢 Runtime 启动失败。"
-        case .runtimeNotRunning: return "奕枢 Runtime 尚未运行。"
-        case .unsupportedModel: return "所选模型尚未接入奕枢 Runtime。"
-        case .turnFailed: return "奕枢 Runtime 本轮执行失败。"
-        case .turnTimedOut: return "奕枢 Runtime 本轮响应超时。"
+        case .launchFailed: return "奕枢后台没起来。"
+        case .runtimeNotRunning: return YishuPanelRuntimeCopy.headerStopped + "。"
+        case .unsupportedModel: return "这个模型还接不上。"
+        case .turnFailed: return "这一轮没做成。"
+        case .turnTimedOut: return "等太久了，这一轮没回。"
         case .turnInterruptUnavailable: return "当前回答已经无法安全打断。"
         case .turnInterruptTimedOut: return "等待打断确认超时。"
         case .turnSteerRejected: return "这次续话需要用新鲜上下文重新开始。"
@@ -222,8 +225,11 @@ enum YishuAgentRuntimeClientError: LocalizedError {
         case .historyTimedOut: return "读取历史超时。"
         case .invalidHistoryEvent: return "历史协议无效。"
         case let .memoryFailed(message): return message
-        case .memoryTimedOut: return "读取记忆超时。"
-        case .invalidMemoryEvent: return "记忆协议无效。"
+        case .memoryTimedOut: return "等太久了，没能完成。"
+        case .invalidMemoryEvent: return "记下这条时出了点问题。"
+        case let .speechExcerptFailed(message): return message
+        case .speechExcerptTimedOut: return "抽出口播超时。"
+        case .invalidSpeechExcerptEvent: return "口播协议无效。"
         case let .taskListFailed(message): return message
         case .taskListTimedOut: return "读取后台任务超时。"
         case .invalidTaskListEvent: return "后台任务快照协议无效。"
@@ -269,6 +275,11 @@ struct YishuMemoryForgetResult: Equatable {
     let alreadyGone: Bool
 }
 
+struct YishuMemoryRememberResult: Equatable {
+    let item: YishuMemoryListItem
+    let confirmed: Bool
+}
+
 struct YishuHistoryVisibleTurn: Equatable {
     let userInput: String
     let assistantOutput: String
@@ -292,7 +303,7 @@ final class YishuAgentRuntimeClient {
     /// This registry carries no credentials and is intentionally not persisted.
     static private(set) var active: YishuAgentRuntimeClient?
 
-    /// The conversation scope is owned by the Clicky session, not by the Pi
+    /// The conversation scope is owned by the Yishu session, not by the Pi
     /// sidecar. Persisting it here means a sidecar restart does not fork the
     /// user's conversation identity; callers can explicitly rotate it when a
     /// genuinely new conversation begins.
@@ -385,6 +396,8 @@ final class YishuAgentRuntimeClient {
         case delete
         case memoryList
         case memoryForget
+        case memoryRemember
+        case speechExcerpt
     }
 
     private struct PendingHistoryRequest {
@@ -427,13 +440,8 @@ final class YishuAgentRuntimeClient {
         } else {
             lastProjectScope = nil
         }
-        if UserDefaults.standard.string(forKey: Self.sessionScopeKindDefaultsKey) == YishuSessionScopeKind.project.rawValue,
-           let projectScope = lastProjectScope {
-            currentSessionScope = projectScope
-        } else {
-            // Private mode is intentionally never restored after an app restart.
-            currentSessionScope = .personal
-        }
+        // Speaking never starts from a leftover filing choice.
+        currentSessionScope = .personal
         if let stored = UserDefaults.standard.string(forKey: Self.conversationIDDefaultsKey),
            let storedID = UUID(uuidString: stored) {
             currentConversationId = storedID
@@ -697,6 +705,107 @@ final class YishuAgentRuntimeClient {
             throw YishuAgentRuntimeClientError.invalidMemoryEvent
         }
         return forgotten
+    }
+
+    /// Write one personal note. Only returns after storage confirms the row.
+    func rememberMemory(
+        text: String,
+        scope: YishuSessionScope = .personal
+    ) async throws -> YishuMemoryRememberResult {
+        let clipped = YishuPersonalNoteWritePolicy.normalizedText(text)
+        guard YishuPersonalNoteWritePolicy.shouldCreate(clipped) else {
+            throw YishuAgentRuntimeClientError.memoryFailed(YishuPersonalNotesCopy.emptyDraft)
+        }
+        let requestId = UUID()
+        let result: Any = try await withCheckedThrowingContinuation { continuation in
+            historyContinuations[requestId] = PendingHistoryRequest(
+                kind: .memoryRemember,
+                continuation: continuation,
+                timeoutTask: nil
+            )
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                await MainActor.run {
+                    self?.failHistoryRequest(
+                        requestId,
+                        error: YishuAgentRuntimeClientError.memoryTimedOut
+                    )
+                }
+            }
+            historyContinuations[requestId]?.timeoutTask = timeoutTask
+            do {
+                try send(YishuMemoryRememberCommand(
+                    schemaVersion: yishuRuntimeProtocolVersion,
+                    type: "memory.remember",
+                    requestId: requestId,
+                    traceId: UUID(),
+                    sentAt: Date(),
+                    payload: YishuMemoryRememberPayload(
+                        text: clipped,
+                        sessionScope: scope
+                    )
+                ))
+            } catch {
+                failHistoryRequest(requestId, error: error)
+            }
+        }
+        guard let remembered = result as? YishuMemoryRememberResult else {
+            throw YishuAgentRuntimeClientError.invalidMemoryEvent
+        }
+        return remembered
+    }
+
+    /// Ask Runtime for at most two spoken sentences from a scrubbed visible reply.
+    func excerptSpeech(
+        visibleText: String,
+        provider: String,
+        model: String
+    ) async throws -> String {
+        let trimmed = String(visibleText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(8000))
+        guard !trimmed.isEmpty else {
+            throw YishuAgentRuntimeClientError.speechExcerptFailed("暂时无法抽出口播。")
+        }
+        guard let modelPreference = Self.modelPreference(provider: provider, model: model) else {
+            throw YishuAgentRuntimeClientError.unsupportedModel
+        }
+        let requestId = UUID()
+        let result: Any = try await withCheckedThrowingContinuation { continuation in
+            historyContinuations[requestId] = PendingHistoryRequest(
+                kind: .speechExcerpt,
+                continuation: continuation,
+                timeoutTask: nil
+            )
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                await MainActor.run {
+                    self?.failHistoryRequest(
+                        requestId,
+                        error: YishuAgentRuntimeClientError.speechExcerptTimedOut
+                    )
+                }
+            }
+            historyContinuations[requestId]?.timeoutTask = timeoutTask
+            do {
+                try send(YishuSpeechExcerptCommand(
+                    schemaVersion: yishuRuntimeProtocolVersion,
+                    type: "speech.excerpt",
+                    requestId: requestId,
+                    traceId: UUID(),
+                    sentAt: Date(),
+                    payload: YishuSpeechExcerptPayload(
+                        visibleText: trimmed,
+                        modelPreference: modelPreference
+                    )
+                ))
+            } catch {
+                failHistoryRequest(requestId, error: error)
+            }
+        }
+        guard let spoken = result as? String,
+              !spoken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw YishuAgentRuntimeClientError.invalidSpeechExcerptEvent
+        }
+        return spoken
     }
 
     func start() throws {
@@ -1244,6 +1353,39 @@ final class YishuAgentRuntimeClient {
         try send(command)
     }
 
+    /// Keep the voice turn alive when a desktop request cannot be decoded.
+    /// Node is blocked on this actionId until it gets a result or its 8s timeout.
+    private func rejectUndecodableComputerAction(
+        requestId: UUID,
+        traceId: UUID,
+        payload: [String: Any]
+    ) {
+        guard let actionId = (payload["actionId"] as? String).flatMap(UUID.init(uuidString:)) else {
+            return
+        }
+        let attemptId = payload["attemptId"] as? String
+        let request = YishuComputerActionRequest(
+            requestId: requestId,
+            traceId: traceId,
+            actionId: actionId,
+            action: (payload["action"] as? String) ?? "left_click",
+            x: 0,
+            y: 0,
+            attemptId: attemptId
+        )
+        let result = YishuComputerActionResult(
+            succeeded: false,
+            verified: false,
+            message: "Desktop action request was invalid.",
+            evidence: nil,
+            status: .failed,
+            method: .unknown,
+            code: .runtimeError,
+            attemptId: attemptId ?? UUID().uuidString
+        )
+        try? completeComputerAction(request, result: result)
+    }
+
     func completeComputerAction(
         _ request: YishuComputerActionRequest,
         result: YishuComputerActionResult
@@ -1324,6 +1466,67 @@ final class YishuAgentRuntimeClient {
     /// Test hook: park one memory.forget wait.
     func parkMemoryForgetWaitForTests() async -> (requestId: UUID, wait: Task<Void, Error>) {
         await parkHistoryKindWaitForTests(kind: .memoryForget)
+    }
+
+    /// Test hook: park one memory.remember wait.
+    func parkMemoryRememberWaitForTests() async -> (requestId: UUID, wait: Task<YishuMemoryRememberResult, Error>) {
+        let requestId = UUID()
+        let (readyStream, readyContinuation) = AsyncStream<Void>.makeStream()
+        let wait = Task { @MainActor in
+            let result: Any = try await withCheckedThrowingContinuation { continuation in
+                historyContinuations[requestId] = PendingHistoryRequest(
+                    kind: .memoryRemember,
+                    continuation: continuation,
+                    timeoutTask: nil
+                )
+                readyContinuation.yield(())
+                readyContinuation.finish()
+            }
+            guard let remembered = result as? YishuMemoryRememberResult else {
+                throw YishuAgentRuntimeClientError.invalidMemoryEvent
+            }
+            return remembered
+        }
+        for await _ in readyStream {
+            break
+        }
+        return (requestId, wait)
+    }
+
+    func completeParkedMemoryRememberForTests(
+        requestId: UUID,
+        result: YishuMemoryRememberResult
+    ) {
+        finishHistoryRequest(requestId, value: result)
+    }
+
+    /// Test hook: park one speech.excerpt wait and surface the spoken text.
+    func parkSpeechExcerptWaitForTests() async -> (requestId: UUID, wait: Task<String, Error>) {
+        let requestId = UUID()
+        let (readyStream, readyContinuation) = AsyncStream<Void>.makeStream()
+        let wait = Task { @MainActor in
+            let result: Any = try await withCheckedThrowingContinuation { continuation in
+                historyContinuations[requestId] = PendingHistoryRequest(
+                    kind: .speechExcerpt,
+                    continuation: continuation,
+                    timeoutTask: nil
+                )
+                readyContinuation.yield(())
+                readyContinuation.finish()
+            }
+            guard let spoken = result as? String else {
+                throw YishuAgentRuntimeClientError.invalidSpeechExcerptEvent
+            }
+            return spoken
+        }
+        for await _ in readyStream {
+            break
+        }
+        return (requestId, wait)
+    }
+
+    func completeParkedSpeechExcerptForTests(requestId: UUID, spokenText: String) {
+        finishHistoryRequest(requestId, value: spokenText)
     }
 
     private func parkHistoryKindWaitForTests(
@@ -1789,12 +1992,18 @@ final class YishuAgentRuntimeClient {
             return
         }
 
-        // history.* always, and only memory.list/forget result events (not memory.used).
+        // history.* always, and only memory.list/forget/remember result events (not memory.used).
         let isMemoryPanelEvent =
-            type == "memory.listed" || type == "memory.forgotten" || type == "memory.failed"
-        if type.hasPrefix("history.") || isMemoryPanelEvent {
+            type == "memory.listed"
+            || type == "memory.forgotten"
+            || type == "memory.remembered"
+            || type == "memory.failed"
+        let isSpeechExcerptEvent = type == "speech.excerpted" || type == "speech.failed"
+        if type.hasPrefix("history.") || isMemoryPanelEvent || isSpeechExcerptEvent {
             guard let requestId, historyContinuations[requestId] != nil else { return }
-            if isMemoryPanelEvent {
+            if isSpeechExcerptEvent {
+                dispatchSpeechExcerptEvent(type: type, requestId: requestId, payload: payload)
+            } else if isMemoryPanelEvent {
                 dispatchMemoryEvent(type: type, requestId: requestId, payload: payload)
             } else {
                 dispatchHistoryEvent(type: type, requestId: requestId, payload: payload)
@@ -1806,12 +2015,21 @@ final class YishuAgentRuntimeClient {
            type == "runtime.error" {
             let message = (payload["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             let pending = historyContinuations[requestId]
-            let isMemory = pending?.kind == .memoryList || pending?.kind == .memoryForget
-            if isMemory {
+            let isMemory = pending?.kind == .memoryList
+                || pending?.kind == .memoryForget
+                || pending?.kind == .memoryRemember
+            if pending?.kind == .speechExcerpt {
+                failHistoryRequest(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.speechExcerptFailed(
+                        (message?.isEmpty == false) ? message! : "暂时无法抽出口播。"
+                    )
+                )
+            } else if isMemory {
                 failHistoryRequest(
                     requestId,
                     error: YishuAgentRuntimeClientError.memoryFailed(
-                        (message?.isEmpty == false) ? message! : "暂时无法读取记忆。"
+                        (message?.isEmpty == false) ? message! : YishuPersonalNotesCopy.notSaved
                     )
                 )
             } else {
@@ -1882,17 +2100,24 @@ final class YishuAgentRuntimeClient {
                 generation: generation
             ))
         case "computer.action.requested":
-            guard let traceId,
-                  let request = Self.decodeComputerActionRequest(
-                    payload: payload,
-                    requestId: requestId,
-                    traceId: traceId,
-                    schemaVersion: raw["schemaVersion"]
-                  ) else {
-                finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnFailed)
+            guard let traceId else { return }
+            if let request = Self.decodeComputerActionRequest(
+                payload: payload,
+                requestId: requestId,
+                traceId: traceId,
+                schemaVersion: raw["schemaVersion"]
+            ) {
+                continuation.yield(.computerActionRequested(request, generation: generation))
                 return
             }
-            continuation.yield(.computerActionRequested(request, generation: generation))
+            // An icon button often arrives with a blank label. That must nack
+            // the desktop action, not abort the voice turn into the generic
+            // "这轮没有完成" notice while the model is still finishing.
+            rejectUndecodableComputerAction(
+                requestId: requestId,
+                traceId: traceId,
+                payload: payload
+            )
         case "memory.used":
             let items = Self.parseMemoryUsedItems(payload)
             if !items.isEmpty {
@@ -2175,13 +2400,72 @@ final class YishuAgentRuntimeClient {
                 requestId,
                 value: YishuMemoryForgetResult(memoryId: memoryId, alreadyGone: alreadyGone)
             )
+        case "memory.remembered":
+            guard pending.kind == .memoryRemember else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidMemoryEvent)
+                return
+            }
+            guard
+                let idString = payload["memoryId"] as? String,
+                let memoryId = UUID(uuidString: idString),
+                let summary = payload["summary"] as? String,
+                (payload["confirmed"] as? Bool) == true
+            else {
+                failHistoryRequest(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.memoryFailed(
+                        YishuPersonalNotesCopy.unconfirmed
+                    )
+                )
+                return
+            }
+            let item = YishuMemoryListItem(
+                id: memoryId,
+                summary: String(summary.prefix(80)),
+                capturedAt: Self.parseISO8601(payload["capturedAt"] as? String) ?? Date(),
+                source: (payload["source"] as? String) ?? "conversation",
+                scope: (payload["scope"] as? String) ?? "personal"
+            )
+            finishHistoryRequest(
+                requestId,
+                value: YishuMemoryRememberResult(item: item, confirmed: true)
+            )
         case "memory.failed":
             let message = (payload["message"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             failHistoryRequest(
                 requestId,
                 error: YishuAgentRuntimeClientError.memoryFailed(
-                    (message?.isEmpty == false) ? message! : "暂时无法处理记忆。"
+                    (message?.isEmpty == false) ? message! : YishuPersonalNotesCopy.notSaved
+                )
+            )
+        default:
+            break
+        }
+    }
+
+    private func dispatchSpeechExcerptEvent(type: String, requestId: UUID, payload: [String: Any]) {
+        guard let pending = historyContinuations[requestId] else { return }
+        switch type {
+        case "speech.excerpted":
+            guard pending.kind == .speechExcerpt else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidSpeechExcerptEvent)
+                return
+            }
+            let spoken = (payload["spokenText"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !spoken.isEmpty else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidSpeechExcerptEvent)
+                return
+            }
+            finishHistoryRequest(requestId, value: spoken)
+        case "speech.failed":
+            let message = (payload["message"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            failHistoryRequest(
+                requestId,
+                error: YishuAgentRuntimeClientError.speechExcerptFailed(
+                    (message?.isEmpty == false) ? message! : "暂时无法抽出口播。"
                 )
             )
         default:
@@ -2445,7 +2729,7 @@ final class YishuAgentRuntimeClient {
                 x: x,
                 y: y,
                 screen: (payload["screen"] as? NSNumber)?.intValue,
-                label: payload["label"] as? String,
+                label: Self.normalizedOptionalLabel(payload["label"]),
                 intentId: common.intentId,
                 attemptId: common.attemptId,
                 basisFrameId: common.basisFrameId,
@@ -2608,10 +2892,17 @@ final class YishuAgentRuntimeClient {
     }
 
     static func isValidOptionalLabelPayloadValue(_ value: Any?) -> Bool {
-        guard let value else { return true }
+        guard let value, !(value is NSNull) else { return true }
         guard let string = value as? String else { return false }
         let length = string.trimmingCharacters(in: .whitespacesAndNewlines).count
-        return (1...120).contains(length)
+        return length == 0 || (1...120).contains(length)
+    }
+
+    /// Icon buttons have no visible word. Blank or null labels are absent, not invalid.
+    static func normalizedOptionalLabel(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     static func isValidOptionalEffectClassPayloadValue(_ value: Any?) -> Bool {
@@ -3111,6 +3402,34 @@ private struct YishuMemoryForgetCommand: Encodable {
 private struct YishuMemoryForgetPayload: Encodable {
     let memoryId: UUID
     let sessionScope: YishuSessionScope
+}
+
+private struct YishuMemoryRememberCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuMemoryRememberPayload
+}
+
+private struct YishuMemoryRememberPayload: Encodable {
+    let text: String
+    let sessionScope: YishuSessionScope
+}
+
+private struct YishuSpeechExcerptCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuSpeechExcerptPayload
+}
+
+private struct YishuSpeechExcerptPayload: Encodable {
+    let visibleText: String
+    let modelPreference: YishuModelPreference
 }
 
 private struct YishuAuthStatusCommand: Encodable {

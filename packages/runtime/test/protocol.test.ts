@@ -26,6 +26,8 @@ import {
   historyOpenCommandSchema,
   memoryForgetCommandSchema,
   memoryListCommandSchema,
+  memoryRememberCommandSchema,
+  speechExcerptCommandSchema,
   LOCAL_GROK_BASE_URL,
   LOCAL_GROK_PROVIDER,
   modelPreferenceSchema,
@@ -331,7 +333,7 @@ test("requested action metadata is optional for old clients but typed for new cl
 test("model preference round-trips only the local Grok route", () => {
   const preference = {
     provider: LOCAL_GROK_PROVIDER,
-    model: "grok-4.5",
+    model: "grok-4.6",
   } as const;
 
   assert.deepEqual(modelPreferenceSchema.parse(preference), preference);
@@ -520,6 +522,52 @@ test("memory.list and memory.forget are versioned client commands", () => {
     sentAt: new Date().toISOString(),
     payload: { limit: 51 },
   }));
+
+  const remembered = memoryRememberCommandSchema.parse({
+    schemaVersion: 1,
+    type: "memory.remember",
+    requestId,
+    traceId: requestId,
+    sentAt: new Date().toISOString(),
+    payload: { text: "周四把钥匙放在抽屉", sessionScope: { kind: "personal" } },
+  });
+  assert.equal(remembered.type, "memory.remember");
+  assert.equal(clientCommandSchema.parse(remembered).type, "memory.remember");
+  assert.throws(() => memoryRememberCommandSchema.parse({
+    schemaVersion: 1,
+    type: "memory.remember",
+    requestId,
+    traceId: requestId,
+    sentAt: new Date().toISOString(),
+    payload: { text: "   ", sessionScope: { kind: "personal" } },
+  }));
+});
+
+test("speech.excerpt is a versioned client command at protocol 1", () => {
+  const requestId = makeTurnStartCommand().requestId;
+  const excerpted = speechExcerptCommandSchema.parse({
+    schemaVersion: 1,
+    type: "speech.excerpt",
+    requestId,
+    traceId: requestId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      visibleText: "今天多云，气温二十度。后面还有很长的说明。",
+      modelPreference: { provider: "xai", model: "grok-4.3" },
+    },
+  });
+  assert.equal(excerpted.type, "speech.excerpt");
+  assert.equal(clientCommandSchema.parse(excerpted).type, "speech.excerpt");
+  assert.equal(excerpted.schemaVersion, 1);
+
+  assert.throws(() => speechExcerptCommandSchema.parse({
+    schemaVersion: 1,
+    type: "speech.excerpt",
+    requestId,
+    traceId: requestId,
+    sentAt: new Date().toISOString(),
+    payload: { visibleText: "   " },
+  }));
 });
 
 test("grounded prompt includes evidence but never screenshot bytes", () => {
@@ -574,11 +622,33 @@ test("formatTurnMemoryBlock is undefined when empty and otherwise matches the pr
       source: "conversation",
       capturedAt: "2026-08-08T12:00:00.000Z",
       scope: "personal",
+      authority: "user",
     },
   ]);
   assert.match(block ?? "", /<durable_memories>/);
   assert.match(block ?? "", /验收回答先给结论/);
+  assert.match(block ?? "", /authority=user/);
   assert.doesNotMatch(block ?? "", /\n$/);
+
+  const persona = formatTurnMemoryBlock([
+    {
+      id: "profile:yishu:0",
+      claim: "艺书现居深圳。",
+      source: "observation",
+      capturedAt: "2026-08-18T00:00:00.000Z",
+      scope: "personal",
+    },
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      claim: "验收回答先给结论",
+      source: "conversation",
+      capturedAt: "2026-08-08T12:00:00.000Z",
+      scope: "personal",
+    },
+  ]);
+  assert.match(persona ?? "", /<durable_persona>/);
+  assert.match(persona ?? "", /艺书现居深圳/);
+  assert.match(persona ?? "", /<durable_memories>/);
 });
 
 test("grounded prompt injects controlled durable memories without screenshot bytes", async () => {
@@ -615,6 +685,10 @@ test("Yishu persona keeps agency without leaking private reflection", () => {
   assert.match(YISHU_SYSTEM_PROMPT, /不输出 <mood>/);
   assert.match(YISHU_SYSTEM_PROMPT, /工具返回成功不等于/);
   assert.match(YISHU_SYSTEM_PROMPT, /Hanako 不是另一个对外身份/);
+  assert.match(YISHU_SYSTEM_PROMPT, /互不抢同一块屏幕的事一次一起做/);
+  assert.match(YISHU_SYSTEM_PROMPT, /越聊越准/);
+  assert.match(YISHU_SYSTEM_PROMPT, /不要宣告做完了/);
+  assert.match(YISHU_SYSTEM_PROMPT, /不要读网址/);
 });
 
 test("mock runtime completes a grounded response", async () => {

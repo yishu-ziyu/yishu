@@ -32,7 +32,7 @@ enum YishuDelegatedResultKind: String, Equatable {
 }
 
 /// Additive task discriminator from the runtime. Missing values are treated as
-/// delegated work so Clicky remains compatible with older sidecars.
+/// delegated work so Yishu remains compatible with older sidecars.
 enum YishuBackgroundTaskKind: String, Equatable {
     case delegated
     case contextReminder = "context_reminder"
@@ -53,7 +53,7 @@ enum YishuSystemSequenceStepStatus: String, Equatable {
 }
 
 /// One runtime-authored system observation. A sequence step is displayable only
-/// when it carries the event id that produced it; Clicky never advances steps
+/// when it carries the event id that produced it; Yishu never advances steps
 /// with timers or by translating its own visual phases.
 struct YishuSystemSequenceStep: Identifiable, Equatable {
     let id: String
@@ -446,31 +446,28 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
                 return "这个提醒没有设上。"
             }
         }
-        let safeTitle = Self.returnExcerpt(from: title, maximum: 48) ?? "这件事"
-        let subject = "「\(safeTitle)」"
-        let result = summary.flatMap(Self.userFacingResultExcerpt(from:))
-        let detail = result.map { $0.hasSuffix("。") ? $0 : "\($0)。" } ?? ""
+        if let spoken = summary.flatMap({ Self.userFacingResultExcerpt(from: $0, title: title) }) {
+            return spoken.hasSuffix("。") ? spoken : "\(spoken)。"
+        }
         switch resultKind {
-        case .succeeded:
-            return detail.isEmpty ? "\(subject)做好了。" : "\(subject)做好了。\(detail)"
-        case .completed:
-            return detail.isEmpty ? "\(subject)整理好了。" : "\(subject)整理好了。\(detail)"
+        case .succeeded, .completed:
+            return "查好了。"
         case .unverified:
-            return "\(subject)做完了，但我没法确认。"
+            return "做完了，但我没法确认。"
         case .failed:
-            return detail.isEmpty ? "\(subject)没做成。" : "\(subject)没做成。\(detail)"
+            return "没做成。"
         case .cancelled:
-            return "\(subject)已经停下。"
+            return "已经停下。"
         case nil:
             switch status {
             case .done:
-                return detail.isEmpty ? "\(subject)整理好了。" : "\(subject)整理好了。\(detail)"
+                return "查好了。"
             case .blocked:
-                return detail.isEmpty ? "\(subject)还没做完。" : "\(subject)还没做完。\(detail)"
+                return "还没做完。"
             case .failed:
-                return detail.isEmpty ? "\(subject)没做成。" : "\(subject)没做成。\(detail)"
+                return "没做成。"
             case .cancelled:
-                return "\(subject)已经停下。"
+                return "已经停下。"
             case .pending, .running, .interrupted:
                 return nil
             }
@@ -511,21 +508,47 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
         }
     }
 
-    private static func userFacingResultExcerpt(from rawText: String) -> String? {
-        guard let excerpt = returnExcerpt(from: rawText, maximum: 140) else { return nil }
-        if excerpt.contains("后台任务")
-            || excerpt.contains("未独立核验")
-            || excerpt.contains("详情保留")
-            || excerpt.contains("运行时")
-            || excerpt.contains("执行结束") {
+    /// Findings go through the spoken mouth. Reminder copy does not.
+    var shouldExcerptSpokenFinding: Bool {
+        guard taskKind == .delegated else { return false }
+        guard !looksLikeRelativeTimeReminder else { return false }
+        guard returnAnnouncementText != nil else { return false }
+        return status == .done || status == .blocked
+    }
+
+    private static func userFacingResultExcerpt(from rawText: String, title: String) -> String? {
+        guard var text = stripVisibleNoise(from: rawText) else { return nil }
+        text = stripLeadingQuotedRequest(from: text, title: title)
+        if text.contains("后台任务")
+            || text.contains("未独立核验")
+            || text.contains("详情保留")
+            || text.contains("运行时")
+            || text.contains("执行结束") {
             return nil
         }
-        return excerpt
+        text = firstSpokenStretch(text, maximum: 160)
+        return text.isEmpty ? nil : text
     }
 
     /// ResultInbox keeps the full runtime summary. Proactive speech uses one
-    /// bounded plain-text sentence so URLs and formatting are never read out.
+    /// bounded plain-text stretch so URLs and formatting are never read out.
     private static func returnExcerpt(from rawText: String, maximum: Int) -> String? {
+        guard var text = stripVisibleNoise(from: rawText) else { return nil }
+        text = text.replacingOccurrences(
+            of: #"[。！？!?；;]+"#,
+            with: "，",
+            options: .regularExpression
+        )
+        text = text.trimmingCharacters(in: CharacterSet(charactersIn: " ，、:："))
+        guard !text.isEmpty else { return nil }
+        if text.count > maximum {
+            text = String(text.prefix(maximum)).trimmingCharacters(in: .whitespacesAndNewlines)
+            text += "…"
+        }
+        return text
+    }
+
+    private static func stripVisibleNoise(from rawText: String) -> String? {
         let lowercase = rawText.lowercased()
         guard !lowercase.contains("[result summary omitted"),
               !lowercase.contains("[delegated result unavailable") else { return nil }
@@ -540,6 +563,16 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
             options: .regularExpression
         )
         text = text.replacingOccurrences(
+            of: #"(?i)(?:[a-z0-9-]+\.)+(?:com|cn|net|org|io|co|info)(?:/[^\s<>()（）\[\]{}，。！？；、“”‘’]*)?"#,
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: #"(?i)(?:来源|来源链接|网址|链接|source)\s*[:：]"#,
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
             of: #"[`*_>#~]+"#,
             with: " ",
             options: .regularExpression
@@ -548,16 +581,62 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
-        text = text.replacingOccurrences(
-            of: #"[。！？!?；;]+"#,
-            with: "，",
-            options: .regularExpression
-        )
-        text = text.trimmingCharacters(in: CharacterSet(charactersIn: " ，、:："))
-        guard !text.isEmpty else { return nil }
+        text = text.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"[,，](?:\s*[,，])+"#, with: "，", options: .regularExpression)
+        text = text.trimmingCharacters(in: CharacterSet(charactersIn: " ，、:：;；"))
+        return text.isEmpty ? nil : text
+    }
+
+    private static func stripLeadingQuotedRequest(from text: String, title: String) -> String {
+        let normalizedTitle = title
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else { return text }
+        let pairs = [("「", "」"), ("『", "』"), ("“", "”"), ("\"", "\""), ("'", "'")]
+        for (open, close) in pairs {
+            guard text.hasPrefix(open) else { continue }
+            let searchRange = text.index(after: text.startIndex)..<text.endIndex
+            guard let closeRange = text.range(of: close, range: searchRange) else { continue }
+            var quoted = String(text[text.index(after: text.startIndex)..<closeRange.lowerBound])
+            quoted = quoted.replacingOccurrences(
+                of: #"[\.…]+$"#,
+                with: "",
+                options: .regularExpression
+            )
+            quoted = quoted
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let q = quoted.lowercased()
+            let t = normalizedTitle.lowercased()
+            guard !q.isEmpty, t.hasPrefix(q) || q.hasPrefix(t) else { continue }
+            var rest = String(text[closeRange.upperBound...])
+            rest = rest.replacingOccurrences(
+                of: #"^[。.!！，,\s]+"#,
+                with: "",
+                options: .regularExpression
+            )
+            return rest.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+
+    private static func firstSpokenStretch(_ raw: String, maximum: Int) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return text }
+        var ends = 0
+        var cut = text.endIndex
+        for index in text.indices {
+            if "。！？!?".contains(text[index]) {
+                ends += 1
+                cut = text.index(after: index)
+                if ends == 2 { break }
+            }
+        }
+        if ends > 0 {
+            text = String(text[..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         if text.count > maximum {
-            text = String(text.prefix(maximum)).trimmingCharacters(in: .whitespacesAndNewlines)
-            text += "…"
+            text = String(text.prefix(maximum)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
         }
         return text
     }
@@ -725,6 +804,100 @@ final class AgentPresenceViewModel: ObservableObject {
     }
 }
 
+enum AgentPresencePlacement {
+    static let panelSize = CGSize(width: 176, height: 48)
+    static let edgeInset: CGFloat = 14
+    static let savedAnchorKey = "yishu.presence.anchor-center.v1"
+
+    static func defaultAnchor(in visibleFrame: NSRect) -> NSPoint {
+        NSPoint(
+            x: visibleFrame.maxX - panelSize.width / 2 - edgeInset,
+            y: visibleFrame.maxY - panelSize.height / 2 - edgeInset
+        )
+    }
+
+    static func clamp(_ point: NSPoint, in visibleFrame: NSRect) -> NSPoint {
+        let halfW = panelSize.width / 2
+        let halfH = panelSize.height / 2
+        let minX = visibleFrame.minX + halfW + edgeInset
+        let maxX = visibleFrame.maxX - halfW - edgeInset
+        let minY = visibleFrame.minY + halfH + edgeInset
+        let maxY = visibleFrame.maxY - halfH - edgeInset
+        return NSPoint(
+            x: minX <= maxX ? min(max(point.x, minX), maxX) : visibleFrame.midX,
+            y: minY <= maxY ? min(max(point.y, minY), maxY) : visibleFrame.midY
+        )
+    }
+
+    static func resolvedAnchor(
+        saved: NSPoint?,
+        mouse: NSPoint,
+        screens: [(frame: NSRect, visible: NSRect)]
+    ) -> NSPoint {
+        let mouseScreen = screens.first(where: { $0.frame.contains(mouse) }) ?? screens.first
+        guard let mouseScreen else { return .zero }
+        if let saved, let host = screens.first(where: { $0.visible.insetBy(dx: -8, dy: -8).contains(saved) }) {
+            return clamp(saved, in: host.visible)
+        }
+        return defaultAnchor(in: mouseScreen.visible)
+    }
+
+    static func loadSavedAnchor(from defaults: UserDefaults = .standard) -> NSPoint? {
+        guard let values = defaults.array(forKey: savedAnchorKey) as? [NSNumber], values.count == 2 else {
+            return nil
+        }
+        return NSPoint(x: values[0].doubleValue, y: values[1].doubleValue)
+    }
+
+    static func saveAnchor(_ point: NSPoint, to defaults: UserDefaults = .standard) {
+        defaults.set([point.x, point.y], forKey: savedAnchorKey)
+    }
+
+    static func labelOrigin(near center: NSPoint, size: CGSize, visibleFrame: NSRect) -> NSPoint {
+        let x = min(
+            max(center.x - size.width / 2, visibleFrame.minX + 8),
+            visibleFrame.maxX - size.width - 8
+        )
+        let above = center.y + 22
+        if above + size.height <= visibleFrame.maxY - 4 {
+            return NSPoint(x: x, y: above)
+        }
+        return NSPoint(x: x, y: center.y - size.height - 22)
+    }
+}
+
+enum AgentPresenceSettlePolicy {
+    static let hideDelay: TimeInterval = 4
+
+    static func visibleTasks(
+        _ tasks: [YishuDelegatedTaskPresenceEvent],
+        dismissedTerminalIDs: Set<UUID>
+    ) -> [YishuDelegatedTaskPresenceEvent] {
+        tasks.filter { task in
+            if YishuProductUtteranceRouter.looksLikeRelativeTimeReminder(task.title) {
+                return false
+            }
+            switch task.status {
+            case .pending, .running:
+                return true
+            case .blocked, .done, .failed, .cancelled, .interrupted:
+                return !dismissedTerminalIDs.contains(task.id)
+            }
+        }
+    }
+
+    static func shouldAutoHide(
+        displayTasks: [YishuDelegatedTaskPresenceEvent],
+        pocketOpen: Bool,
+        hovering: Bool,
+        dragging: Bool
+    ) -> Bool {
+        guard !pocketOpen, !hovering, !dragging else { return false }
+        guard !displayTasks.isEmpty else { return false }
+        return displayTasks.allSatisfy { $0.status != .pending && $0.status != .running }
+    }
+}
+
 private final class AgentPresencePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -746,6 +919,10 @@ final class AgentPresenceWindowManager: NSObject {
     private var tasksCancellable: AnyCancellable?
     private var outsideClickMonitor: Any?
     private var labelHideWorkItem: DispatchWorkItem?
+    private var settleHideWorkItem: DispatchWorkItem?
+    private var dismissedTerminalIDs: Set<UUID> = []
+    private var dragOrigin: NSPoint?
+    private var chipHovering = false
     private var hidesChipForForeground = false
 
     override init() {
@@ -819,6 +996,11 @@ final class AgentPresenceWindowManager: NSObject {
     }
 
     func stop() {
+        settleHideWorkItem?.cancel()
+        settleHideWorkItem = nil
+        dismissedTerminalIDs.removeAll()
+        dragOrigin = nil
+        chipHovering = false
         viewModel.reset()
         hidePocket()
         hideLabel()
@@ -828,32 +1010,46 @@ final class AgentPresenceWindowManager: NSObject {
     }
 
     private func synchronizeWindows(with tasks: [YishuDelegatedTaskPresenceEvent]) {
-        let visible = tasks.filter { !YishuProductUtteranceRouter.looksLikeRelativeTimeReminder($0.title) }
+        pruneDismissed(against: tasks)
+        let visible = AgentPresenceSettlePolicy.visibleTasks(
+            tasks,
+            dismissedTerminalIDs: dismissedTerminalIDs
+        )
         guard !visible.isEmpty else {
             hideAnchor()
             return
         }
-        if anchorPoint == nil { anchorPoint = makeAnchorPoint() }
+        if anchorPoint == nil {
+            anchorPoint = resolvedAnchorPoint()
+        }
         showAnchor(tasks: visible)
         if pocketPanel?.isVisible == true { showPocket() }
+        scheduleSettleHide(for: visible)
     }
 
     private func showAnchor(tasks: [YishuDelegatedTaskPresenceEvent]) {
         guard let anchorPoint else { return }
-        let size = CGSize(width: 200, height: 80)
+        let size = AgentPresencePlacement.panelSize
         let panel = anchorPanel ?? makePanel(size: size)
-        let isActive = tasks.contains { $0.status == .pending || $0.status == .running }
-        panel.contentView = hostingView(
-            AgentPresenceAnchorButton(
-                label: Self.presenceChipLabel(for: tasks),
-                isActive: isActive,
-                action: { [weak self] in self?.togglePocket() },
-                onHover: { [weak self] hovering in
-                    self?.handleChipHover(hovering, tasks: tasks)
-                }
-            ),
-            size: size
-        )
+        if dragOrigin == nil {
+            panel.contentView = hostingView(
+                AgentPresenceAnchorButton(
+                    label: Self.presenceChipLabel(for: tasks),
+                    tasks: tasks,
+                    action: { [weak self] in self?.togglePocket() },
+                    onHover: { [weak self] hovering in
+                        self?.handleChipHover(hovering, tasks: tasks)
+                    },
+                    onDrag: { [weak self] translation in
+                        self?.handleChipDrag(translation)
+                    },
+                    onDragEnd: { [weak self] in
+                        self?.handleChipDragEnd()
+                    }
+                ),
+                size: size
+            )
+        }
         panel.setFrameOrigin(NSPoint(x: anchorPoint.x - size.width / 2, y: anchorPoint.y - size.height / 2))
         if anchorPanel == nil {
             anchorPanel = panel
@@ -871,14 +1067,23 @@ final class AgentPresenceWindowManager: NSObject {
     }
 
     private func togglePocket() {
-        pocketPanel?.isVisible == true ? hidePocket() : showPocket()
+        if pocketPanel?.isVisible == true {
+            hidePocket()
+        } else {
+            showPocket()
+        }
+        let visible = AgentPresenceSettlePolicy.visibleTasks(
+            viewModel.tasks,
+            dismissedTerminalIDs: dismissedTerminalIDs
+        )
+        scheduleSettleHide(for: visible)
     }
 
     private func showPocket() {
         guard let anchorPoint else { return }
         let tasks = viewModel.tasks
         let width: CGFloat = 344
-        let height = min(CGFloat(72 + tasks.count * 210), 520)
+        let height = min(CGFloat(72 + tasks.count * 228), 520)
         let size = CGSize(width: width, height: max(height, 138))
         let panel = pocketPanel ?? makePanel(size: size)
         panel.contentView = hostingView(
@@ -921,12 +1126,19 @@ final class AgentPresenceWindowManager: NSObject {
     private func hidePocket() {
         pocketPanel?.orderOut(nil)
         removeOutsideClickMonitor()
+        let visible = AgentPresenceSettlePolicy.visibleTasks(
+            viewModel.tasks,
+            dismissedTerminalIDs: dismissedTerminalIDs
+        )
+        scheduleSettleHide(for: visible)
     }
 
     private func hideAnchor() {
         hidePocket()
         hideLabel()
-        guard anchorPoint != nil else { return }
+        settleHideWorkItem?.cancel()
+        settleHideWorkItem = nil
+        guard anchorPoint != nil || anchorPanel != nil else { return }
         let anchorPanel = self.anchorPanel
         self.anchorPanel = nil
         NSAnimationContext.runAnimationGroup({ context in
@@ -942,6 +1154,8 @@ final class AgentPresenceWindowManager: NSObject {
         _ hovering: Bool,
         tasks: [YishuDelegatedTaskPresenceEvent]
     ) {
+        chipHovering = hovering
+        scheduleSettleHide(for: tasks)
         guard let anchorPoint else { return }
         let caption = tasks.first { $0.status == .pending || $0.status == .running }?.presenceCaption
             ?? tasks.first { $0.status == .done || $0.status == .blocked }?.presenceCaption
@@ -966,7 +1180,9 @@ final class AgentPresenceWindowManager: NSObject {
         let size = CGSize(width: 260, height: 56)
         let panel = labelPanel ?? makePanel(size: size, ignoresMouseEvents: true)
         panel.contentView = hostingView(AgentPresenceLabel(text: text), size: size)
-        panel.setFrameOrigin(NSPoint(x: center.x - size.width / 2, y: center.y + 28))
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main
+        let frame = screen?.visibleFrame ?? .zero
+        panel.setFrameOrigin(AgentPresencePlacement.labelOrigin(near: center, size: size, visibleFrame: frame))
         labelPanel = panel
         panel.alphaValue = 1
         panel.orderFrontRegardless()
@@ -983,15 +1199,90 @@ final class AgentPresenceWindowManager: NSObject {
         labelPanel?.orderOut(nil)
     }
 
-    private func makeAnchorPoint() -> NSPoint {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
-        let frame = screen?.visibleFrame ?? .zero
-        let proposed = NSPoint(x: mouse.x + 35, y: mouse.y - 25)
-        return NSPoint(
-            x: min(max(proposed.x, frame.minX + 32), frame.maxX - 32),
-            y: min(max(proposed.y, frame.minY + 32), frame.maxY - 32)
+    private func resolvedAnchorPoint() -> NSPoint {
+        let screens = NSScreen.screens.map { (frame: $0.frame, visible: $0.visibleFrame) }
+        return AgentPresencePlacement.resolvedAnchor(
+            saved: AgentPresencePlacement.loadSavedAnchor(),
+            mouse: NSEvent.mouseLocation,
+            screens: screens
         )
+    }
+
+    private func handleChipDrag(_ translation: CGSize) {
+        if dragOrigin == nil {
+            dragOrigin = anchorPoint ?? resolvedAnchorPoint()
+            hideLabel()
+            settleHideWorkItem?.cancel()
+        }
+        guard let dragOrigin else { return }
+        let raw = NSPoint(
+            x: dragOrigin.x + translation.width,
+            y: dragOrigin.y - translation.height
+        )
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(raw) })
+            ?? NSScreen.screens.first(where: { $0.frame.contains(dragOrigin) })
+            ?? NSScreen.main
+        let frame = screen?.visibleFrame ?? .zero
+        let next = AgentPresencePlacement.clamp(raw, in: frame)
+        anchorPoint = next
+        let size = AgentPresencePlacement.panelSize
+        anchorPanel?.setFrameOrigin(NSPoint(x: next.x - size.width / 2, y: next.y - size.height / 2))
+        if pocketPanel?.isVisible == true {
+            pocketPanel?.setFrameOrigin(pocketOrigin(size: pocketPanel?.frame.size ?? .zero, anchor: next))
+        }
+    }
+
+    private func handleChipDragEnd() {
+        if let anchorPoint {
+            AgentPresencePlacement.saveAnchor(anchorPoint)
+        }
+        dragOrigin = nil
+        let visible = AgentPresenceSettlePolicy.visibleTasks(
+            viewModel.tasks,
+            dismissedTerminalIDs: dismissedTerminalIDs
+        )
+        scheduleSettleHide(for: visible)
+    }
+
+    private func scheduleSettleHide(for tasks: [YishuDelegatedTaskPresenceEvent]) {
+        settleHideWorkItem?.cancel()
+        settleHideWorkItem = nil
+        let shouldHide = AgentPresenceSettlePolicy.shouldAutoHide(
+            displayTasks: tasks,
+            pocketOpen: pocketPanel?.isVisible == true,
+            hovering: chipHovering,
+            dragging: dragOrigin != nil
+        )
+        guard shouldHide else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.settleTerminalChip()
+        }
+        settleHideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + AgentPresenceSettlePolicy.hideDelay, execute: work)
+    }
+
+    private func settleTerminalChip() {
+        let visible = AgentPresenceSettlePolicy.visibleTasks(
+            viewModel.tasks,
+            dismissedTerminalIDs: dismissedTerminalIDs
+        )
+        guard AgentPresenceSettlePolicy.shouldAutoHide(
+            displayTasks: visible,
+            pocketOpen: pocketPanel?.isVisible == true,
+            hovering: chipHovering,
+            dragging: dragOrigin != nil
+        ) else { return }
+        for task in visible {
+            dismissedTerminalIDs.insert(task.id)
+        }
+        hidePocket()
+        hideLabel()
+        hideAnchor()
+    }
+
+    private func pruneDismissed(against tasks: [YishuDelegatedTaskPresenceEvent]) {
+        let ids = Set(tasks.map(\.id))
+        dismissedTerminalIDs = dismissedTerminalIDs.intersection(ids)
     }
 
     static func presenceChipLabel(for tasks: [YishuDelegatedTaskPresenceEvent]) -> String {
@@ -1070,20 +1361,30 @@ final class AgentPresenceWindowManager: NSObject {
 
 private struct AgentPresenceAnchorButton: View {
     let label: String
-    let isActive: Bool
+    let tasks: [YishuDelegatedTaskPresenceEvent]
     let action: () -> Void
     let onHover: (Bool) -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let onDrag: (CGSize) -> Void
+    let onDragEnd: () -> Void
     @State private var hovered = false
-    @State private var breathing = false
+    @State private var dragging = false
 
     var body: some View {
-        Button(action: action) {
+        Button(action: {
+            guard !dragging else { return }
+            action()
+        }) {
             HStack(spacing: 7) {
-                Circle()
-                    .fill(DS.Colors.overlayCursorBlue)
-                    .frame(width: 7, height: 7)
-                    .opacity(isActive && breathing ? 1 : 0.7)
+                HStack(spacing: -8) {
+                    ForEach(Array(chipTasks.prefix(3))) { task in
+                        YishuBlobatarView(
+                            name: task.blobatarName,
+                            expression: task.blobatarExpression,
+                            size: 20,
+                            animates: task.blobatarAnimates
+                        )
+                    }
+                }
                 Text(label)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
                     .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.86))
@@ -1125,22 +1426,32 @@ private struct AgentPresenceAnchorButton: View {
             .shadow(color: Color.black.opacity(0.11), radius: 8, y: 4)
         }
         .buttonStyle(.plain)
-        .padding(18)
+        .padding(4)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 5)
+                .onChanged { value in
+                    dragging = true
+                    onDrag(value.translation)
+                }
+                .onEnded { _ in
+                    onDragEnd()
+                    DispatchQueue.main.async { dragging = false }
+                }
+        )
         .onHover { hovering in
             hovered = hovering
             onHover(hovering)
         }
-        .scaleEffect(hovered ? 1.02 : 1)
+        .scaleEffect(hovered && !dragging ? 1.02 : 1)
         .animation(.easeOut(duration: 0.14), value: hovered)
-        .onAppear {
-            guard isActive else { breathing = true; return }
-            guard !reduceMotion else { breathing = true; return }
-            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
-                breathing = true
-            }
-        }
-        .help("管理任务与提醒")
-        .accessibilityLabel("管理任务与提醒，\(label)")
+        .help("任务。可拖开。点开看详情。")
+        .accessibilityLabel("任务，\(label)，可拖动")
+    }
+
+    private var chipTasks: [YishuDelegatedTaskPresenceEvent] {
+        let live = tasks.filter { $0.status == .pending || $0.status == .running }
+        let rest = tasks.filter { $0.status != .pending && $0.status != .running }
+        return live + rest
     }
 }
 
@@ -1242,10 +1553,13 @@ struct TaskStatusCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 9) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 7, height: 7)
-                    .padding(.top, 6)
+                YishuBlobatarView(
+                    name: task.blobatarName,
+                    expression: task.blobatarExpression,
+                    size: 36,
+                    animates: task.blobatarAnimates
+                )
+                .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(task.title)
                         .font(.system(size: 12.5, weight: .semibold, design: .rounded))

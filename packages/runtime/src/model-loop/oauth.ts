@@ -95,22 +95,55 @@ function requireString(body: Record<string, unknown>, field: string): string {
   return value;
 }
 
-function decodeJwtAccountId(token: string): string | undefined {
+function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
   try {
     const payload = token.split(".")[1];
     if (!payload) return undefined;
     const decoded = Buffer.from(payload, "base64url").toString("utf8");
-    const claims = JSON.parse(decoded) as {
-      "https://api.openai.com/auth"?: { chatgpt_account_id?: unknown };
-    };
-    const accountId = claims["https://api.openai.com/auth"]?.chatgpt_account_id;
-    return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
+    const claims: unknown = JSON.parse(decoded);
+    return typeof claims === "object" && claims !== null && !Array.isArray(claims)
+      ? claims as Record<string, unknown>
+      : undefined;
   } catch {
     return undefined;
   }
 }
 
-function credentialFromToken(access: string, refresh: string, expiresInSeconds: number): OAuthCredential {
+function decodeJwtAccountId(token: string): string | undefined {
+  const claims = decodeJwtPayload(token);
+  const accountId = (
+    claims?.["https://api.openai.com/auth"] as { chatgpt_account_id?: unknown } | undefined
+  )?.chatgpt_account_id;
+  return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
+}
+
+function decodeJwtEmail(token: string): string | undefined {
+  const claims = decodeJwtPayload(token);
+  if (!claims) return undefined;
+  for (const key of ["email", "preferred_username"] as const) {
+    const value = claims[key];
+    if (typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value.trim()) && value.trim().length <= 120) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function optionalIdToken(token: Record<string, unknown>): string | undefined {
+  return typeof token.id_token === "string" && token.id_token.length > 0 ? token.id_token : undefined;
+}
+
+function credentialExtras(token: Record<string, unknown>): { idToken: string } | undefined {
+  const idToken = optionalIdToken(token);
+  return idToken ? { idToken } : undefined;
+}
+
+function credentialFromToken(
+  access: string,
+  refresh: string,
+  expiresInSeconds: number,
+  extras?: { idToken?: string },
+): OAuthCredential {
   const credential: OAuthCredential = {
     type: "oauth",
     access,
@@ -118,7 +151,12 @@ function credentialFromToken(access: string, refresh: string, expiresInSeconds: 
     expires: Date.now() + expiresInSeconds * 1000,
   };
   const accountId = decodeJwtAccountId(access);
-  return accountId ? { ...credential, accountId } : credential;
+  const email = (extras?.idToken ? decodeJwtEmail(extras.idToken) : undefined) ?? decodeJwtEmail(access);
+  return {
+    ...credential,
+    ...(accountId ? { accountId } : {}),
+    ...(email ? { email } : {}),
+  };
 }
 
 function generatePkce(): { verifier: string; challenge: string } {
@@ -182,6 +220,7 @@ async function loginXai(interaction: OAuthInteraction): Promise<OAuthCredential>
         requireString(token, "access_token"),
         requireString(token, "refresh_token"),
         typeof token.expires_in === "number" ? token.expires_in : 3600,
+        credentialExtras(token),
       );
     }
     const errorBody = await tokenResponse.json().catch(() => ({}) as Record<string, unknown>);
@@ -214,6 +253,7 @@ async function refreshXai(refreshToken: string, signal?: AbortSignal): Promise<O
     requireString(token, "access_token"),
     requireString(token, "refresh_token"),
     typeof token.expires_in === "number" ? token.expires_in : 3600,
+    credentialExtras(token),
   );
 }
 
@@ -245,7 +285,12 @@ async function postCodexToken(
   ) {
     throw new Error(`OpenAI Codex token ${operation} response missing fields.`);
   }
-  return credentialFromToken(token.access_token, token.refresh_token, token.expires_in);
+  return credentialFromToken(
+    token.access_token,
+    token.refresh_token,
+    token.expires_in,
+    credentialExtras(token),
+  );
 }
 
 async function loginCodexDevice(interaction: OAuthInteraction): Promise<OAuthCredential> {

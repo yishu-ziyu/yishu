@@ -28,7 +28,8 @@ export interface ToolDefinition<TSchema = any, TDetails = any> {
   readonly promptSnippet: string;
   readonly promptGuidelines: readonly string[];
   readonly parameters: TSchema;
-  readonly executionMode: "sequential";
+  /** `parallel` tools may overlap. `sequential` is the exclusive desktop hand. */
+  readonly executionMode: "sequential" | "parallel";
   execute(
     toolCallId: string,
     params: TSchema extends { static: infer TStatic } ? TStatic : any,

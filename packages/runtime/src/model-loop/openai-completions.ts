@@ -189,10 +189,17 @@ export async function* readSseData(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const aborted = (): Error => new Error("Model stream aborted");
+  const onAbort = (): void => {
+    void reader.cancel().catch(() => undefined);
+  };
+  if (signal?.aborted) throw aborted();
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     while (true) {
-      if (signal?.aborted) throw new Error("Model stream aborted");
+      if (signal?.aborted) throw aborted();
       const { done, value } = await reader.read();
+      if (signal?.aborted) throw aborted();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let newlineIndex = buffer.indexOf("\n");
@@ -206,6 +213,11 @@ export async function* readSseData(
       }
     }
   } finally {
-    reader.releaseLock();
+    signal?.removeEventListener("abort", onAbort);
+    try {
+      reader.releaseLock();
+    } catch {
+      // cancel() may already have released the lock
+    }
   }
 }

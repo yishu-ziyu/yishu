@@ -2,8 +2,8 @@
 //  OverlayWindow.swift
 //  leanring-buddy
 //
-//  System-wide transparent overlay window for blue glowing cursor.
-//  One OverlayWindow is created per screen so the cursor buddy
+//  System-wide transparent overlay window for Yishu's visible presence.
+//  One OverlayWindow is created per screen so the thinking-orb
 //  seamlessly follows the cursor across multiple monitors.
 //
 
@@ -74,24 +74,23 @@ struct ResponsePresenceSizePreferenceKey: PreferenceKey {
     }
 }
 
-/// The buddy's behavioral mode. Controls whether it follows the cursor,
-/// is flying toward a detected UI element, or is pointing at an element.
-enum BuddyNavigationMode {
-    /// Default — buddy follows the mouse cursor with spring animation
+/// How Yishu's visible body moves: follow the cursor, fly to a target, or point.
+enum YishuPresenceNavigationMode {
+    /// Default — the thinking-orb follows the mouse cursor with spring animation
     case followingCursor
-    /// Buddy is animating toward a detected UI element location
+    /// The orb is animating toward a detected UI element location
     case navigatingToTarget
-    /// Buddy has arrived at the target and is pointing at it with a speech bubble
+    /// The orb has arrived at the target and is pointing at it with a speech bubble
     case pointingAtTarget
 }
 
 // SwiftUI view for Yishu's cursor-following presence.
-// Each screen gets its own BlueCursorView. The view checks whether
-// the cursor is currently on THIS screen and only shows the buddy
+// Each screen gets its own YishuPresenceView. The view checks whether
+// the cursor is currently on THIS screen and only shows the orb
 // when it is. Yishu's visible body remains one thinking-orb whose geometry
 // changes with typed product state. Response text stays a separate readable
 // surface attached to that stable body.
-struct BlueCursorView: View {
+struct YishuPresenceView: View {
     let screenFrame: CGRect
     let isFirstAppearance: Bool
     @ObservedObject var companionManager: CompanionManager
@@ -109,7 +108,7 @@ struct BlueCursorView: View {
         self.agentPresenceViewModel = companionManager.agentPresenceViewModel
 
         // Seed the cursor position from the current mouse location so the
-        // buddy doesn't flash at (0,0) before onAppear fires.
+        // orb doesn't flash at (0,0) before onAppear fires.
         let mouseLocation = NSEvent.mouseLocation
         let localX = mouseLocation.x - screenFrame.origin.x
         let localY = screenFrame.height - (mouseLocation.y - screenFrame.origin.y)
@@ -124,10 +123,10 @@ struct BlueCursorView: View {
     @State private var cursorOpacity: Double = 0.0
     @State private var responsePresenceSize = CGSize(width: 224, height: 52)
 
-    // MARK: - Buddy Navigation State
+    // MARK: - Presence Navigation State
 
-    /// The buddy's current behavioral mode (following cursor, navigating, or pointing).
-    @State private var buddyNavigationMode: BuddyNavigationMode = .followingCursor
+    /// How the thinking-orb is currently moving.
+    @State private var presenceNavigationMode: YishuPresenceNavigationMode = .followingCursor
 
     /// Speech bubble text shown when pointing at a detected element.
     @State private var navigationBubbleText: String = ""
@@ -142,16 +141,16 @@ struct BlueCursorView: View {
     /// Invalidated when the flight completes, is canceled, or the view disappears.
     @State private var navigationAnimationTimer: Timer?
 
-    /// Scale factor applied to the buddy triangle during flight. Grows to ~1.3x
+    /// Scale factor applied to the thinking-orb during flight. Grows to ~1.3x
     /// at the midpoint of the arc and shrinks back to 1.0x on landing, creating
     /// an energetic "swooping" feel.
-    @State private var buddyFlightScale: CGFloat = 1.0
+    @State private var presenceFlightScale: CGFloat = 1.0
 
     /// Scale factor for the navigation speech bubble's pop-in entrance.
     /// Starts at 0.5 and springs to 1.0 when the first character appears.
     @State private var navigationBubbleScale: CGFloat = 1.0
 
-    /// True when the buddy is flying BACK to the cursor after pointing.
+    /// True when the orb is flying BACK to the cursor after pointing.
     /// Only during the return flight can cursor movement cancel the animation.
     @State private var isReturningToCursor: Bool = false
 
@@ -160,7 +159,7 @@ struct BlueCursorView: View {
     private let onboardingVideoPlayerWidth: CGFloat = 330
     private let onboardingVideoPlayerHeight: CGFloat = 186
 
-    private let fullWelcomeMessage = "hey! i'm clicky"
+    private let fullWelcomeMessage = "我是奕枢。"
 
     private let navigationPointerPhrases = [
         "right here!",
@@ -248,10 +247,10 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Navigation pointer bubble — shown when buddy arrives at a detected element.
+            // Navigation pointer bubble — shown when the orb arrives at a detected element.
             // Pops in with a scale-bounce (0.5x → 1.0x spring) and a bright initial
             // glow that settles, creating a "materializing" effect.
-            if buddyNavigationMode == .pointingAtTarget && !navigationBubbleText.isEmpty {
+            if presenceNavigationMode == .pointingAtTarget && !navigationBubbleText.isEmpty {
                 Text(navigationBubbleText)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.white)
@@ -287,8 +286,8 @@ struct BlueCursorView: View {
             // Streaming text and the thinking-orb share this overlay and one anchor.
             // A small stable gap groups the body and response without reviving the
             // decorative connector that belonged to the retired triangle cursor.
-            if buddyIsVisibleOnThisScreen,
-               buddyNavigationMode == .followingCursor,
+            if presenceIsVisibleOnThisScreen,
+               presenceNavigationMode == .followingCursor,
                responseOverlayViewModel.isShowingResponse {
                 CompanionResponsePresenceView(
                     viewModel: responseOverlayViewModel,
@@ -327,11 +326,11 @@ struct BlueCursorView: View {
             // timer controls position directly at 60fps for a smooth arc flight.
             YishuThinkingOrbView(state: companionManager.visualState)
                 .frame(width: 20, height: 20)
-                .scaleEffect(buddyFlightScale)
-                .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
+                .scaleEffect(presenceFlightScale)
+                .opacity(presenceIsVisibleOnThisScreen ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(
-                    buddyNavigationMode == .followingCursor
+                    presenceNavigationMode == .followingCursor
                         ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
                         : nil,
                     value: cursorPosition
@@ -392,7 +391,7 @@ struct BlueCursorView: View {
             companionManager.tearDownOnboardingVideo()
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
-            // When a UI element location is detected, navigate the buddy to
+            // When a UI element location is detected, navigate the orb to
             // that position so it points at the element.
             guard let screenLocation = newLocation,
                   let displayFrame = companionManager.detectedElementDisplayFrame else {
@@ -413,13 +412,13 @@ struct BlueCursorView: View {
     /// True when cursor is on this screen during normal following, or
     /// when navigating/pointing at a target on this screen. When another
     /// screen is navigating (detectedElementScreenLocation is set but this
-    /// screen isn't the one animating), hide the cursor so only one buddy
+    /// screen isn't the one animating), hide the orb so only one presence
     /// is ever visible at a time.
-    private var buddyIsVisibleOnThisScreen: Bool {
-        switch buddyNavigationMode {
+    private var presenceIsVisibleOnThisScreen: Bool {
+        switch presenceNavigationMode {
         case .followingCursor:
-            // If another screen's BlueCursorView is navigating to an element,
-            // hide the cursor on this screen to prevent a duplicate buddy
+            // If another screen's YishuPresenceView is navigating to an element,
+            // hide the orb on this screen to prevent a duplicate presence
             if companionManager.detectedElementScreenLocation != nil {
                 return false
             }
@@ -469,11 +468,11 @@ struct BlueCursorView: View {
             let mouseLocation = NSEvent.mouseLocation
             self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
 
-            // During forward flight or pointing, the buddy is NOT interrupted by
+            // During forward flight or pointing, the orb is NOT interrupted by
             // mouse movement — it completes its full animation and return flight.
             // Only during the RETURN flight do we allow cursor movement to cancel
-            // (so the buddy snaps to following if the user moves while it's flying back).
-            if self.buddyNavigationMode == .navigatingToTarget && self.isReturningToCursor {
+            // (so the orb snaps to following if the user moves while it's flying back).
+            if self.presenceNavigationMode == .navigatingToTarget && self.isReturningToCursor {
                 let currentMouseInSwiftUI = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
                 let distanceFromNavigationStart = hypot(
                     currentMouseInSwiftUI.x - self.cursorPositionWhenNavigationStarted.x,
@@ -486,7 +485,7 @@ struct BlueCursorView: View {
             }
 
             // During forward navigation or pointing, just skip cursor tracking
-            if self.buddyNavigationMode != .followingCursor {
+            if self.presenceNavigationMode != .followingCursor {
                 return
             }
 
@@ -498,8 +497,8 @@ struct BlueCursorView: View {
         }
     }
 
-    /// Preserve Clicky's offset from the physical mouse while keeping Yishu's
-    /// own visible anchor on-screen. The user's cursor remains untouched.
+    /// Preserve Yishu's offset from the physical mouse while keeping the
+    /// visible anchor on-screen. The user's cursor remains untouched.
     private func clampedVisibleCursorPosition(for preferredPosition: CGPoint) -> CGPoint {
         let edgeInset: CGFloat = 12
         return CGPoint(
@@ -518,7 +517,7 @@ struct BlueCursorView: View {
 
     // MARK: - Element Navigation
 
-    /// Starts animating the buddy toward a detected UI element location.
+    /// Starts animating the orb toward a detected UI element location.
     private func startNavigatingToElement(screenLocation: CGPoint) {
         // Don't interrupt welcome animation
         guard !showWelcome || welcomeText.isEmpty else { return }
@@ -526,7 +525,7 @@ struct BlueCursorView: View {
         // Convert the AppKit screen location to SwiftUI coordinates for this screen
         let targetInSwiftUI = convertScreenPointToSwiftUICoordinates(screenLocation)
 
-        // Offset the target so the buddy sits beside the element rather than
+        // Offset the target so the orb sits beside the element rather than
         // directly on top of it — 8px to the right, 12px below.
         let offsetTarget = CGPoint(
             x: targetInSwiftUI.x + 8,
@@ -545,16 +544,16 @@ struct BlueCursorView: View {
         cursorPositionWhenNavigationStarted = convertScreenPointToSwiftUICoordinates(mouseLocation)
 
         // Enter navigation mode — stop cursor following
-        buddyNavigationMode = .navigatingToTarget
+        presenceNavigationMode = .navigatingToTarget
         isReturningToCursor = false
 
         animateBezierFlightArc(to: clampedTarget) {
-            guard self.buddyNavigationMode == .navigatingToTarget else { return }
+            guard self.presenceNavigationMode == .navigatingToTarget else { return }
             self.startPointingAtElement()
         }
     }
 
-    /// Animates the buddy along a quadratic bezier arc from its current position
+    /// Animates the orb along a quadratic bezier arc from its current position
     /// to the specified destination. The triangle rotates to face its direction
     /// of travel (tangent to the curve) each frame, scales up at the midpoint
     /// for a "swooping" feel, and the glow intensifies during flight.
@@ -579,7 +578,7 @@ struct BlueCursorView: View {
         var currentFrame = 0
 
         // Control point for the quadratic bezier arc. Offset the midpoint
-        // upward (negative Y in SwiftUI) so the buddy flies in a parabolic arc.
+        // upward (negative Y in SwiftUI) so the orb flies in a parabolic arc.
         let midPoint = CGPoint(
             x: (startPosition.x + endPosition.x) / 2.0,
             y: (startPosition.y + endPosition.y) / 2.0
@@ -594,7 +593,7 @@ struct BlueCursorView: View {
                 self.navigationAnimationTimer?.invalidate()
                 self.navigationAnimationTimer = nil
                 self.cursorPosition = endPosition
-                self.buddyFlightScale = 1.0
+                self.presenceFlightScale = 1.0
                 onComplete()
                 return
             }
@@ -617,16 +616,16 @@ struct BlueCursorView: View {
             self.cursorPosition = CGPoint(x: bezierX, y: bezierY)
 
             // Scale pulse: sin curve peaks at midpoint of the flight.
-            // Buddy grows to ~1.3x at the apex, then shrinks back to 1.0x on landing.
+            // The orb grows to ~1.3x at the apex, then shrinks back to 1.0x on landing.
             let scalePulse = sin(linearProgress * .pi)
-            self.buddyFlightScale = 1.0 + scalePulse * 0.3
+            self.presenceFlightScale = 1.0 + scalePulse * 0.3
         }
     }
 
     /// Transitions to pointing mode — shows a speech bubble with a bouncy
     /// scale-in entrance and variable-speed character streaming.
     private func startPointingAtElement() {
-        buddyNavigationMode = .pointingAtTarget
+        presenceNavigationMode = .pointingAtTarget
 
         // Reset navigation bubble state — start small for the scale-bounce entrance
         navigationBubbleText = ""
@@ -643,10 +642,10 @@ struct BlueCursorView: View {
         streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0) {
             // All characters streamed — hold for 3 seconds, then fly back
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                guard self.buddyNavigationMode == .pointingAtTarget else { return }
+                guard self.presenceNavigationMode == .pointingAtTarget else { return }
                 self.navigationBubbleOpacity = 0.0
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    guard self.buddyNavigationMode == .pointingAtTarget else { return }
+                    guard self.presenceNavigationMode == .pointingAtTarget else { return }
                     self.startFlyingBackToCursor()
                 }
             }
@@ -660,7 +659,7 @@ struct BlueCursorView: View {
         characterIndex: Int,
         onComplete: @escaping () -> Void
     ) {
-        guard buddyNavigationMode == .pointingAtTarget else { return }
+        guard presenceNavigationMode == .pointingAtTarget else { return }
         guard characterIndex < phrase.count else {
             onComplete()
             return
@@ -684,7 +683,7 @@ struct BlueCursorView: View {
         }
     }
 
-    /// Flies the buddy back to the current cursor position after pointing is done.
+    /// Flies the orb back to the current cursor position after pointing is done.
     private func startFlyingBackToCursor() {
         let mouseLocation = NSEvent.mouseLocation
         let cursorInSwiftUI = convertScreenPointToSwiftUICoordinates(mouseLocation)
@@ -692,7 +691,7 @@ struct BlueCursorView: View {
 
         cursorPositionWhenNavigationStarted = cursorInSwiftUI
 
-        buddyNavigationMode = .navigatingToTarget
+        presenceNavigationMode = .navigatingToTarget
         isReturningToCursor = true
 
         animateBezierFlightArc(to: cursorWithTrackingOffset) {
@@ -707,17 +706,17 @@ struct BlueCursorView: View {
         navigationBubbleText = ""
         navigationBubbleOpacity = 0.0
         navigationBubbleScale = 1.0
-        buddyFlightScale = 1.0
+        presenceFlightScale = 1.0
         finishNavigationAndResumeFollowing()
     }
 
-    /// Returns the buddy to normal cursor-following mode after navigation completes.
+    /// Returns the orb to normal cursor-following mode after navigation completes.
     private func finishNavigationAndResumeFollowing() {
         navigationAnimationTimer?.invalidate()
         navigationAnimationTimer = nil
-        buddyNavigationMode = .followingCursor
+        presenceNavigationMode = .followingCursor
         isReturningToCursor = false
-        buddyFlightScale = 1.0
+        presenceFlightScale = 1.0
         navigationBubbleText = ""
         navigationBubbleOpacity = 0.0
         navigationBubbleScale = 1.0
@@ -836,8 +835,8 @@ private struct YishuThinkingOrbCanvas: View {
     }
 }
 
-// Manager for overlay windows — creates one per screen so the cursor
-// buddy seamlessly follows the cursor across multiple monitors.
+// Manager for overlay windows — creates one per screen so Yishu's
+// thinking-orb seamlessly follows the cursor across multiple monitors.
 @MainActor
 class OverlayWindowManager {
     private var overlayWindows: [OverlayWindow] = []
@@ -855,7 +854,7 @@ class OverlayWindowManager {
         for screen in screens {
             let window = OverlayWindow(screen: screen)
 
-            let contentView = BlueCursorView(
+            let contentView = YishuPresenceView(
                 screenFrame: screen.frame,
                 isFirstAppearance: isFirstAppearance,
                 companionManager: companionManager

@@ -1,6 +1,6 @@
 import YishuContext
 
-// Clicky's production collector keeps its established Yishu-prefixed names,
+// Yishu's production collector keeps its established Yishu-prefixed names,
 // while the portable evidence schema and validation live in YishuContext.
 // These aliases are the only compatibility boundary; they do not define a
 // second wire model or validation implementation.

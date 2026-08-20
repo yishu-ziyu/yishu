@@ -2,7 +2,7 @@
 //  BuddyDictationManager.swift
 //  leanring-buddy
 //
-//  Shared push-to-talk dictation manager for the help chat and brainstorm buddy.
+//  Shared push-to-talk dictation manager for Yishu's hold-to-talk path.
 //  Captures microphone audio with AVAudioEngine, routes it into the active
 //  transcription provider, and hands the final draft back to the active input bar.
 //
@@ -924,7 +924,6 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let baseKeyterms = [
             "Yishu",
             "奕枢",
-            "Learning Buddy",
             "Codex",
             "Claude",
             "Anthropic",

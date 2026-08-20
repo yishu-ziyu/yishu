@@ -27,6 +27,10 @@ packages/agent-core/workspace/**
 packages/agent-core/test/.tmp*/
 packages/agent-core/test/**/.tmp*/
 
+# EverOS local venv (user-level install lives in ~/.yishu/everos-venv)
+packages/runtime/.everos-venv/
+.everos-venv/
+
 # Local tooling
 .codex/
 .work/

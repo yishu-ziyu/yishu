@@ -12,7 +12,7 @@ Review: apps/clicky/scripts/ 或签名/TCC 流程变化时
 1. `xcodebuild` Debug 构建。
 2. 固定签名身份 `Shangqiuko Local Code Signing`（保 TCC 连续性，绝不用 adhoc `-`）。
 3. `pnpm build` + deploy：把 runtime 与 node 打包进 bundle，保留 V8/JIT entitlements。
-4. 安装到 `/Applications/Clicky.app`。
+4. 安装到 `/Applications/奕枢.app`。
 
 脚本内含 voice proxy（8787）孤儿回收：只终止真正孤儿的 8787 listener；若 8787 被非孤儿进程占用，会阻断 install/open 并报告。
 
@@ -25,4 +25,4 @@ Review: apps/clicky/scripts/ 或签名/TCC 流程变化时
 
 ## 登录项
 
-SMAppService 登录项只由 Clicky.app 拥有。仓库不维护第二个 macOS App 或登录项。
+SMAppService 登录项只由 奕枢.app 拥有。仓库不维护第二个 macOS App 或登录项。
