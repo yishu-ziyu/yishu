@@ -9,6 +9,7 @@ import {
 import { ContextTrail } from "./context/trail.js";
 import type { ContextTrailOptions } from "./context/trail.js";
 import {
+  createBrowserAction,
   createDelegateAction,
   createForgetAction,
   createFinderHistoryBackAction,
@@ -172,6 +173,7 @@ export function createYishuKernel(
     createScheduleTimeReminderAction(),
     createWatchAppReturnAction(store),
     createDelegateAction({ taskTruth }),
+    createBrowserAction(),
   ];
 
   for (const action of defaults) {

@@ -24,6 +24,8 @@ export { createLearnMindFromPatternAction } from "./learn-mind.js";
 export type { LearnMindInput } from "./learn-mind.js";
 export { createDelegateAction } from "./delegate.js";
 export type { DelegateInput, DelegateResult } from "./delegate.js";
+export { createBrowserAction, isAllowedBrowserUrl } from "./browser.js";
+export type { BrowserInput } from "./browser.js";
 export { createWatchAppReturnAction } from "./watch-app-return.js";
 export type {
   WatchAppReturnInput,

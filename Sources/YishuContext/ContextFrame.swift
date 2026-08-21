@@ -127,6 +127,31 @@ public struct AccessibilityElementContext: Codable, Equatable, Sendable {
     }
 }
 
+/// A pressable control in the focused window, numbered in visual order.
+/// Ids are recomputed from a fresh AX walk at click time; they are not AX
+/// pointers and must not be treated as stable across window changes.
+public struct NumberedAccessibilityTarget: Codable, Equatable, Sendable {
+    public let id: String
+    public let role: String?
+    public let title: String?
+    public let description: String?
+    public let enabled: Bool?
+
+    public init(
+        id: String,
+        role: String?,
+        title: String?,
+        description: String?,
+        enabled: Bool?
+    ) {
+        self.id = id
+        self.role = role
+        self.title = title
+        self.description = description
+        self.enabled = enabled
+    }
+}
+
 public struct ScreenshotContext: Codable, Equatable, Sendable {
     public let label: String
     public let mediaType: String
@@ -181,6 +206,7 @@ public struct ContextFrame: Codable, Sendable {
     public let activeWindow: ObservedValue<WindowContext>?
     public let elementUnderCursor: ObservedValue<AccessibilityElementContext>?
     public let screenshots: [ScreenshotContext]
+    public let numberedTargets: [NumberedAccessibilityTarget]
     public let warnings: [String]
 
     public init(
@@ -194,6 +220,7 @@ public struct ContextFrame: Codable, Sendable {
         activeWindow: ObservedValue<WindowContext>?,
         elementUnderCursor: ObservedValue<AccessibilityElementContext>?,
         screenshots: [ScreenshotContext],
+        numberedTargets: [NumberedAccessibilityTarget] = [],
         warnings: [String]
     ) {
         self.schemaVersion = schemaVersion
@@ -206,6 +233,7 @@ public struct ContextFrame: Codable, Sendable {
         self.activeWindow = activeWindow
         self.elementUnderCursor = elementUnderCursor
         self.screenshots = Array(screenshots.prefix(4))
+        self.numberedTargets = Array(numberedTargets.prefix(50))
         self.warnings = warnings
     }
 
@@ -357,6 +385,25 @@ extension AccessibilityElementContext {
     }
 }
 
+extension NumberedAccessibilityTarget {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case id
+        case role
+        case title
+        case description
+        case enabled
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeNullable(role, forKey: .role)
+        try container.encodeNullable(title, forKey: .title)
+        try container.encodeNullable(description, forKey: .description)
+        try container.encodeNullable(enabled, forKey: .enabled)
+    }
+}
+
 extension ContextFrame {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -369,6 +416,7 @@ extension ContextFrame {
         case activeWindow
         case elementUnderCursor
         case screenshots
+        case numberedTargets
         case warnings
     }
 
@@ -384,7 +432,40 @@ extension ContextFrame {
         try container.encodeNullable(activeWindow, forKey: .activeWindow)
         try container.encodeNullable(elementUnderCursor, forKey: .elementUnderCursor)
         try container.encode(screenshots, forKey: .screenshots)
+        if !numberedTargets.isEmpty {
+            try container.encode(numberedTargets, forKey: .numberedTargets)
+        }
         try container.encode(warnings, forKey: .warnings)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            schemaVersion: try container.decode(Int.self, forKey: .schemaVersion),
+            frameId: try container.decode(UUID.self, forKey: .frameId),
+            capturedAt: try container.decode(Date.self, forKey: .capturedAt),
+            expiresAt: try container.decode(Date.self, forKey: .expiresAt),
+            cursor: try container.decode(ObservedValue<ScreenPoint>.self, forKey: .cursor),
+            pointerTrail: try container.decode([PointerSample].self, forKey: .pointerTrail),
+            frontmostApplication: try container.decodeIfPresent(
+                ObservedValue<ApplicationContext>.self,
+                forKey: .frontmostApplication
+            ),
+            activeWindow: try container.decodeIfPresent(
+                ObservedValue<WindowContext>.self,
+                forKey: .activeWindow
+            ),
+            elementUnderCursor: try container.decodeIfPresent(
+                ObservedValue<AccessibilityElementContext>.self,
+                forKey: .elementUnderCursor
+            ),
+            screenshots: try container.decode([ScreenshotContext].self, forKey: .screenshots),
+            numberedTargets: try container.decodeIfPresent(
+                [NumberedAccessibilityTarget].self,
+                forKey: .numberedTargets
+            ) ?? [],
+            warnings: try container.decode([String].self, forKey: .warnings)
+        )
     }
 }
 

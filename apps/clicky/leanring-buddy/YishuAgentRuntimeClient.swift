@@ -2715,14 +2715,40 @@ final class YishuAgentRuntimeClient {
         )
         switch action {
         case "left_click":
-            guard let x = doubleValue(payload["x"]),
-                  let y = doubleValue(payload["y"]),
+            let targetId = Self.normalizedTargetId(payload["targetId"])
+            let x = doubleValue(payload["x"])
+            let y = doubleValue(payload["y"])
+            let hasPoint = x != nil && y != nil
+            guard isValidScreenPayloadValue(payload["screen"]),
+                  isValidOptionalLabelPayloadValue(payload["label"]) else {
+                return nil
+            }
+            if let targetId {
+                if let x, let y, (!x.isFinite || !y.isFinite || x < 0 || y < 0) {
+                    return nil
+                }
+                return YishuComputerActionRequest(
+                    requestId: requestId,
+                    traceId: traceId,
+                    actionId: actionId,
+                    action: action,
+                    x: x ?? 0,
+                    y: y ?? 0,
+                    screen: (payload["screen"] as? NSNumber)?.intValue,
+                    label: Self.normalizedOptionalLabel(payload["label"]),
+                    targetId: targetId,
+                    intentId: common.intentId,
+                    attemptId: common.attemptId,
+                    basisFrameId: common.basisFrameId,
+                    effectClass: common.effectClass
+                )
+            }
+            guard hasPoint,
+                  let x, let y,
                   x.isFinite,
                   y.isFinite,
                   x >= 0,
-                  y >= 0,
-                  isValidScreenPayloadValue(payload["screen"]),
-                  isValidOptionalLabelPayloadValue(payload["label"]) else {
+                  y >= 0 else {
                 return nil
             }
             return YishuComputerActionRequest(
@@ -2907,6 +2933,15 @@ final class YishuAgentRuntimeClient {
         guard let string = value as? String else { return nil }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func normalizedTargetId(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Int(trimmed), (1...50).contains(value), String(value) == trimmed else {
+            return nil
+        }
+        return trimmed
     }
 
     static func isValidOptionalEffectClassPayloadValue(_ value: Any?) -> Bool {

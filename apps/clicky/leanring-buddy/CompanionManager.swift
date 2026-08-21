@@ -160,6 +160,7 @@ private struct HeldSceneCache {
     let startedAt: Date
     let frontmostProcessIdentifier: pid_t?
     let displayFingerprint: String
+    let activeWindowNumber: Int?
     let traceID: String
 }
 
@@ -324,13 +325,12 @@ final class CompanionManager: ObservableObject {
     private let trailSampleIntervalNanoseconds: UInt64 = 5_000_000_000
 
     /// A terminal delegated result remains in ResultInbox; this queue only
-    /// controls its one-time, conversation-scoped return beside the cursor.
+    /// controls its one-time, conversation-scoped spoken return.
     private var delegatedTaskReturnState = YishuDelegatedTaskReturnState()
     private var delegatedTaskReturnQueues: [UUID: [YishuDelegatedTaskPresenceEvent]] = [:]
     private var delegatedTaskReturnProcessingTask: Task<Void, Never>?
     private var delegatedTaskReturnProcessingToken: UUID?
     private var activeDelegatedTaskReturnID: UUID?
-    private let delegatedReturnQuietInterval: TimeInterval = 3
     /// System delivery is global rather than tied to whichever conversation is
     /// currently open. The identifier is remembered in a small in-memory ring
     /// so duplicated foreground callbacks never speak twice.
@@ -1044,11 +1044,12 @@ final class CompanionManager: ObservableObject {
         }
         agentPresenceWindowManager.onPresentResult = { [weak self] task in
             guard let self else { return }
+            guard task.taskKind == .contextReminder else { return }
             self.interruptDelegatedTaskReturnForForegroundTurn()
             self.suppressDelegatedTaskReturn(task.id)
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let text = await self.spokenTextForDelegatedReturn(task)
+                let text = self.spokenTextForDelegatedReturn(task)
                 self.responseOverlayManager.showStaticMessage(text, autoHideAfter: 12)
                 try? await Task.sleep(nanoseconds: 12_000_000_000)
                 self.scheduleDelegatedTaskReturnProcessing()
@@ -1301,22 +1302,12 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    /// Auto-return speaks the already-unwrapped finding. A second model
+    /// excerpt can take 20s and miss the 4s chip.
     private func spokenTextForDelegatedReturn(
         _ task: YishuDelegatedTaskPresenceEvent
-    ) async -> String {
-        let fallback = task.returnAnnouncementText ?? task.statusLabel
-        guard task.shouldExcerptSpokenFinding else { return fallback }
-        do {
-            let spoken = try await yishuAgentRuntimeClient.excerptSpeech(
-                visibleText: fallback,
-                provider: task.provider ?? selectedModelProvider,
-                model: task.model ?? selectedModel
-            )
-            let trimmed = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? fallback : trimmed
-        } catch {
-            return fallback
-        }
+    ) -> String {
+        task.returnAnnouncementText ?? task.statusLabel
     }
 
     private func enqueueDelegatedTaskReturn(_ task: YishuDelegatedTaskPresenceEvent) {
@@ -1431,10 +1422,12 @@ final class CompanionManager: ObservableObject {
                       self.delegatedTaskReturnQueues[conversationID]?.first?.id == task.id,
                       task.returnAnnouncementText != nil else { continue }
 
-                let text = await self.spokenTextForDelegatedReturn(task)
+                let text = self.spokenTextForDelegatedReturn(task)
                 self.activeDelegatedTaskReturnID = task.id
-                self.ensureOverlayVisibleForVoiceFeedback()
-                self.responseOverlayManager.showStaticMessage(text, autoHideAfter: 12)
+                if task.taskKind == .contextReminder {
+                    self.ensureOverlayVisibleForVoiceFeedback()
+                    self.responseOverlayManager.showStaticMessage(text, autoHideAfter: 12)
+                }
                 do {
                     try await self.elevenLabsTTSClient.speakText(
                         text,
@@ -1448,8 +1441,6 @@ final class CompanionManager: ObservableObject {
                     // queued so it can return after the foreground turn ends.
                     return
                 } catch {
-                    // The overlay was rendered even though voice failed. Treat
-                    // that visible delivery as complete and avoid a restart flood.
                     print("⚠️ 奕枢后台任务回访 TTS 失败")
                 }
                 guard !Task.isCancelled,
@@ -1475,14 +1466,11 @@ final class CompanionManager: ObservableObject {
                 || yishuAgentRuntimeClient.hasActiveTurn
                 || isPushToTalkKeyHeld
                 || elevenLabsTTSClient.isPlaying
-            let secondsSinceLastUserInput = CGEventSource.secondsSinceLastEventType(
-                .hidSystemState,
-                eventType: CGEventType(rawValue: UInt32.max)!
-            )
+            // quietInterval is 0: HID idle is not a gate. Do not sample it.
             if YishuDelegatedTaskReturnState.canPresent(
                 foregroundBusy: foregroundBusy,
-                secondsSinceLastUserInput: secondsSinceLastUserInput,
-                quietInterval: delegatedReturnQuietInterval
+                secondsSinceLastUserInput: 0,
+                quietInterval: 0
             ) {
                 return true
             }
@@ -2644,8 +2632,9 @@ final class CompanionManager: ObservableObject {
         heldSceneCache = nil
         let startedAt = Date()
         let capturedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
-        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let displayFingerprint = Self.currentDisplayFingerprint()
+        let identity = yishuContextFrameCollector.liveSceneIdentity(
+            displayFingerprint: Self.currentDisplayFingerprint()
+        )
         heldSceneTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let context = await self.yishuContextFrameCollector.capture(pointerSince: startedAt)
@@ -2654,8 +2643,9 @@ final class CompanionManager: ObservableObject {
                 context: context,
                 capturedAtUptimeNanoseconds: capturedAtUptimeNanoseconds,
                 startedAt: startedAt,
-                frontmostProcessIdentifier: frontmost,
-                displayFingerprint: displayFingerprint,
+                frontmostProcessIdentifier: identity.frontmostProcessIdentifier,
+                displayFingerprint: identity.displayFingerprint,
+                activeWindowNumber: identity.activeWindowNumber,
                 traceID: traceID
             )
         }
@@ -2675,14 +2665,19 @@ final class CompanionManager: ObservableObject {
             await heldSceneTask.value
         }
         let held = heldSceneCache
+        let current = yishuContextFrameCollector.liveSceneIdentity(
+            displayFingerprint: Self.currentDisplayFingerprint()
+        )
         let decision = YishuHeldScenePolicy.decide(
             requiresActiveWindowOnly: Self.requiresCurrentPageNoteWindow(transcript),
             heldTraceID: held?.traceID,
             turnTraceID: traceID,
             heldFrontmost: held?.frontmostProcessIdentifier,
-            currentFrontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            currentFrontmost: current.frontmostProcessIdentifier,
             heldDisplay: held?.displayFingerprint ?? "",
-            currentDisplay: Self.currentDisplayFingerprint(),
+            currentDisplay: current.displayFingerprint,
+            heldWindowNumber: held?.activeWindowNumber,
+            currentWindowNumber: current.activeWindowNumber,
             capturedAt: held?.capturedAtUptimeNanoseconds,
             now: DispatchTime.now().uptimeNanoseconds
         )
@@ -3349,6 +3344,7 @@ final class CompanionManager: ObservableObject {
                     let result = await YishuComputerUseActuator.perform(
                         request,
                         screenCaptures: screenCaptures,
+                        numberedTargets: contextFrame.numberedTargets,
                         authorizationFence: { [weak self] in
                             self?.activeRuntimeRequestId == turn.requestId
                                 && self?.ownsVoiceTurn(turnToken) == true

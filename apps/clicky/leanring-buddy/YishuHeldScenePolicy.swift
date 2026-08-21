@@ -8,9 +8,39 @@ enum YishuHeldSceneDecision: String, Equatable {
     case recaptureMissingBasis
 }
 
+struct YishuHeldSceneIdentity: Equatable {
+    var frontmostProcessIdentifier: pid_t?
+    var activeWindowNumber: Int?
+    var displayFingerprint: String
+}
+
 enum YishuHeldScenePolicy {
-    /// Matches ContextFrame evidence lifetime. App/display change still wins.
+    /// Matches ContextFrame evidence lifetime. App/display/window change still wins.
     static let maxAgeNanoseconds: UInt64 = 30_000_000_000
+
+    /// Same frontmost app, display arrangement, and focused window.
+    /// Missing window numbers on both sides still match (window list can be empty);
+    /// one side missing and the other present is a scene change.
+    static func isSameLiveScene(
+        _ held: YishuHeldSceneIdentity,
+        _ current: YishuHeldSceneIdentity
+    ) -> Bool {
+        guard let heldFrontmost = held.frontmostProcessIdentifier,
+              let currentFrontmost = current.frontmostProcessIdentifier,
+              heldFrontmost == currentFrontmost,
+              !held.displayFingerprint.isEmpty,
+              held.displayFingerprint == current.displayFingerprint else {
+            return false
+        }
+        switch (held.activeWindowNumber, current.activeWindowNumber) {
+        case let (heldWindow?, currentWindow?):
+            return heldWindow == currentWindow
+        case (nil, nil):
+            return true
+        default:
+            return false
+        }
+    }
 
     static func decide(
         requiresActiveWindowOnly: Bool,
@@ -20,6 +50,8 @@ enum YishuHeldScenePolicy {
         currentFrontmost: pid_t?,
         heldDisplay: String,
         currentDisplay: String,
+        heldWindowNumber: Int?,
+        currentWindowNumber: Int?,
         capturedAt: UInt64?,
         now: UInt64
     ) -> YishuHeldSceneDecision {
@@ -37,9 +69,17 @@ enum YishuHeldScenePolicy {
         guard now >= capturedAt, now - capturedAt <= maxAgeNanoseconds else {
             return .recaptureStale
         }
-        guard heldFrontmost == currentFrontmost,
-              !heldDisplay.isEmpty,
-              heldDisplay == currentDisplay else {
+        let held = YishuHeldSceneIdentity(
+            frontmostProcessIdentifier: heldFrontmost,
+            activeWindowNumber: heldWindowNumber,
+            displayFingerprint: heldDisplay
+        )
+        let current = YishuHeldSceneIdentity(
+            frontmostProcessIdentifier: currentFrontmost,
+            activeWindowNumber: currentWindowNumber,
+            displayFingerprint: currentDisplay
+        )
+        guard isSameLiveScene(held, current) else {
             return .recaptureSceneChanged
         }
         return .reuse

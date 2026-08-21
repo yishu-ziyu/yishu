@@ -516,6 +516,18 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
         return status == .done || status == .blocked
     }
 
+    var chipFindingLine: String? {
+        guard taskKind == .delegated else { return nil }
+        guard status == .done || status == .blocked else { return nil }
+        guard let spoken = returnAnnouncementText else { return nil }
+        return Self.returnExcerpt(from: spoken, maximum: 18)
+    }
+
+    var pocketFindingText: String? {
+        guard taskKind == .delegated else { return nil }
+        return summary.flatMap { Self.stripVisibleNoise(from: $0) }
+    }
+
     private static func userFacingResultExcerpt(from rawText: String, title: String) -> String? {
         guard var text = stripVisibleNoise(from: rawText) else { return nil }
         text = stripLeadingQuotedRequest(from: text, title: title)
@@ -632,7 +644,7 @@ struct YishuDelegatedTaskPresenceEvent: Identifiable, Equatable {
                 if ends == 2 { break }
             }
         }
-        if ends > 0 {
+        if ends == 2 {
             text = String(text[..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if text.count > maximum {
@@ -805,7 +817,7 @@ final class AgentPresenceViewModel: ObservableObject {
 }
 
 enum AgentPresencePlacement {
-    static let panelSize = CGSize(width: 176, height: 48)
+    static let panelSize = CGSize(width: 260, height: 48)
     static let edgeInset: CGFloat = 14
     static let savedAnchorKey = "yishu.presence.anchor-center.v1"
 
@@ -1291,9 +1303,11 @@ final class AgentPresenceWindowManager: NSObject {
         if activeCount > 1 { return "还在做几件事" }
         let failedCount = tasks.filter { $0.status == .failed || $0.status == .interrupted }.count
         if failedCount > 0 { return "没做成" }
-        let readyCount = tasks.filter { $0.status == .done || $0.status == .blocked }.count
-        if readyCount == 1 { return "做好了" }
-        if readyCount > 1 { return "有几件做好了" }
+        let readyTasks = tasks.filter { $0.status == .done || $0.status == .blocked }
+        if readyTasks.count == 1 {
+            return readyTasks[0].chipFindingLine ?? "做好了"
+        }
+        if readyTasks.count > 1 { return "有几件做好了" }
         return "已经停下"
     }
 
@@ -1593,9 +1607,10 @@ struct TaskStatusCard: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.red.opacity(0.78))
                     .disabled(cancelState == .requesting || cancelState == .accepted)
-                } else if task.status == .done || task.status == .blocked {
+                } else if task.taskKind == .contextReminder,
+                          task.status == .done || task.status == .blocked {
                     Button(action: { onResult(task) }) {
-                        Text(task.taskKind == .contextReminder ? "查看提醒" : "查看结果")
+                        Text("查看提醒")
                             .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                             .padding(.horizontal, 9)
                             .padding(.vertical, 5)
@@ -1610,6 +1625,13 @@ struct TaskStatusCard: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(DS.Colors.overlayCursorBlue)
                 }
+            }
+
+            if let finding = task.pocketFindingText {
+                Text(finding)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(DS.Colors.overlayResponseInk.opacity(0.78))
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let requestMessage = cancelRequestMessage {

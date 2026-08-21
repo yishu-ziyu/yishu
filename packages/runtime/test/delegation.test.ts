@@ -125,7 +125,7 @@ class FakeChildHarness {
 function makeCoordinator(
   harness: FakeChildHarness,
   now?: () => Date,
-  extras: Pick<DelegationCoordinatorDeps, "excerptSpokenFinding"> = {},
+  extras: Partial<Pick<DelegationCoordinatorDeps, "onSettledTask">> = {},
 ): { coordinator: DelegationCoordinator; kernel: ReturnType<typeof createYishuKernel> } {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const coordinator = new DelegationCoordinator({
@@ -201,8 +201,12 @@ function delegateToolFor(
 ): ExecutableTool {
   const policy = coordinator.sessionToolPolicyFor(conversationId);
   assert.equal(policy.computerControl, true, "main conversations keep computer control");
-  assert.equal(policy.extraTools.length, 1, "main conversation must receive one delegate tool");
-  return policy.extraTools[0] as unknown as ExecutableTool;
+  const names = policy.extraTools.map((tool) => tool.name);
+  assert.ok(names.includes("web_search"), "main conversation searches the public web in-loop");
+  assert.ok(names.includes("delegate"), "main conversation may still delegate long work");
+  const tool = policy.extraTools.find((candidate) => candidate.name === "delegate");
+  assert.ok(tool, "main conversation must receive the delegate tool");
+  return tool as unknown as ExecutableTool;
 }
 
 test("ResultInbox is durable, conversation-scoped, and claim/ack based", async () => {
@@ -263,7 +267,7 @@ test("runtime-owned child identity gives child only web search", async (t) => {
   // Unrelated conversations are unaffected.
   const otherPolicy = coordinator.sessionToolPolicyFor("conv-other");
   assert.equal(otherPolicy.computerControl, true);
-  assert.equal(otherPolicy.extraTools.length, 1);
+  assert.deepEqual(otherPolicy.extraTools.map((candidate) => candidate.name), ["web_search", "delegate"]);
 });
 
 test("delegate returns an accepted receipt immediately; child runs in background with schema-valid command", async (t) => {
@@ -583,8 +587,7 @@ test("delegate refuses private sessions and missing main turns", async (t) => {
 
   // Private scope: refused at the tool boundary, no TaskTruth, no child call.
   coordinator.noteMainTurn("conv-private", makeMainTurn({ sessionScope: { kind: "private" } }));
-  const privatePolicy = coordinator.sessionToolPolicyFor("conv-private");
-  const privateTool = privatePolicy.extraTools[0] as unknown as ExecutableTool;
+  const privateTool = delegateToolFor(coordinator, "conv-private");
   await assert.rejects(privateTool.execute("tc", { task: "私密任务" }), /private/);
 
   // No active main turn: structurally unavailable.
@@ -647,25 +650,20 @@ test("any receipt-shaped child finding is stored through the spoken mouth", asyn
     {
       title: "查深圳明天天气预报",
       body: "「查深圳明天天气预报」整理好了。深圳明天中雨,28℃。源:https://tianqi.example/s",
-      spoken: "深圳明天中雨，28度。",
     },
     {
       title: "Look up Acme close",
       body: "Done researching Look up Acme close. Acme closed at 12. https://example.com/a",
-      spoken: "Acme closed at 12.",
     },
     {
       title: "整理三层记忆结论",
       body: "根据您的要求，任务已完成。结论是三层记忆。来源：https://notes.example/m",
-      spoken: "结论是三层记忆。",
     },
     {
       title: "查叶问公开动态",
       body: "搞定了。叶问明晚有纪录片。",
-      spoken: "叶问明晚有纪录片。",
     },
   ];
-  const excerpted: string[] = [];
   const harness = new FakeChildHarness();
   for (const item of cases) {
     harness.handlers.push(async (emit) => {
@@ -676,13 +674,7 @@ test("any receipt-shaped child finding is stored through the spoken mouth", asyn
       }));
     });
   }
-  const spokenByTitle = new Map(cases.map((item) => [item.title, item.spoken]));
-  const { coordinator } = makeCoordinator(harness, undefined, {
-    excerptSpokenFinding: async ({ text, title }) => {
-      excerpted.push(title);
-      return spokenByTitle.get(title) ?? text;
-    },
-  });
+  const { coordinator } = makeCoordinator(harness);
   t.after(async () => {
     await coordinator.dispose();
   });
@@ -698,8 +690,12 @@ test("any receipt-shaped child finding is stored through the spoken mouth", asyn
     "all spoken inbox rows",
   );
   const entries = await coordinator.claimForTurn("conv-main", randomUUID());
-  assert.deepEqual(entries.map((entry) => entry.summary).sort(), cases.map((item) => item.spoken).sort());
-  assert.deepEqual(excerpted.sort(), cases.map((item) => item.title).sort());
+  const expected = cases.map((item) => spokenDelegatedDeliverable(item.body, item.title));
+  assert.deepEqual(entries.map((entry) => entry.summary).sort(), expected.sort());
+  for (const summary of expected) {
+    assert.doesNotMatch(summary, /https?:\/\//);
+    assert.doesNotMatch(summary, /tianqi|example\.com|notes\.example/);
+  }
 });
 
 test("unsafe or overlong child deliverables stay blocked", async (t) => {
@@ -909,8 +905,9 @@ test("private turns never receive delegated results", async (t) => {
 });
 
 // --- Full-stack boundary: real YishuLoopRuntimeAdapter createSession edge ---------
-// The Main session must receive delegate + computer_control; the delegated
-// child session must receive neither. The child command must satisfy the full
+// The Main session must receive web_search + delegate + computer_control.
+// The child session must not receive computer_control or recursive delegate.
+// The child command must satisfy the full
 // wire schema, inherit the Main model, and an unverified research answer must
 // not become done. The fake harness mirrors pi-runtime-adapter.test.ts.
 
@@ -1077,9 +1074,10 @@ test("at the real createSession boundary a safe conversation result completes an
   await waitFor(() => sessions.length === 1, "main session created");
   await sessions[0]!.promptStarted.promise;
 
-  // Main session: computer_control + delegate are both present.
+  // Main session: computer_control + web_search + delegate are present.
   const mainToolNames = sessionCalls[0]!.customTools.map((tool) => tool.name);
   assert.ok(mainToolNames.includes("computer_control"), "main keeps computer_control");
+  assert.ok(mainToolNames.includes("web_search"), "main searches the public web in-loop");
   assert.ok(mainToolNames.includes("delegate"), "main receives delegate");
 
   // Drive the delegate tool exactly as the Pi session would.
@@ -1089,12 +1087,13 @@ test("at the real createSession boundary a safe conversation result completes an
   });
   const taskId = accepted.details.taskId;
 
-  // Child session appears at the real createSession boundary with only web search.
+  // Child session appears at the real createSession boundary with web search
+  // and the agent-owned browser, still no Desktop and no recursive delegate.
   await waitFor(() => sessions.length === 2, "child session created");
   const childToolNames = sessionCalls[1]!.customTools.map((tool) => tool.name);
   assert.equal(childToolNames.includes("computer_control"), false, "child must not get computer_control");
   assert.equal(childToolNames.includes("delegate"), false, "child must not get delegate (no recursion)");
-  assert.deepEqual(childToolNames, ["web_search"]);
+  assert.deepEqual(childToolNames, ["web_search", "browser"]);
 
   // The child command satisfies the full wire schema and inherits the model.
   const childCommand = startTurnCalls.find(

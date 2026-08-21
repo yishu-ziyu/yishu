@@ -18,6 +18,7 @@ import {
   authStatusCommandSchema,
   clientCommandSchema,
   computerActionMethodSchema,
+  computerActionSchema,
   computerActionRequestedPayloadSchema,
   computerActionResultCodeSchema,
   computerActionResultCommandSchema,
@@ -573,6 +574,33 @@ test("speech.excerpt is a versioned client command at protocol 1", () => {
   }));
 });
 
+test("left_click accepts numbered target ids without pixels", () => {
+  const actionId = makeTurnStartCommand().requestId;
+  const parsed = computerActionRequestedPayloadSchema.parse({
+    actionId,
+    action: "left_click",
+    targetId: "3",
+  });
+  assert.equal(parsed.action, "left_click");
+  assert.equal(parsed.targetId, "3");
+  assert.equal(parsed.x, undefined);
+  assert.throws(() => computerActionSchema.parse({ action: "left_click" }));
+  assert.throws(() => computerActionSchema.parse({ action: "left_click", x: 10 }));
+});
+
+test("grounded prompt lists numbered AX targets for click-by-id", () => {
+  const command = makeTurnStartCommand();
+  command.payload.contextFrame.numberedTargets = [
+    { id: "1", role: "AXButton", title: "Back", description: "后退", enabled: true },
+    { id: "2", role: "AXButton", title: "General", description: null, enabled: true },
+  ];
+  const prompt = buildGroundedPrompt(command);
+  assert.match(prompt, /<numbered_targets>/);
+  assert.match(prompt, /1\. AXButton Back/);
+  assert.match(prompt, /targetId/);
+  assert.doesNotMatch(prompt, /c2NyZWVu/);
+});
+
 test("grounded prompt includes evidence but never screenshot bytes", () => {
   const prompt = buildGroundedPrompt(makeTurnStartCommand());
   assert.match(prompt, /Markup/);
@@ -695,6 +723,12 @@ test("Yishu persona keeps agency without leaking private reflection", () => {
   assert.match(YISHU_SYSTEM_PROMPT, /光球/);
   assert.match(YISHU_SYSTEM_PROMPT, /\[POINT:x,y:标签\]/);
   assert.match(YISHU_SYSTEM_PROMPT, /image dimensions/);
+  assert.match(YISHU_SYSTEM_PROMPT, /numberedTargets/);
+  assert.match(YISHU_SYSTEM_PROMPT, /targetId/);
+  assert.match(YISHU_SYSTEM_PROMPT, /web_search/);
+  assert.match(YISHU_SYSTEM_PROMPT, /不要为此派后台/);
+  assert.match(YISHU_SYSTEM_PROMPT, /computer_control/);
+  assert.match(YISHU_SYSTEM_PROMPT, /browser/);
 });
 
 test("screenshot captions copy Clicky's pixel-dimension glue", () => {

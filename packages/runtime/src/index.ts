@@ -7,6 +7,8 @@ export * from "./assistant-output.js";
 export * from "./intent-frame.js";
 export * from "./computer-control-tool.js";
 export * from "./computer-use-port.js";
+export * from "./browser-tool.js";
+export * from "./browser-session.js";
 export * from "./context-prompt.js";
 export * from "./mock-runtime.js";
 export * from "./persona.js";

@@ -96,6 +96,8 @@ import {
   type MemoryExtractionModel,
 } from "@yishu/kernel";
 import type { SpeechExcerptModel } from "./speech-excerpt-model.js";
+import { BrowserSessionHub } from "./browser-session.js";
+import { openStagehandDriver } from "./stagehand-browser-driver.js";
 import { EverOSIngestionCoordinator } from "./everos-ingestion.js";
 import type { EverOSPendingSessionStore } from "./everos-pending-sessions.js";
 import { ingestVerifiedTaskLearning } from "./everos-task-learning.js";
@@ -379,6 +381,7 @@ export class ProductKernelRuntime implements AgentRuntime {
   private trailObservationTail: Promise<void> = Promise.resolve();
   /** Runtime side of delegated execution; public like `kernel` for tests/UI seams. */
   readonly delegation: DelegationCoordinator;
+  private readonly browserSessions: BrowserSessionHub;
   private ledgerTail: Promise<void> = Promise.resolve();
   private readonly recoveryReady: Promise<void>;
   private activeTrailScopeKey: string | undefined;
@@ -414,6 +417,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     } = {},
   ) {
     this.kernel = kernel;
+    this.browserSessions = new BrowserSessionHub(openStagehandDriver);
     this.speechExcerptModel = options.speechExcerptModel;
     this.everos = options.everos;
     this.everosIngestion = options.everos === undefined
@@ -440,32 +444,23 @@ export class ProductKernelRuntime implements AgentRuntime {
                 .catch(() => undefined);
             },
           }),
-      ...(this.speechExcerptModel
-        ? {
-            excerptSpokenFinding: async ({ text, providerId, modelId }) => {
-              if (!providerId || !modelId || !this.speechExcerptModel) return text;
-              return this.speechExcerptModel.excerpt({
-                providerId,
-                modelId,
-                visibleText: text,
-              });
-            },
-          }
-        : {}),
       ...("releaseConversationSession" in this.inner
         && typeof (this.inner as { releaseConversationSession?: unknown }).releaseConversationSession === "function"
         ? {
             releaseConversationSession: (conversationId: string) => {
+              void this.browserSessions.close(conversationId);
               (this.inner as unknown as { releaseConversationSession(id: string): void })
                 .releaseConversationSession(conversationId);
             },
           }
         : {}),
+      browser: this.browserSessions,
     });
     this.recoveryReady = this.recoverDurableDelegationState();
     // Additive seam: PiRuntimeAdapter asks this coordinator for the session
-    // tool policy at the createSession boundary (Main keeps computer_control
-    // and gets delegate; delegated children get neither). Other AgentRuntime
+    // tool policy at the createSession boundary (Main keeps computer_control,
+    // web_search, and delegate; delegated children get web_search but neither
+    // computer_control nor recursive delegate). Other AgentRuntime
     // implementations simply lack the method. The policy stays structurally
     // typed so Pi-specific tool types never leak into this product wrapper.
     (
@@ -2649,6 +2644,7 @@ export class ProductKernelRuntime implements AgentRuntime {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    void this.browserSessions.dispose();
     const everosDispose = this.everosIngestion?.dispose().catch(() => undefined)
       ?? Promise.resolve();
     if (this.extractionDrainTimer !== undefined) {
@@ -4009,11 +4005,20 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
 
   const result: ClientEventPayload = { actionId, action };
   if (action === "left_click") {
+    const targetId = typeof payload.targetId === "string" && /^[1-9][0-9]?$/.test(payload.targetId)
+      ? payload.targetId
+      : undefined;
     const x = finiteNonNegative(payload.x);
     const y = finiteNonNegative(payload.y);
-    if (x === undefined || y === undefined) return undefined;
-    result.x = x;
-    result.y = y;
+    if (targetId !== undefined) {
+      result.targetId = targetId;
+    } else if (x === undefined || y === undefined) {
+      return undefined;
+    }
+    if (x !== undefined && y !== undefined) {
+      result.x = x;
+      result.y = y;
+    }
   } else if (action === "finder_history_back") {
     if (payload.targetBundleId !== "com.apple.finder" || !Number.isInteger(payload.targetPid)) {
       return undefined;

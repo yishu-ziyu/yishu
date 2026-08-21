@@ -24,6 +24,7 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ToolDefinition } from "./model-loop/types.js";
 import type {
+  BrowserExecutor,
   DelegatedResultRecord,
   DelegatedTaskSequenceStep,
   SessionScope,
@@ -55,6 +56,7 @@ import { terminalTaskProgressKindFor } from "./task-progress.js";
 import { contextFrameToTrailSource } from "./trail-source.js";
 import { wrapUntrustedContent } from "./untrusted-content.js";
 import { createWebSearchTool } from "./web-search-tool.js";
+import { createBrowserTool } from "./browser-tool.js";
 
 /** Delivery metadata describing what kind of result this is — never a task status. */
 export type DelegatedResultKind = "succeeded" | "completed" | "unverified" | "failed" | "cancelled";
@@ -104,13 +106,6 @@ const QUOTE_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ["\"", "\""],
   ["'", "'"],
 ];
-
-export interface SpokenFindingExcerptInput {
-  text: string;
-  title: string;
-  providerId?: string;
-  modelId?: string;
-}
 
 /** Structural unwrap only. Wrapper language is the spoken mouth's job. */
 export function spokenDelegatedDeliverable(rawSummary: string, title = ""): string {
@@ -350,10 +345,10 @@ export interface DelegationCoordinatorDeps {
   cancelTurn: (command: TurnCancelCommand, emit: (event: RuntimeEvent) => void) => Promise<void>;
   /** Release one completed child Pi session without touching Main sessions. */
   releaseConversationSession?: (conversationId: string) => void;
-  /** Same spoken mouth as a live turn. Wrapper language is not a word list. */
-  excerptSpokenFinding?: (input: SpokenFindingExcerptInput) => Promise<string>;
   /** Optional observer after TaskTruth and the inbox row exist. */
   onSettledTask?: (task: SettledDelegatedTask) => void;
+  /** Agent-owned browser sessions. Absent in tests that do not cover browser.*. */
+  browser?: { bind(conversationId: string): BrowserExecutor };
   now?: () => Date;
 }
 
@@ -389,8 +384,8 @@ export class DelegationCoordinator {
   private readonly executeTurn: DelegationCoordinatorDeps["executeTurn"];
   private readonly cancelTurn: DelegationCoordinatorDeps["cancelTurn"];
   private readonly releaseConversationSession: ((conversationId: string) => void) | undefined;
-  private readonly excerptSpokenFinding: DelegationCoordinatorDeps["excerptSpokenFinding"];
   private readonly onSettledTask: DelegationCoordinatorDeps["onSettledTask"];
+  private readonly browser: DelegationCoordinatorDeps["browser"];
   private readonly now: () => Date;
   readonly inbox: ResultInbox;
   private readonly mainTurns = new Map<string, MainTurnHandle>();
@@ -406,8 +401,8 @@ export class DelegationCoordinator {
     this.executeTurn = deps.executeTurn;
     this.cancelTurn = deps.cancelTurn;
     this.releaseConversationSession = deps.releaseConversationSession;
-    this.excerptSpokenFinding = deps.excerptSpokenFinding;
     this.onSettledTask = deps.onSettledTask;
+    this.browser = deps.browser;
     this.now = deps.now ?? (() => new Date());
     this.inbox = new ResultInbox(deps.kernel.store);
   }
@@ -465,21 +460,31 @@ export class DelegationCoordinator {
 
   /**
    * Tool surface for a session about to be created, decided by runtime-owned
-   * child identity: child sessions get no computer control and no delegate
-   * tool (recursion and Desktop access are structurally impossible); Main
-   * sessions keep computer control and receive the delegate tool.
+   * child identity. Main and child both search the public web in-loop.
+   * Child sessions get no computer control and no delegate (recursion and
+   * Desktop access are structurally impossible). Main keeps computer control
+   * and may delegate only work this turn cannot finish.
    */
   sessionToolPolicyFor(conversationId: string): SessionToolPolicy {
+    const browserTool = this.createBrowserTool(conversationId);
+    const webSearch = createWebSearchTool() as unknown as ToolDefinition;
     if (this.childConversations.has(conversationId)) {
       return {
         computerControl: false,
-        extraTools: [createWebSearchTool() as unknown as ToolDefinition],
+        extraTools: [
+          webSearch,
+          ...(browserTool === undefined ? [] : [browserTool]),
+        ],
       };
     }
     const activeMainTurn = this.mainTurns.get(conversationId);
     return {
       computerControl: true,
-      extraTools: [this.createDelegateTool(conversationId)],
+      extraTools: [
+        webSearch,
+        this.createDelegateTool(conversationId),
+        ...(browserTool === undefined ? [] : [browserTool]),
+      ],
       // Registered in every Main Pi session so an existing conversation can
       // enable it for one turn without a cold start.  It stays inactive unless
       // the current live Main turn owns the narrow request below.
@@ -488,6 +493,18 @@ export class DelegationCoordinator {
         ? ["delegate"]
         : ["delegate", "save_current_page_actions_to_note"],
     };
+  }
+
+  private createBrowserTool(conversationId: string): ToolDefinition | undefined {
+    if (this.browser === undefined) return undefined;
+    const executor = this.browser.bind(conversationId);
+    return createBrowserTool(async (request, signal) => (
+      this.kernel.registry.invoke("browser", {
+        caller: "pi",
+        input: request,
+        ...(signal === undefined ? {} : { signal }),
+      }, { browser: executor })
+    )) as unknown as ToolDefinition;
   }
 
   private createCurrentPageNoteTool(conversationId: string): ToolDefinition {
@@ -592,16 +609,19 @@ export class DelegationCoordinator {
       name: "delegate",
       label: "Delegate task",
       description: [
-        "Start an independent background task and continue the conversation immediately.",
-        "Use when the user asks for research or work that can run in the background",
-        "while you keep talking. The result will be delivered in a later turn.",
+        "Start an independent background task the user can wait for, and continue talking.",
+        "Use only when this turn cannot finish the work: long research, many steps,",
+        "or work that should keep running while you keep talking.",
+        "Do not delegate a current public-fact lookup this turn can finish with web_search.",
+        "Do not delegate the user's visible window (computer_control) or an agent-owned page (browser).",
         "May run alongside other non-screen work in the same turn.",
       ].join(" "),
-      promptSnippet: "Delegate a background task and reply right away without waiting for it.",
+      promptSnippet: "Delegate only work this turn cannot finish; reply without waiting for it.",
       promptGuidelines: [
         "After a successful delegate call, confirm briefly that the task started; do not wait for the result.",
         "Never call delegate from within a delegated task.",
         "Never delegate a relative-time reminder such as 'N minutes from now'. That is a product action, not background work.",
+        "Never delegate a single current-fact lookup web_search can finish in this turn.",
       ],
       parameters,
       executionMode: "parallel",
@@ -854,7 +874,7 @@ export class DelegationCoordinator {
     if (runningChild) runningChild.pendingTerminal = { kind, summary: rawSummary };
 
     const observedAt = this.now().toISOString();
-    const summary = await this.spokenFindingSummary(input, kind, rawSummary);
+    const summary = this.spokenFindingSummary(kind, rawSummary, input.title);
     let projected: TaskTruth | null;
     try {
       projected = await this.kernel.taskTruth.recordWithDelegatedResult({
@@ -910,38 +930,13 @@ export class DelegationCoordinator {
     });
   }
 
-  private async spokenFindingSummary(
-    input: ChildExecutionInput,
+  private spokenFindingSummary(
     kind: DelegatedTerminalKind,
     rawSummary: string,
-  ): Promise<string> {
-    const structural = boundedResultSummary(rawSummary, input.title).summary
+    title: string,
+  ): string {
+    return boundedResultSummary(rawSummary, title).summary
       || `[${RESULT_KIND_FOR[kind]}]`;
-    if (!this.shouldSpeakFinding(kind, structural) || !this.excerptSpokenFinding) {
-      return structural;
-    }
-    try {
-      const spoken = await this.excerptSpokenFinding({
-        text: structural,
-        title: input.title,
-        ...(input.modelPreference
-          ? {
-              providerId: input.modelPreference.provider,
-              modelId: input.modelPreference.model,
-            }
-          : {}),
-      });
-      return boundedResultSummary(spoken, input.title).summary || structural;
-    } catch {
-      return structural;
-    }
-  }
-
-  private shouldSpeakFinding(kind: DelegatedTerminalKind, summary: string): boolean {
-    if (kind === "cancelled" || kind === "failed") return false;
-    const lower = summary.toLowerCase();
-    return !lower.includes("[result summary omitted")
-      && !lower.includes("[delegated result unavailable");
   }
 
   private buildChildCommand(input: {
