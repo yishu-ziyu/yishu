@@ -368,6 +368,7 @@ describe("product actions via createYishuKernel", () => {
     assert.deepEqual(
       [...defaultActionNames].sort(),
       [
+        "browser",
         "delegate",
         "create_note",
         "finder_history_back",

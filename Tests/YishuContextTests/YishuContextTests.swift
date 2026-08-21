@@ -111,6 +111,77 @@ final class ContextFrameTests: XCTestCase {
         XCTAssertEqual(decoded.screenshots.first?.mediaType, "image/jpeg")
         XCTAssertEqual(decoded.screenshots.first?.displayOriginXPoints, -1512)
         XCTAssertEqual(decoded.screenshots.first?.displayOriginYPoints, 240)
+        XCTAssertEqual(decoded.numberedTargets, [])
+        XCTAssertFalse(raw.keys.contains("numberedTargets"))
+    }
+
+    func testLegacyContextFrameWithoutNumberedTargetsStillDecodes() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let frame = ContextFrame(
+            capturedAt: now,
+            expiresAt: now.addingTimeInterval(15),
+            cursor: ObservedValue(
+                value: ScreenPoint(x: 1, y: 1, coordinateSpace: .globalTopLeft),
+                source: "test",
+                capturedAt: now,
+                confidence: 1
+            ),
+            pointerTrail: [],
+            frontmostApplication: nil,
+            activeWindow: nil,
+            elementUnderCursor: nil,
+            screenshots: [],
+            warnings: []
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(frame)) as? [String: Any])
+        raw.removeValue(forKey: "numberedTargets")
+        let data = try JSONSerialization.data(withJSONObject: raw)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(ContextFrame.self, from: data)
+        XCTAssertEqual(decoded.numberedTargets, [])
+    }
+
+    func testNumberedTargetsRoundTripAndCap() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let targets = (1...51).map { index in
+            NumberedAccessibilityTarget(
+                id: String(index),
+                role: "AXButton",
+                title: "B\(index)",
+                description: nil,
+                enabled: true
+            )
+        }
+        let frame = ContextFrame(
+            capturedAt: now,
+            expiresAt: now.addingTimeInterval(15),
+            cursor: ObservedValue(
+                value: ScreenPoint(x: 1, y: 1, coordinateSpace: .globalTopLeft),
+                source: "test",
+                capturedAt: now,
+                confidence: 1
+            ),
+            pointerTrail: [],
+            frontmostApplication: nil,
+            activeWindow: nil,
+            elementUnderCursor: nil,
+            screenshots: [],
+            numberedTargets: targets,
+            warnings: []
+        )
+        XCTAssertEqual(frame.numberedTargets.count, 50)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(frame)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(ContextFrame.self, from: data)
+        XCTAssertEqual(decoded.numberedTargets.count, 50)
+        XCTAssertEqual(decoded.numberedTargets.first?.id, "1")
+        XCTAssertEqual(decoded.numberedTargets.first?.title, "B1")
     }
 
     func testExpiredFrameIsRejected() {

@@ -13,6 +13,7 @@
     "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
+    "@browserbasehq/stagehand": "^4.0.2",
     "@yishu/kernel": "workspace:*",
     "typebox": "1.3.7",
     "zod": "^4.1.12"

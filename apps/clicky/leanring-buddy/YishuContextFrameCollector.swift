@@ -20,7 +20,11 @@ final class YishuContextFrameCollector {
     /// `activeWindowOnly` is reserved for the narrow current-page-to-note
     /// request. Ordinary turns keep their full display evidence unchanged.
     func capture(activeWindowOnly: Bool = false, pointerSince: Date? = nil) async -> YishuCapturedContext {
-        let snapshot = captureMetadata(includePointerTrail: true, pointerSince: pointerSince)
+        let snapshot = captureMetadata(
+            includePointerTrail: true,
+            includeNumberedTargets: true,
+            pointerSince: pointerSince
+        )
         var warnings = snapshot.warnings
         var screenCaptures: [CompanionScreenCapture] = []
         var activeWindowCapture: CompanionWindowCapture?
@@ -71,6 +75,7 @@ final class YishuContextFrameCollector {
             activeWindow: snapshot.activeWindow,
             elementUnderCursor: snapshot.elementUnderCursor,
             screenshots: screenshots,
+            numberedTargets: snapshot.numberedTargets,
             warnings: warnings
         )
 
@@ -87,6 +92,7 @@ final class YishuContextFrameCollector {
                 activeWindow: snapshot.activeWindow,
                 elementUnderCursor: snapshot.elementUnderCursor,
                 screenshots: [],
+                numberedTargets: snapshot.numberedTargets,
                 warnings: warnings + ["context-validation-failed:\(compactError(error))"]
             )
             return YishuCapturedContext(frame: safeFrame, screenCaptures: screenCaptures)
@@ -109,7 +115,11 @@ final class YishuContextFrameCollector {
     /// Metadata-only capture for ContextTrail background sampling.
     /// Omits screenshot bytes so trail.observe stays cheap and private by default.
     func captureTrailSample() -> YishuContextFrame {
-        let snapshot = captureMetadata(includePointerTrail: false, pointerSince: nil)
+        let snapshot = captureMetadata(
+            includePointerTrail: false,
+            includeNumberedTargets: false,
+            pointerSince: nil
+        )
         let frame = YishuContextFrame(
             capturedAt: snapshot.capturedAt,
             expiresAt: snapshot.capturedAt.addingTimeInterval(30),
@@ -119,6 +129,7 @@ final class YishuContextFrameCollector {
             activeWindow: snapshot.activeWindow,
             elementUnderCursor: snapshot.elementUnderCursor,
             screenshots: [],
+            numberedTargets: [],
             warnings: snapshot.warnings + ["trail-sample:no-screenshot"]
         )
         return frame
@@ -131,7 +142,26 @@ final class YishuContextFrameCollector {
         let frontmostApplication: YishuObservedValue<YishuApplicationContext>?
         let activeWindow: YishuObservedValue<YishuWindowContext>?
         let elementUnderCursor: YishuObservedValue<YishuAccessibilityElementContext>?
+        let numberedTargets: [YishuNumberedAccessibilityTarget]
         let warnings: [String]
+    }
+
+    /// Frontmost app + focused window + display arrangement. No screenshot bytes.
+    func liveSceneIdentity(displayFingerprint: String) -> YishuHeldSceneIdentity {
+        let capturedAt = Date()
+        let application = frontmostApplication(capturedAt: capturedAt)
+        let processIdentifier = application.map { pid_t($0.value.processIdentifier) }
+        let windowNumber = processIdentifier.flatMap { pid in
+            activeWindow(
+                processIdentifier: Int(pid),
+                capturedAt: capturedAt
+            )?.value.windowNumber
+        }
+        return YishuHeldSceneIdentity(
+            frontmostProcessIdentifier: processIdentifier,
+            activeWindowNumber: windowNumber,
+            displayFingerprint: displayFingerprint
+        )
     }
 
     /// Keep press-time screenshots; refresh cursor, pointer path, and the
@@ -140,7 +170,11 @@ final class YishuContextFrameCollector {
         onto captured: YishuCapturedContext,
         pointerSince: Date
     ) -> YishuCapturedContext {
-        let snapshot = captureMetadata(includePointerTrail: true, pointerSince: pointerSince)
+        let snapshot = captureMetadata(
+            includePointerTrail: true,
+            includeNumberedTargets: true,
+            pointerSince: pointerSince
+        )
         let frame = YishuContextFrame(
             capturedAt: snapshot.capturedAt,
             expiresAt: snapshot.capturedAt.addingTimeInterval(30),
@@ -150,12 +184,17 @@ final class YishuContextFrameCollector {
             activeWindow: snapshot.activeWindow,
             elementUnderCursor: snapshot.elementUnderCursor,
             screenshots: captured.frame.screenshots,
+            numberedTargets: snapshot.numberedTargets,
             warnings: snapshot.warnings
         )
         return YishuCapturedContext(frame: frame, screenCaptures: captured.screenCaptures)
     }
 
-    private func captureMetadata(includePointerTrail: Bool, pointerSince: Date?) -> MetadataSnapshot {
+    private func captureMetadata(
+        includePointerTrail: Bool,
+        includeNumberedTargets: Bool,
+        pointerSince: Date?
+    ) -> MetadataSnapshot {
         let capturedAt = Date()
         // Screenshot display frames use NSScreen/AppKit coordinates. Keep the
         // cursor evidence in that same global bottom-left coordinate space;
@@ -183,6 +222,21 @@ final class YishuContextFrameCollector {
             capturedAt: capturedAt,
             warnings: &warnings
         )
+        let numbered: YishuNumberedAccessibility.Snapshot
+        if includeNumberedTargets {
+            numbered = YishuNumberedAccessibility.snapshot(
+                processIdentifier: application.map { pid_t($0.value.processIdentifier) }
+            )
+            if numbered.permissionDenied {
+                if !warnings.contains(where: { $0.hasPrefix("accessibility-permission-required") }) {
+                    warnings.append("accessibility-permission-required")
+                }
+            } else if numbered.targets.isEmpty {
+                warnings.append("ax-unreadable")
+            }
+        } else {
+            numbered = YishuNumberedAccessibility.Snapshot(targets: [], permissionDenied: false)
+        }
         let trail: [YishuPointerSample]
         if includePointerTrail {
             let cutoff = pointerSince ?? capturedAt.addingTimeInterval(-2.5)
@@ -199,6 +253,7 @@ final class YishuContextFrameCollector {
             frontmostApplication: application,
             activeWindow: window,
             elementUnderCursor: accessibility,
+            numberedTargets: numbered.targets,
             warnings: warnings
         )
     }

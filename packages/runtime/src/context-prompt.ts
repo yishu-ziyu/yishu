@@ -132,8 +132,38 @@ function contextWithoutImageBytes(contextFrame: ContextFrame): Record<string, un
     activeWindow: contextFrame.activeWindow,
     elementUnderCursor: contextFrame.elementUnderCursor,
     screenshots: contextFrame.screenshots.map(({ base64Data: _base64Data, ...metadata }) => metadata),
+    ...(contextFrame.numberedTargets === undefined || contextFrame.numberedTargets.length === 0
+      ? {}
+      : { numberedTargets: contextFrame.numberedTargets }),
     warnings: contextFrame.warnings,
   };
+}
+
+function formatNumberedTargetsBlock(contextFrame: ContextFrame): string[] {
+  const targets = contextFrame.numberedTargets ?? [];
+  if (targets.length === 0) {
+    if (contextFrame.warnings.includes("ax-unreadable")) {
+      return [
+        "<numbered_targets>",
+        "empty: this focused window has no readable accessibility controls. Do not pixel-click.",
+        "</numbered_targets>",
+        "",
+      ];
+    }
+    return [];
+  }
+  const lines = targets.map((target) => {
+    const name = target.title || target.description || "(unlabeled)";
+    const enabled = target.enabled === false ? " disabled" : "";
+    return `${target.id}. ${target.role ?? "AXUnknown"} ${name}${enabled}`;
+  });
+  return [
+    "Click visible macOS controls with computer_control targetId from this list. Do not use screenshot pixels.",
+    "<numbered_targets>",
+    ...lines,
+    "</numbered_targets>",
+    "",
+  ];
 }
 
 function memoriesFromCommand(
@@ -379,6 +409,7 @@ export function buildGroundedPrompt(
     ...formatMindBlock(mindLessons),
     ...formatDelegatedResultsBlock(delegatedResults),
     ...formatRecentTrailBlock(recentTrail),
+    ...formatNumberedTargetsBlock(command.payload.contextFrame),
     ...contextLines,
     "",
     "<user_utterance>",

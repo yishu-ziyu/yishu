@@ -319,12 +319,48 @@ export interface InvokeOptions {
   now?: Date | string;
 }
 
+/**
+ * One step in the agent-owned isolated browser. Click/type address a
+ * numbered target from the latest observe of that session — never pixels.
+ */
+export type BrowserRequest =
+  | { op: "goto"; url: string }
+  | { op: "observe" }
+  | { op: "click"; targetId: string }
+  | { op: "type"; targetId: string; text: string }
+  | { op: "close" };
+
+export interface BrowserTarget {
+  id: string;
+  role: string;
+  name: string;
+}
+
+export interface BrowserResult {
+  succeeded: boolean;
+  verified: boolean;
+  message: string;
+  url?: string;
+  title?: string;
+  targets?: BrowserTarget[];
+  evidence?: string;
+}
+
+/** Narrow host capability for the agent-owned browser. Not the user's Chrome. */
+export interface BrowserExecutor {
+  perform(
+    request: BrowserRequest,
+    signal?: AbortSignal,
+  ): Promise<BrowserResult>;
+}
+
 /** Optional dependencies supplied by the host at invoke time. */
 export interface ActionInvokeDeps {
   mandates?: StandingMandate[];
   finderHistoryBack?: FinderHistoryBackExecutor;
   createNote?: CreateNoteExecutor;
   scheduleTimeReminder?: ScheduleTimeReminderExecutor;
+  browser?: BrowserExecutor;
 }
 
 /** Result of authority evaluation before `run`. */

@@ -15,6 +15,7 @@ typealias YishuApplicationContext = ApplicationContext
 typealias YishuWindowBounds = WindowBounds
 typealias YishuWindowContext = WindowContext
 typealias YishuAccessibilityElementContext = AccessibilityElementContext
+typealias YishuNumberedAccessibilityTarget = NumberedAccessibilityTarget
 typealias YishuScreenshotContext = ScreenshotContext
 typealias YishuContextFrame = ContextFrame
 typealias YishuContextFrameValidationError = ContextFrameValidationError

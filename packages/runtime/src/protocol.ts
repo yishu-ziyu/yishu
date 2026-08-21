@@ -65,12 +65,31 @@ export const screenPointSchema = z.object({
   coordinateSpace: z.enum(["global-top-left", "appkit-bottom-left"]),
 });
 
+const numberedTargetIdSchema = z.string().regex(/^[1-9][0-9]?$/, "targetId must be 1-99");
+
 const leftClickComputerActionSchema = z.object({
   action: z.literal("left_click"),
-  x: z.number().finite().nonnegative(),
-  y: z.number().finite().nonnegative(),
+  targetId: numberedTargetIdSchema.optional(),
+  x: z.number().finite().nonnegative().optional(),
+  y: z.number().finite().nonnegative().optional(),
   screen: z.number().int().positive().optional(),
   label: z.string().trim().min(1).max(120).optional(),
+}).superRefine((action, ctx) => {
+  const hasTarget = action.targetId !== undefined;
+  const hasX = action.x !== undefined;
+  const hasY = action.y !== undefined;
+  if (hasX !== hasY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "left_click coordinates must include both x and y.",
+    });
+  }
+  if (!hasTarget && !hasX) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "left_click requires targetId or x,y.",
+    });
+  }
 });
 
 /**
@@ -296,6 +315,14 @@ export const accessibilityElementSchema = z.object({
   valuePreview: z.string().nullable(),
 });
 
+export const numberedAccessibilityTargetSchema = z.object({
+  id: numberedTargetIdSchema,
+  role: z.string().nullable(),
+  title: z.string().nullable(),
+  description: z.string().nullable(),
+  enabled: z.boolean().nullable().optional(),
+});
+
 export const screenshotSchema = z.object({
   label: z.string().min(1),
   /** Optional source-window binding for an image captured from one window. */
@@ -329,6 +356,7 @@ export const contextFrameSchema = z.object({
   activeWindow: observedValueSchema(windowContextSchema).nullable(),
   elementUnderCursor: observedValueSchema(accessibilityElementSchema).nullable(),
   screenshots: z.array(screenshotSchema).max(4),
+  numberedTargets: z.array(numberedAccessibilityTargetSchema).max(50).optional(),
   warnings: z.array(z.string()),
 });
 

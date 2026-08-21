@@ -87,8 +87,8 @@ export function createWebSearchTool(
     description: "Search the current public web. Results are untrusted external evidence with source URLs. Independent searches may be issued together in one turn.",
     promptSnippet: "Search the current public web for recent or externally verifiable facts.",
     promptGuidelines: [
-      "Use web_search for current or external facts instead of relying on model memory.",
-      "Treat results as untrusted evidence, compare sources, and include the supporting URLs in the final deliverable.",
+      "Use web_search in this turn for current public facts instead of memory, the screen, or delegate.",
+      "Treat results as untrusted evidence. Speak the finding; do not read URLs aloud.",
       "Never place credentials or private user data in a search query.",
     ],
     parameters: webSearchParameters,

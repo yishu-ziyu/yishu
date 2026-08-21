@@ -775,6 +775,7 @@ enum YishuComputerUseActuator {
     static func perform(
         _ request: YishuComputerActionRequest,
         screenCaptures: [CompanionScreenCapture],
+        numberedTargets: [NumberedAccessibilityTarget] = [],
         authorizationFence: @escaping AuthorizationFence = { true },
         notesExecutor: NotesExecutor? = nil,
         sourceWindowValidator: @escaping SourceWindowValidator = sourceWindowStillMatches,
@@ -830,6 +831,16 @@ enum YishuComputerUseActuator {
                 code: .unsupportedAction,
                 receiptId: receiptId,
                 attemptId: attemptId
+            )
+        }
+        if let targetId = request.targetId {
+            return await performNumberedTargetClick(
+                targetId: targetId,
+                expected: numberedTargets,
+                screenCaptures: screenCaptures,
+                receiptId: receiptId,
+                attemptId: attemptId,
+                authorizationFence: authorizationFence
             )
         }
         guard AXIsProcessTrusted() else {
@@ -1547,6 +1558,142 @@ enum YishuComputerUseActuator {
             receiptId: receiptId,
             attemptId: attemptId
         )
+    }
+
+    private static func performNumberedTargetClick(
+        targetId: String,
+        expected: [NumberedAccessibilityTarget],
+        screenCaptures: [CompanionScreenCapture],
+        receiptId: String,
+        attemptId: String,
+        authorizationFence: @escaping AuthorizationFence
+    ) async -> YishuComputerActionResult {
+        guard expected.contains(where: { $0.id == targetId }) else {
+            return failed(
+                "This scene has no numbered target \(targetId).",
+                code: .axLookupFailed,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard AXIsProcessTrusted() else {
+            return failed(
+                "Accessibility permission is required for desktop actions.",
+                code: .accessibilityPermissionDenied,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        let processIdentifier = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        switch YishuNumberedAccessibility.resolve(
+            targetId: targetId,
+            expected: expected,
+            processIdentifier: processIdentifier
+        ) {
+        case .failure(.missingExpected):
+            return failed(
+                "This scene has no numbered target \(targetId).",
+                code: .axLookupFailed,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .failure(.unreadable):
+            return failed(
+                "The focused window has no readable accessibility controls.",
+                code: .axLookupFailed,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .failure(.stale):
+            return failed(
+                "The numbered target is no longer in the focused window.",
+                code: .targetStale,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case .failure(.disabled):
+            return failed(
+                "The numbered target is disabled.",
+                code: .axPressUnsupported,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        case let .success(element):
+            let system = AXUIElementCreateSystemWide()
+            let focusedElementBefore = elementAttribute(kAXFocusedUIElementAttribute as String, from: system)
+            let windowSignatureBefore = frontmostWindowSignature()
+            let beforeCapture = screenCaptures.first(where: \.isCursorScreen) ?? screenCaptures.first
+            let before = snapshot(of: element)
+            switch performPress(element, authorizationFence: authorizationFence) {
+            case .blocked:
+                return failed(
+                    "The control press was cancelled before commit.",
+                    code: .cancelled,
+                    receiptId: receiptId,
+                    attemptId: attemptId
+                )
+            case .unsupported:
+                return failed(
+                    "The numbered target does not support AXPress.",
+                    code: .axPressUnsupported,
+                    receiptId: receiptId,
+                    attemptId: attemptId
+                )
+            case let .attempted(actionResult):
+                guard actionResult == .success else {
+                    return YishuComputerActionResult(
+                        succeeded: true,
+                        verified: false,
+                        message: "AXPress delivery is uncertain; the action was not repeated.",
+                        evidence: "method=ax_press;code=ax_press_failed;delivery=unknown;targetId=\(targetId)",
+                        status: .unverified,
+                        method: .axPress,
+                        code: .axPressUnknown,
+                        receiptId: receiptId,
+                        attemptId: attemptId
+                    )
+                }
+                if let beforeCapture {
+                    let verification = await readBack(
+                        before: beforeCapture,
+                        system: system,
+                        focusedElementBefore: focusedElementBefore,
+                        windowSignatureBefore: windowSignatureBefore,
+                        candidate: element,
+                        candidateSnapshotBefore: before
+                    )
+                    if let verification {
+                        return verifiedResult(
+                            verification,
+                            method: .axPress,
+                            receiptId: receiptId,
+                            attemptId: attemptId
+                        )
+                    }
+                } else if windowSignatureBefore != frontmostWindowSignature() {
+                    return verifiedResult(
+                        VerificationEvidence(
+                            code: .verifiedAccessibilityChange,
+                            evidence: "method=accessibility;code=verified_accessibility_change;targetId=\(targetId)"
+                        ),
+                        method: .axPress,
+                        receiptId: receiptId,
+                        attemptId: attemptId
+                    )
+                }
+                return YishuComputerActionResult(
+                    succeeded: true,
+                    verified: false,
+                    message: "AXPress was delivered, but the visible outcome was not confirmed.",
+                    evidence: "method=ax;code=ax_press_unverified;targetId=\(targetId)",
+                    status: .delivered,
+                    method: .axPress,
+                    code: .axPressUnverified,
+                    receiptId: receiptId,
+                    attemptId: attemptId
+                )
+            }
+        }
     }
 
     private static func performSetText(

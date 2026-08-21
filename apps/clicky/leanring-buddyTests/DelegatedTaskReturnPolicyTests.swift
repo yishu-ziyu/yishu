@@ -153,7 +153,17 @@ struct DelegatedTaskReturnPolicyTests {
         ).shouldExcerptSpokenFinding)
     }
 
-    @Test func presentationWaitsForForegroundAndThreeSecondsOfQuiet() {
+    @Test func presentationUsesZeroQuietForDelegatedAndThreeSecondsForTimeReminder() {
+        #expect(!YishuDelegatedTaskReturnState.canPresent(
+            foregroundBusy: true,
+            secondsSinceLastUserInput: 10,
+            quietInterval: 0
+        ))
+        #expect(YishuDelegatedTaskReturnState.canPresent(
+            foregroundBusy: false,
+            secondsSinceLastUserInput: 0,
+            quietInterval: 0
+        ))
         #expect(!YishuDelegatedTaskReturnState.canPresent(
             foregroundBusy: true,
             secondsSinceLastUserInput: 10
@@ -166,6 +176,84 @@ struct DelegatedTaskReturnPolicyTests {
             foregroundBusy: false,
             secondsSinceLastUserInput: 3
         ))
+    }
+
+    @Test @MainActor func singleFinishedDelegatedChipShowsFindingExcerptNotDoneStamp() throws {
+        let weather = weatherTask()
+        let chip = AgentPresenceWindowManager.presenceChipLabel(for: [weather])
+        let finding = try #require(weather.chipFindingLine)
+        #expect(chip == finding)
+        #expect(chip != "做好了")
+        #expect(!chip.contains("做好了"))
+        #expect(chip.contains("中雨"))
+        #expect(!chip.contains("https"))
+        #expect(!chip.contains("tianqi"))
+        #expect(!chip.contains("查深圳"))
+        #expect(chip.count <= 19)
+        #expect(finding.count <= 19)
+    }
+
+    @Test @MainActor func multipleReadyTasksKeepCountPhrase() {
+        let first = weatherTask()
+        let second = makeTask(
+            status: .done,
+            resultKind: .succeeded,
+            summary: "确认了三项交付物，并通过了最终检查。详见 [内部记录](https://example.com/private)。"
+        )
+        #expect(
+            AgentPresenceWindowManager.presenceChipLabel(for: [first, second]) == "有几件做好了"
+        )
+    }
+
+    @Test @MainActor func contextReminderDoesNotStealChipFindingLine() {
+        let reminder = makeTask(
+            title: "提醒：提交报销",
+            status: .done,
+            resultKind: .completed,
+            summary: "提醒：提交报销",
+            taskKind: .contextReminder
+        )
+        #expect(reminder.returnAnnouncementText == "提醒你：提交报销。")
+        #expect(reminder.chipFindingLine == nil)
+        #expect(reminder.pocketFindingText == nil)
+        #expect(AgentPresenceWindowManager.presenceChipLabel(for: [reminder]) == "做好了")
+        #expect(!AgentPresenceWindowManager.presenceChipLabel(for: [reminder]).contains("提交报销"))
+    }
+
+    @Test func pocketFindingTextIsFullSummaryWithoutUrls() throws {
+        let weather = weatherTask()
+        let pocket = try #require(weather.pocketFindingText)
+        #expect(pocket.contains("中雨"))
+        #expect(pocket.contains("深圳"))
+        #expect(!pocket.contains("https"))
+        #expect(!pocket.contains("tianqi"))
+        #expect(!pocket.contains("html"))
+        #expect(!pocket.contains("example.com"))
+        if let chip = weather.chipFindingLine {
+            #expect(pocket.count > chip.count)
+        }
+    }
+
+    @Test @MainActor func activeAndFailedChipPhrasesUnchanged() {
+        #expect(
+            AgentPresenceWindowManager.presenceChipLabel(for: [makeTask(status: .running)]) == "还在做"
+        )
+        #expect(
+            AgentPresenceWindowManager.presenceChipLabel(for: [
+                makeTask(status: .running),
+                makeTask(status: .pending),
+            ]) == "还在做几件事"
+        )
+        #expect(
+            AgentPresenceWindowManager.presenceChipLabel(for: [
+                makeTask(status: .failed, resultKind: .failed),
+            ]) == "没做成"
+        )
+        #expect(
+            AgentPresenceWindowManager.presenceChipLabel(for: [
+                makeTask(status: .cancelled, resultKind: .cancelled),
+            ]) == "已经停下"
+        )
     }
 
     private func isolatedDefaults() throws -> (UserDefaults, String) {
@@ -181,7 +269,8 @@ struct DelegatedTaskReturnPolicyTests {
         title: String = "整理研究结论",
         status: YishuDelegatedTaskStatus,
         resultKind: YishuDelegatedResultKind? = nil,
-        summary: String? = nil
+        summary: String? = nil,
+        taskKind: YishuBackgroundTaskKind = .delegated
     ) -> YishuDelegatedTaskPresenceEvent {
         YishuDelegatedTaskPresenceEvent(
             id: id,
@@ -195,7 +284,18 @@ struct DelegatedTaskReturnPolicyTests {
             model: nil,
             resultKind: resultKind,
             summary: summary ?? (resultKind == nil ? nil : "结果保留在后台任务中。"),
-            sourceEventId: UUID()
+            sourceEventId: UUID(),
+            taskKind: taskKind
+        )
+    }
+
+    private func weatherTask() -> YishuDelegatedTaskPresenceEvent {
+        let weatherTitle = "查深圳明天天气预报(气温、降水、风力),并查明天叶问相关公开动态或日程(影视播出、纪念活动等)"
+        return makeTask(
+            title: weatherTitle,
+            status: .done,
+            resultKind: .completed,
+            summary: "「\(weatherTitle)」整理好了。深圳明天(8/19):中雨,28-32℃,东风约1级,源:tianqi.eastday.com/tianqi/shenzhen/20260819.html"
         )
     }
 }

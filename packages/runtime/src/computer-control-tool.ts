@@ -10,9 +10,10 @@ export type ComputerControlToolAction =
 const computerControlParameters = Type.Union([
   Type.Object({
     action: Type.Literal("left_click"),
-    x: Type.Number({ minimum: 0, description: "Horizontal coordinate in screenshot pixels." }),
-    y: Type.Number({ minimum: 0, description: "Vertical coordinate in screenshot pixels." }),
-    screen: Type.Optional(Type.Integer({ minimum: 1, description: "One-based screen number from Context Frame." })),
+    targetId: Type.String({
+      pattern: "^[1-9][0-9]?$",
+      description: "Numbered AX target id from the current Context Frame numberedTargets list.",
+    }),
     label: Type.Optional(Type.String({ maxLength: 120, description: "Short visible label of the target." })),
   }),
   Type.Object({
@@ -33,14 +34,16 @@ export function createComputerControlTool(
     label: "Computer control",
     description: [
       "Press a visible macOS control or set the freshly focused editable text element.",
-      "Coordinates use the screenshot pixel dimensions from the current Context Frame.",
+      "left_click uses targetId from Context Frame numberedTargets. Do not guess screenshot pixels.",
       "Use only when the user directly asks to click, press, or input exact text.",
       "For set_text, provide only the requested text. The runtime owns the target app identity.",
       "Native commands, target process IDs, and target bundle IDs are not accepted.",
     ].join(" "),
-    promptSnippet: "Perform an explicitly requested click or focused text input through the product-owned accessibility bridge.",
+    promptSnippet: "Perform an explicitly requested click or focused text input through numbered accessibility targets.",
     promptGuidelines: [
       "Call computer_control instead of printing XML, HTML, JSON, coordinates, or tool syntax.",
+      "For left_click, pass targetId from numberedTargets. Never pass screenshot coordinates.",
+      "If numberedTargets is empty or warnings include ax-unreadable, say the window is not readable. Do not pixel-click.",
       "Call set_text only for explicit user-requested text input; never infer or invent text to enter.",
       "For 'input ... then click ...', execute each step sequentially and rely on each returned read-back.",
       "After a verified direct click, reply with only a brief natural confirmation such as 点好了。",

@@ -661,9 +661,10 @@ export interface YishuLoopRuntimeAdapterOptions {
 
 /**
  * Per-conversation tool surface decided at the createSession boundary
- * (delegation V1, ADR 0009). Main sessions keep computer control and may
- * receive extra product tools (delegate); delegated child sessions receive
- * neither, so recursion and Desktop access are structurally excluded.
+ * (delegation V1, ADR 0009). Main sessions keep computer control, search
+ * the public web, and may delegate long work. Delegated child sessions
+ * search the web but receive neither computer control nor recursive
+ * delegate.
  */
 export interface SessionToolPolicy {
   readonly computerControl: boolean;
@@ -710,7 +711,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
   private readonly activeComputerTurn = new AsyncLocalStorage<ActiveComputerTurn>();
   // Additive product seam: per-conversation session tool policy, decided at
   // the createSession boundary. Delegated child conversations receive neither
-  // computer_control nor delegate; the default keeps every session unchanged.
+  // computer_control nor recursive delegate; the default keeps every session unchanged.
   private sessionToolPolicy: (conversationId: string) => SessionToolPolicy =
     () => DEFAULT_SESSION_TOOL_POLICY;
   private disposed = false;
@@ -832,7 +833,11 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
   }
 
   private fenceEffectfulExtraTool(tool: ToolDefinition, sessionKey: string): ToolDefinition {
-    if (tool.name !== "delegate" && tool.name !== "save_current_page_actions_to_note") return tool;
+    if (
+      tool.name !== "delegate"
+      && tool.name !== "save_current_page_actions_to_note"
+      && tool.name !== "browser"
+    ) return tool;
     const execute = tool.execute.bind(tool);
     return {
       ...tool,

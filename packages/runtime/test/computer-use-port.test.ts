@@ -417,15 +417,13 @@ test("computer_control tool delegates to the product-owned port", async () => {
 
   const result = await tool.execute("tool-call", {
     action: "left_click",
-    x: 185,
-    y: 375,
+    targetId: "3",
     label: "目标任务",
   }, undefined, undefined, {} as never);
 
   assert.deepEqual(actions, [{
     action: "left_click",
-    x: 185,
-    y: 375,
+    targetId: "3",
     label: "目标任务",
   }]);
   assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /read-back was verified/i);
@@ -603,8 +601,7 @@ test("computer_control tool keeps delivered and unverified outcomes out of compl
 
   const result = await tool.execute("tool-call", {
     action: "left_click",
-    x: 185,
-    y: 375,
+    targetId: "3",
   }, undefined, undefined, {} as never);
 
   const text = result.content[0]?.type === "text" ? result.content[0].text : "";
