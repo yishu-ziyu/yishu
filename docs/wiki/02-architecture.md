@@ -2,7 +2,7 @@
 
 Type: wiki
 Status: current
-Verified: 34c0eaa 2026-08-15
+Verified: dd5a362 2026-08-23
 Review: apps/ 或 packages/ 结构、ownership、数据流变化时
 
 ## 总览图
@@ -27,7 +27,7 @@ Review: apps/ 或 packages/ 结构、ownership、数据流变化时
         |         remember | remember_how | share_context | ...
         |                       |
         |           /          |           \
-        |       本地        PiRuntime     委托/外部
+        |       本地       YishuLoop     委托/外部
         |    (store/AX)    Adapter       (handoff capsule)
         |                       |
         |           verify → ActionReceipt / presence
@@ -48,10 +48,10 @@ Clicky 身体 → 版本化协议 → Kernel 产品真相/动作 → Runtime 适
 flowchart LR
   U["用户"] <--> B["奕枢身体<br/>Clicky：语音、光标、UI、权限"]
   B <--> K["奕枢内核<br/>Kernel：对话真相、记忆、规则、任务真相"]
-  K <--> E["执行 harness<br/>Pi：model → tool → result → model"]
+  K <--> E["执行 harness<br/>Yishu-owned model → tool → result → model"]
 ```
 
-统一规则：**一个身份、一份持久产品真相、一个正式 Agent 循环（Pi）**。
+统一规则：**一个身份、一份持久产品真相、一个正式 Agent 循环（`packages/runtime/src/model-loop/`）**。
 
 - `MockAgentRuntime` 只是协议测试替身；
 - `packages/agent-core` 是独立实验室，不是 `AgentRuntime` 的模式之一；
@@ -65,7 +65,7 @@ flowchart LR
 │     ├── CompanionManager（编排）
 │     ├── YishuAgentRuntimeClient ──spawn──▶ node dist/stdio-server.js（packages/runtime）
 │     │        stdin/stdout 换行分隔 JSON（NDJSON）           │
-│     │        ←──────── 版本化命令/事件 ──────▶               ├── PiRuntimeAdapter
+│     │        ←──────── 版本化命令/事件 ──────▶               ├── YishuLoopRuntimeAdapter
 │     │                                                      ├── ProductKernelRuntime
 │     │                                                      │     └── @yishu/kernel（SQLite store）
 │     └── YishuVoiceProxySupervisor ──spawn──▶ node local-server.mjs（worker）
@@ -73,14 +73,14 @@ flowchart LR
 │                                                 ├── /transcribe → StepFun ASR
 │                                                 ├── /tts → MiniMax
 │                                                 ├── /chat → 上游模型（Anthropic↔OpenAI 转换）
-│                                                 └── /v1/chat/completions → Pi loopback（转发 8317）
+│                                                 └── /v1/chat/completions → Yishu loopback（转发 8317）
 ```
 
 要点：
 
 - Clicky 与 runtime 之间**所有命令/事件都是版本化、typed、cancellable、traceable** 的 NDJSON（`PROTOCOL_VERSION = 1`，每条带 requestId/traceId/schemaVersion/timestamp）。
 - 并发边界：**一个** Clicky 管理的 SQLite sidecar；桌面动作共享进程内 token/epoch lease，冲突即 busy，不排队。
-- 凭据隔离：API key 只存在于 worker 进程与 Pi 自己的凭据存储；Swift 主进程只持有 32 字节 bearer token。
+- 凭据隔离：API key 只存在于 worker 进程与 Runtime 专用凭据存储；Swift 主进程只持有 32 字节 bearer token。
 
 ## 一轮语音 turn 的完整数据流
 
@@ -95,7 +95,7 @@ flowchart LR
             → YishuAgentRuntimeClient.startTurn（turn.start）
             → stdio-server → ProductKernelRuntime
                   ├─ 产品话术路由 routeProductUtterance（记住/交给 Codex/定时提醒…）→ YishuActionRegistry（本地动作 + ActionReceipt）
-                  └─ 其余 → PiRuntimeAdapter → Pi model loop
+                  └─ 其余 → YishuLoopRuntimeAdapter → Yishu model loop
                         ├─ responseDelta → AssistantOutputStreamProjector → sanitizeClientEvent → Clicky 句级 TTS 流水线
                         └─ computer.action.requested → Clicky YishuComputerUseActuator → computer.action.result（verified 才算完成）
             → ProductKernelRuntime 把可见 turn 与安全 typed 事件写入 Kernel Conversation/Turn/Event 账本
@@ -111,12 +111,12 @@ flowchart LR
 
 - **命令**（Clicky → runtime）：`turn.start` / `turn.steer` / `turn.interrupt` / `turn.cancel`、`trail.observe`、`computer.action.result`、`task.list` / `task.cancel`、历史与记忆 RPC（`history.list` 等）、auth RPC（`auth.status` 等）。
 - **事件**（runtime → Clicky）：`runtime.ready/error/stopped`、`turn.started/response.delta/tool.started/tool.completed/computer.action.requested/memory.used/completed/cancelled/failed`、`turn.interrupt.accepted/rejected`、`task.presence.updated`、`task.listed`、auth 事件等。
-- **模型网关唯一化**：`LOCAL_GROK_PROVIDER = "yishu-local-grok"` 固定 `http://127.0.0.1:8787/v1`；协议上没有远程 endpoint 字段，turn 不能把 Pi 重定向到任意 URL。
-- **AgentRuntime 是 ports-and-adapters 边界**：产品状态不得保存 Pi 事件对象或 Pi 会话类型；取消/续话/错误/完成是产品级概念（有 conformance tests，Mock 为测试替身）。
+- **模型网关唯一化**：`LOCAL_GROK_PROVIDER = "yishu-local-grok"` 固定 `http://127.0.0.1:8787/v1`；协议上没有远程 endpoint 字段，turn 不能把模型循环重定向到任意 URL。
+- **AgentRuntime 是 ports-and-adapters 边界**：产品状态不得保存 provider 事件对象或 model-loop 会话类型；取消/续话/错误/完成是产品级概念（有 conformance tests，Mock 为测试替身）。
 
 ## Task truth 边界
 
-`ProductKernelRuntime` 观察 typed runtime 事件，但**不让 Pi 拥有任务状态**：
+`ProductKernelRuntime` 观察 typed runtime 事件，但**不让执行循环拥有任务状态**：
 
 1. 每个 request 携带一份不可变 `TaskExecutionContract`（objective、successMode、authority、risk、maxAttempts = 1）。
 2. 第一个真实 `tool.started` 或 `computer.action.requested` 才创建 Kernel 任务信号；纯对话不制造任务。
@@ -132,9 +132,11 @@ flowchart LR
 | 档位 | 工具面 | 用途 |
 |------|--------|------|
 | `conversation` | 无通用 shell/file 工具 | 持久语音关系会话 |
-| `observe` | Pi 只读工具 | 观察 |
-| `build` | 读/搜索/shell/编辑/写 | 任务单元内执行 |
-| `owner` | 广泛工具 | 显式选择的环境中 |
+| `observe` | 协议级观察档位 | 观察 |
+| `build` | 协议级构建档位 | 任务单元内执行 |
+| `owner` | 产品显式授权的广泛档位 | 显式选择的环境中 |
+
+当前内化引擎只装配产品工具；这些档位名不恢复旧引擎内置的 shell/file 工具面。
 
 受限的 conversation 档不是"移除工具"，而是让对话与任务执行处于不同会话、不同工作面。
 
@@ -168,7 +170,7 @@ flowchart LR
 ## 当前已知例外（迁移工作，非替代架构）
 
 - Swift 侧命名点击快路径先于 Kernel 路由（执行仍走 typed verified actuator）；
-- Runtime 直接调 Kernel raw store 而非产品 service facade；
+- Runtime 的 turn/task/delegation 迁移路径仍直接调 Kernel raw store；history、memory UI/recall、context-watch 推进/取消已分别经 `ConversationLedger`、`MemoryLedger`、`ContextWatchLedger` 收口；
 - 项目管理 UI、冲突/过期审查、导出未完成；
 - 持久 skill 重放、主动性采用、分布式执行控制未完成。
 

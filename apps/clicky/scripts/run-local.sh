@@ -74,7 +74,7 @@ bundle_yishu_runtime() {
   node_entitlements="$YISHU_RUNTIME_TEMP_ROOT/Node.entitlements.plist"
   node_source="$(realpath "$YISHU_NODE_SOURCE")"
 
-  echo "Bundling Yishu Runtime + Pi into ${APP_PRODUCT_NAME}.app"
+  echo "Bundling Yishu Runtime into ${APP_PRODUCT_NAME}.app"
   (
     cd "$YISHU_RUNTIME_ROOT"
     # Build only the packages embedded in Clicky. The workspace also contains

@@ -2,10 +2,10 @@
 
 Type: architecture
 Status: current
-Verified: 34c0eaa 2026-08-15
+Verified: dd5a362 2026-08-23
 Review: apps/ 或 packages/ 结构、ownership、数据流变化时
 
-> 修订 2026-08-15（ADR 0014）：唯一正式 model-tool 循环已内化为奕枢自有代码（`packages/runtime/src/model-loop/`），`@earendil-works/pi-coding-agent` 依赖已移除。本文以下沿用 "Pi" 名称的历史段落指该引擎的旧位置；执行边界语义不变。
+> 当前事实（ADR 0014）：唯一正式 model-tool 循环是奕枢自有代码（`packages/runtime/src/model-loop/`），`@earendil-works/pi-coding-agent` 依赖已移除。`YISHU_RUNTIME_MODE=pi` 仅是 Clicky 暂留的兼容值。
 
 ```text
                     Yishu single macOS application
@@ -27,7 +27,7 @@ Review: apps/ 或 packages/ 结构、ownership、数据流变化时
           |         remember | remember_how | share_context | ...
           |                        |
           |              /         |          \
-          |          local      PiRuntime   Cua / cells
+          |          local     YishuLoop    Cua / cells
           |       (store/AX)   Adapter      (handoff capsule)
           |                        |
           |              verify -> ActionReceipt / presence
@@ -36,7 +36,7 @@ Review: apps/ 或 packages/ 结构、ownership、数据流变化时
 
 Product path in one line:
 
-`Clicky → ContextFrame → ContextTrail → YishuAction → (local | Pi | Cua) → verify → presence`
+`Clicky → ContextFrame → ContextTrail → YishuAction → (local | YishuLoop | Cua) → verify → presence`
 
 ## Source and runtime ownership
 
@@ -46,11 +46,11 @@ and the user-visible shell. Shared Swift protocol code lives in the root package
 tests and build configurations must not create a second App implementation.
 
 `packages/kernel` (`@yishu/kernel`) is the product action, trail, and evidence
-store layer. It does not replace Pi. Voice, UI, initiative, MCP, CLI, Pi, and
-system callers should share the same `defineYishuAction` registry and
+store layer. It does not own model execution. Voice, UI, initiative, MCP, CLI,
+Runtime, and system callers should share the same `defineYishuAction` registry and
 `ActionReceipt` shape.
 
-Pi remains the execution harness. Swift remains the macOS actuator through
+The Yishu-owned model-tool loop remains the execution harness. Swift remains the macOS actuator through
 Accessibility and Quartz. Product identity, relationship memory, initiative,
 permissions, and task truth stay in Yishu-owned ports and protocols.
 
@@ -63,11 +63,11 @@ user sees only Yishu:
 flowchart LR
   U["User"] <--> B["Yishu body<br/>Clicky: voice, cursor, UI, permissions"]
   B <--> K["Yishu core<br/>Kernel: conversation truth, memory, rules, task truth"]
-  K <--> E["Execution harness<br/>Pi: shipping model and tool loop"]
+  K <--> E["Execution harness<br/>Yishu-owned model and tool loop"]
 ```
 
 The unification rule is therefore **one identity, one durable product truth, and
-one shipping Agent loop: Pi**. Mock is only a protocol test double; AgentCore is
+one shipping Yishu-owned Agent loop**. Mock is only a protocol test double; AgentCore is
 a standalone laboratory and is not an `AgentRuntime` mode. Clicky owns a stable
 `conversationId` across app restarts. Each request ID is the turn ID, and its trace ID remains stable
 for start, steering, and cancellation. `ProductKernelRuntime` projects visible
@@ -83,7 +83,7 @@ scope are treated as personal. Private conversations are live-only: they do not
 read or write memory and do not create durable conversation, turn, trail, or
 TaskTruth rows; private is never restored after an app restart.
 
-Pi sessions remain an in-memory latency cache, not product truth. When that
+Model-loop sessions remain an in-memory latency cache, not product truth. When that
 cache is cold, ProductKernelRuntime injects only the bounded visible turns from
 the exact durable conversation and scope; a hot session does not receive the
 history twice. Reusing a completed turn replays the Kernel record instead of
@@ -162,18 +162,18 @@ dependency, fallback, or runtime path in Yishu.
 
 The canonical Clicky app and runtime communicate through versioned newline-delimited JSON during the first integration slice. Every command and event has a request ID, trace ID, schema version, and timestamp.
 
-Computer actions use the same boundary: Pi emits a typed `computer.action.requested`; the macOS shell executes it through Accessibility and answers with `computer.action.result`. Provider tool syntax is never a presentation format. Direct-action turns are buffered until that result arrives, and completion is verified from Accessibility state, frontmost-window state, or changed screen content. The receipt carries the action identity, execution method/attempt, success state, verification state, message, and bounded evidence so a tool return is never mistaken for visible completion.
+Computer actions use the same boundary: Runtime emits a typed `computer.action.requested`; the macOS shell executes it through Accessibility and answers with `computer.action.result`. Provider tool syntax is never a presentation format. Direct-action turns are buffered until that result arrives, and completion is verified from Accessibility state, frontmost-window state, or changed screen content. The receipt carries the action identity, execution method/attempt, success state, verification state, message, and bounded evidence so a tool return is never mistaken for visible completion.
 
 Pure conversation deltas may enter a fail-closed, sentence-level serial TTS
 pipeline before model completion. Tool markup, ambiguous partial syntax, and
 all desktop-effect utterances remain final-only. A PTT keydown immediately
 stops old audio and clears old presentation. When the interrupted turn is pure
 conversation and no desktop effect has begun, the accepted transcript may
-continue in the same Pi session as the next generation. Screen-dependent,
+continue in the same model-loop session as the next generation. Screen-dependent,
 effectful, or uncertain input cancels that path and starts a new turn from a
 fresh ContextFrame. Runtime generation/effect fences and Clicky's voice-turn,
 presentation, and actuator ownership guards independently drop stale output
-and block stale desktop effects. This is not provider-token preemption: Pi
+and block stale desktop effects. This is not provider-token preemption: the loop
 switches at a safe assistant/tool-batch boundary, while the user-facing audio
 and presentation switch immediately. The physical PTT path still requires
 human acceptance.
@@ -191,9 +191,9 @@ requires the human demo. Finder and text actions re-read the live frontmost PID/
 execution; secure or non-writable fields fail closed. Text receipts contain
 only bounded length/role/match evidence, never the entered text.
 
-An explicit click on a visually named control first goes through a deterministic local action router. It limits OCR to the requested screen region, resolves the visible label, and uses the same verified actuator contract without paying for a model turn. The actuator prefers `AXPress`; when a self-drawn app exposes only inert accessibility groups, it confirms that the captured frontmost app still owns the point, hides the cursor, posts one Quartz click, and immediately restores the cursor before verifying screen change. If local evidence cannot resolve the target, the request falls through to the normal ContextFrame and Pi path. Legacy `[POINT]` output is presentation-only unless the original user turn is itself a direct click request; in that case Clicky upgrades it to the same verified action path and never speaks tool syntax or asks the user to finish the click.
+An explicit click on a visually named control first goes through a deterministic local action router. It limits OCR to the requested screen region, resolves the visible label, and uses the same verified actuator contract without paying for a model turn. The actuator prefers `AXPress`; when a self-drawn app exposes only inert accessibility groups, it confirms that the captured frontmost app still owns the point, hides the cursor, posts one Quartz click, and immediately restores the cursor before verifying screen change. If local evidence cannot resolve the target, the request falls through to the normal ContextFrame and model-loop path. Legacy `[POINT]` output is presentation-only unless the original user turn is itself a direct click request; in that case Clicky upgrades it to the same verified action path and never speaks tool syntax or asks the user to finish the click.
 
-`AgentRuntime` is a ports-and-adapters boundary. Product state must not store Pi event objects or Pi session types. Cancellation, steering, errors, completion, and future checkpoints are product-level concepts with conformance tests.
+`AgentRuntime` is a ports-and-adapters boundary. Product state must not store provider event objects or model-loop session types. Cancellation, steering, errors, completion, and future checkpoints are product-level concepts with conformance tests.
 
 ### Intent boundary
 
@@ -217,7 +217,7 @@ the authoritative intent or grants action authority.
 
 ### Task truth boundary
 
-`ProductKernelRuntime` observes typed runtime events but does not let Pi own
+`ProductKernelRuntime` observes typed runtime events but does not let the execution loop own
 task state. Each request receives one immutable `TaskExecutionContract` with
 objective, success mode, authority, risk, and one product attempt. The first
 `tool.started` or `computer.action.requested` creates a Kernel progress signal;
@@ -229,31 +229,34 @@ trusted. Everything else stays `blocked`. Pure conversation and local product
 actions do not manufacture `TaskTruth`—the latter already return a
 product-owned `ActionReceipt`.
 
-Pi and protocol test doubles remain replaceable event producers. Cancellation
+The self-owned loop and protocol test doubles remain replaceable event producers. Cancellation
 closes the request before delayed events can create or reopen a task, and
 runtime disposal waits for active event producers before the final store
 flush. Parent-linked delegated TaskTruth and its Result Inbox are persisted
 atomically. On restart, a claimed result is acknowledged when its claiming Main
 turn is already durably completed, otherwise it is released; an orphan running
 child is marked failed with a durable result and is never auto-rerun. Every
-terminal, cancellation, and exception path releases that child's Pi session.
+terminal, cancellation, and exception path releases that child's model-loop session.
 This is fail-closed recovery, not checkpoint resume. Clicky restores a typed
 task snapshot and can reopen the stored summary and SystemSequence projection.
 
 ## Capability profiles
 
 - `conversation`: no generic shell/file tools; used by the persistent voice relationship session.
-- `observe`: Pi read-only tools.
-- `build`: Pi read, search, shell, edit, and write tools inside a task cell.
-- `owner`: broad tools in an explicitly selected environment.
+- `observe`: protocol-level observation profile.
+- `build`: protocol-level build profile.
+- `owner`: broad product-authorized profile in an explicitly selected environment.
+
+The internalized engine currently ships product tools only; these profile names
+do not reintroduce the former engine's built-in shell/file tool surface.
 
 The presence of a restricted conversation profile does not remove tools from Yishu. It keeps dialogue and task execution in different sessions with different working surfaces.
 
 ## Single-app rule
 
-`apps/clicky` carries the interaction identity `com.yishu.yishu-buddy` and is the only source, build, install, and visible acceptance path for the macOS App. The root Swift package exposes only the portable `YishuContext` contract and tests; it does not build another `.app`. Clicky owns ContextFrame collection and starts the bundled Pi runtime behind its existing `CompanionManager`.
+`apps/clicky` carries the interaction identity `com.yishu.yishu-buddy` and is the only source, build, install, and visible acceptance path for the macOS App. The root Swift package exposes only the portable `YishuContext` contract and tests; it does not build another `.app`. Clicky owns ContextFrame collection and starts the bundled Runtime behind its existing `CompanionManager`.
 
-The current Grok selector and local 8317 route are preserved as model policy. Clicky sends only an allowlisted `{ provider, model }` preference; `PiRuntimeAdapter` maps it into a product-owned custom provider fixed to `http://127.0.0.1:8787/v1`. Neither arbitrary base URLs nor headers cross the runtime protocol. Conversation failure no longer falls through Clicky's local `/chat` path or a Swift-owned history cache: Clicky performs a bounded Runtime restart and then reports failure honestly. `/chat` remains only for the non-conversational onboarding pointing demo.
+The current Grok selector and local 8317 route are preserved as model policy. Clicky sends only an allowlisted `{ provider, model }` preference; `YishuLoopRuntimeAdapter` maps it into a product-owned custom provider fixed to `http://127.0.0.1:8787/v1`. Neither arbitrary base URLs nor headers cross the runtime protocol. Conversation failure no longer falls through Clicky's local `/chat` path or a Swift-owned history cache: Clicky performs a bounded Runtime restart and then reports failure honestly. `/chat` remains only for the non-conversational onboarding pointing demo.
 
 ## Unified product spine
 
@@ -264,7 +267,7 @@ ADR 0010 makes the intended development shape explicit:
 Current exceptions are tracked as migration work rather than alternate architecture:
 
 - Swift-owned named-click latency path before Kernel routing (execution still uses the typed verified actuator);
-- Runtime calls into Kernel's raw store instead of a product service facade;
+- Runtime still calls Kernel's raw store for turn/task/delegation migration paths; conversation history, product-memory UI/recall, and context-watch progression/cancellation already use `ConversationLedger`, `MemoryLedger`, and `ContextWatchLedger`;
 - project UI, conflict/expiry review, and export;
 - durable skill replay, initiative adoption, and distributed execution control.
 

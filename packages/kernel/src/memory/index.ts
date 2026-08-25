@@ -12,6 +12,8 @@ export type {
   RecalledMemory,
   RecallRelevantMemoriesOptions,
 } from "./recall.js";
+export { createMemoryLedger } from "./ledger.js";
+export type { MemoryLedger } from "./ledger.js";
 export {
   VISIBLE_MEMORY_FILE_NAME,
   VISIBLE_MEMORY_HEADER,

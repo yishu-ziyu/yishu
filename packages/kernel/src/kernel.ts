@@ -6,6 +6,10 @@ import {
   createConversationLedger,
   type ConversationLedger,
 } from "./conversation/ledger.js";
+import {
+  createContextWatchLedger,
+  type ContextWatchLedger,
+} from "./context-watch/ledger.js";
 import { ContextTrail } from "./context/trail.js";
 import type { ContextTrailOptions } from "./context/trail.js";
 import {
@@ -40,6 +44,10 @@ import {
   SqliteExtractionQueue,
   type ExtractionQueuePort,
 } from "./memory/extraction-queue.js";
+import {
+  createMemoryLedger,
+  type MemoryLedger,
+} from "./memory/ledger.js";
 
 export type YishuStoreBackend = "memory" | "json" | "sqlite";
 
@@ -79,13 +87,16 @@ export interface CreateYishuKernelOptions {
 export interface YishuKernel {
   registry: YishuActionRegistry;
   /**
-   * Transitional full store. History list/open/archive already go through
-   * `conversations`. Remaining runtime callers (PKR turn/memory/watch paths,
-   * delegation.ts store + YishuStorePort, suggestion-loop via registry) still
-   * use this until later PRs migrate them onto narrow ports.
+   * Transitional full store. History, product memory, and context-watch
+   * progression/cancellation already go through narrow Kernel interfaces.
+   * Remaining runtime callers (PKR turn/task/delegation paths, delegation.ts
+   * store + YishuStorePort, suggestion-loop via registry) still use this until
+   * later PRs migrate them onto narrow ports.
    */
   store: YishuStorePort;
   conversations: ConversationLedger;
+  contextWatches: ContextWatchLedger;
+  memories: MemoryLedger;
   trail: ContextTrail;
   taskTruth: TaskTruthProjector;
   storeBackend: YishuStoreBackend;
@@ -145,7 +156,8 @@ function buildMemoryLayer(
 
 /**
  * Wire the product kernel: store + ContextTrail + YishuAction registry.
- * Pi / AgentRuntime remain separate; this is the product capability layer.
+ * The model-tool loop / AgentRuntime remain separate; this is the product
+ * capability layer.
  */
 export function createYishuKernel(
   options: CreateYishuKernelOptions = {},
@@ -156,6 +168,8 @@ export function createYishuKernel(
   const trail = new ContextTrail(options.trail);
   const taskTruth = new TaskTruthProjector(store);
   const conversations = createConversationLedger(store);
+  const contextWatches = createContextWatchLedger(store);
+  const memories = createMemoryLedger(store, memory?.visible);
   const registry = new YishuActionRegistry();
 
   const defaults: AnyYishuAction[] = [
@@ -187,6 +201,8 @@ export function createYishuKernel(
     registry,
     store,
     conversations,
+    contextWatches,
+    memories,
     trail,
     taskTruth,
     storeBackend: backend,

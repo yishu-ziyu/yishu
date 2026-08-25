@@ -42,7 +42,7 @@ import {
   evaluateTaskCompletion,
   looksLikeRelativeTimeReminder,
 } from "@yishu/kernel";
-import type { SessionToolPolicy } from "./loop-adapter.js";
+import type { SessionToolPolicy } from "./session-policy.js";
 import type {
   ContextFrame,
   DelegatedTaskCancelCommand,

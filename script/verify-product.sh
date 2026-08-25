@@ -14,10 +14,12 @@ case "$MODE" in
 esac
 
 ./script/check-product-boundaries.sh
+pnpm dep:check
+pnpm size:check
 pnpm --filter @yishu/kernel check
 pnpm --filter @yishu/runtime check
-pnpm --filter @yishu/kernel test
-pnpm --filter @yishu/runtime test
+pnpm --filter @yishu/kernel test:coverage
+pnpm --filter @yishu/runtime test:coverage
 swift test
 
 if [[ "$MODE" == "full" ]]; then

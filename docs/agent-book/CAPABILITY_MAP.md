@@ -2,12 +2,12 @@
 
 Type: architecture
 Status: current
-Verified: 23b2e07 2026-08-11
+Verified: dd5a362 2026-08-23
 Review: agent-core 能力对照变化时
 
 本书（《深入理解 AI Agent》，bojieli/ai-agent-book）与本仓库的对照。
 书讲通用 Agent 公式与工程；奕枢是个人桌面 Agent Super App。
-本表只写**现在磁盘上有什么**。AgentCore 实验室以 `packages/agent-core/src/**/*.ts` 与 `packages/agent-core/test/*.ts` 为准；正式产品能力以 `packages/kernel`、`packages/runtime` 和 Pi 0.83 SDK 接线为准。
+本表只写**现在磁盘上有什么**。AgentCore 实验室以 `packages/agent-core/src/**/*.ts` 与 `packages/agent-core/test/*.ts` 为准；正式产品能力以 `packages/kernel`、`packages/runtime/src/model-loop/` 和 `YishuLoopRuntimeAdapter` 接线为准。
 
 证据（本机，2026-08-06）：
 
@@ -20,7 +20,7 @@ Review: agent-core 能力对照变化时
 - `pnpm agent -- heartbeat-demo` / `pnpm agent:heartbeat` → EventBus + timer.tick 心跳 demo
 - `pnpm agent -- run "创建工具 greeter kind=const body=hello-from-dynamic"` → `create_tool`（Ch5）
 - `pnpm agent -- promote-skill <traj.json>` → 草稿晋升到 `skills/`
-- `pnpm product:check`（2026-08-11）→ Runtime **163** 通过 + Swift **4** 通过；Pi 为唯一正式 Agent 循环
+- `pnpm product:check`（2026-08-23）→ 边界、Kernel、Runtime 与 Swift 核心验证通过；奕枢自有 model-tool loop 为唯一正式 Agent 循环
 
 ## 1. 公式
 
@@ -36,12 +36,12 @@ Agent = Model + [上下文 + 工具 + 约束 + 验证 + 纠正]
 
 | 部件 | 书中含义 | 本仓库现状 |
 |------|----------|------------|
-| LLM | 决策与工具选择 | `agent-core`：默认 `DeterministicLlm`（离线规则路由）；可选 `OpenAiCompatibleLlm`（`llm-openai.ts`），仅作实验。产品：`packages/runtime` 只装配 Pi 与 Clicky 模型路由。 |
-| 上下文 | 每步模型可见信息 | `agent-core` 实验室：消息列表 + 状态栏 + 压缩 + Skills + 知识库检索结果 + 分层记忆 + 已晋升的 `INSTRUCTIONS.md`。产品：证据化 `ContextFrame` + Kernel memory/trail，经 Runtime 注入 Pi。 |
-| 工具 | 可执行动作 | `agent-core` 实验室：内置 12 个 + 元工具 + 离线 MCP + 动态工具。产品：Pi 内置/custom tools、能力档案、委派与桌面 `computer.action.*`。 |
+| LLM | 决策与工具选择 | `agent-core`：默认 `DeterministicLlm`（离线规则路由）；可选 `OpenAiCompatibleLlm`（`llm-openai.ts`），仅作实验。产品：`packages/runtime` 只装配自有 model-tool loop 与 Clicky 模型路由。 |
+| 上下文 | 每步模型可见信息 | `agent-core` 实验室：消息列表 + 状态栏 + 压缩 + Skills + 知识库检索结果 + 分层记忆 + 已晋升的 `INSTRUCTIONS.md`。产品：证据化 `ContextFrame` + Kernel memory/trail，经 Runtime 注入自有循环。 |
+| 工具 | 可执行动作 | `agent-core` 实验室：内置 12 个 + 元工具 + 离线 MCP + 动态工具。产品：自有循环只装配产品 tools、能力档案、委派与桌面 `computer.action.*`，不带旧引擎内置开发工具。 |
 | 约束 / 验证 / 纠正 | 不越界、可检、可恢复 | `agent-core` 实验室：步数上限、路径沙箱、proposer–reviewer、轨迹校验与 evolve gate。产品：Kernel authority/TaskTruth、Runtime capability profiles、typed cancellation、fresh verification 和可见回执。 |
 
-**工具成功 ≠ 任务完成**：实验室 `run` 用 reviewer/trajectory 验证；正式产品由 Kernel `TaskTruth` 和 fresh evidence 判定，Pi 停止生成不等于任务完成。
+**工具成功 ≠ 任务完成**：实验室 `run` 用 reviewer/trajectory 验证；正式产品由 Kernel `TaskTruth` 和 fresh evidence 判定，模型停止生成不等于任务完成。
 
 ## 2. `packages/agent-core` 源码布局（现存）
 
@@ -89,7 +89,7 @@ packages/agent-core/src/
   index.ts
 ```
 
-AgentCore 不再有 `packages/runtime` 适配器。正式 Runtime 只提供 `PiRuntimeAdapter`，另保留不含模型工具循环的 `MockAgentRuntime` 协议测试替身。
+AgentCore 不再有 `packages/runtime` 适配器。正式 Runtime 只提供 `YishuLoopRuntimeAdapter`，另保留不含模型工具循环的 `MockAgentRuntime` 协议测试替身。
 
 数据目录（相对 `packages/agent-core/`）：
 
@@ -183,7 +183,7 @@ CLI 子命令（`cli.ts` + 根脚本）：
 | Ch4 MCP 互操作 | 已有（agent-core，离线适配） | `tools/mcp-adapter.ts`；`data/mcp/*.json`；无网络 MCP SDK | `pnpm agent -- mcp-list` |
 | Ch4 执行安全（沙箱） | 已有（agent-core，部分） | `resolveWorkspacePath`；`code_exec` 仅算术 | 写文件不可逃逸 workspace |
 | Ch4 事件驱动异步 Agent | 已有（agent-core） | `events/bus.ts`；`events/async-agent.ts` | `pnpm agent -- serve-events`；`pnpm agent:heartbeat` |
-| Ch5 Coding Agent / 文件系统 | 已有（agent-core 窄 + 产品 Pi） | `list_dir`/`read_file`/`write_file`/`code_exec` | `run "列目录 ."` |
+| Ch5 Coding Agent / 文件系统 | 已有（仅 agent-core 窄实验） | `list_dir`/`read_file`/`write_file`/`code_exec`；产品循环不带旧引擎内置开发工具 | `run "列目录 ."` |
 | Ch5 代码元能力自举 | 已有（agent-core，离线安全子集） | `tools/dynamic.ts`：`create_tool` 仅 echo/const/template；落盘 `data/dynamic-tools.json`；下次 `init` 重载 | `run "创建工具 greeter kind=const body=hello"`；单测 `dynamic-tool.test.ts` |
 | Ch6 评估环境与黄金任务 | 已有（agent-core） | `eval/harness.ts`；7 用例（含 knowledge + knowledge-write） | `pnpm agent:eval`（7/7） |
 | Ch6 LLM-as-Judge | 已有（agent-core） | `eval/judge.ts`：`heuristicJudge` / `llmJudge` / `runEvalWithJudge` | `pnpm agent -- judge-eval`；`--judge=llm` 需真实模型 |
@@ -204,7 +204,7 @@ CLI 子命令（`cli.ts` + 根脚本）：
 | Ch10 Peer 协作 | 已有（agent-core） | `multi/peer-review.ts` | `pnpm agent -- peer "…"` |
 | Ch10 分阶段角色 | 已有（agent-core） | `multi/staged-roles.ts` | `pnpm agent -- staged "…"` |
 | 产品身份 / 人格 | 已有（产品） | `docs/persona.md`；`packages/runtime/src/persona.ts` | 可见身份是否始终为「奕枢」 |
-| 产品正式 Agent 循环 | 已有（产品） | Pi `AgentSession` + `packages/runtime/src/pi-runtime-adapter.ts` | `pnpm product:check` |
+| 产品正式 Agent 循环 | 已有（产品） | `packages/runtime/src/model-loop/` + `packages/runtime/src/loop-adapter.ts` | `pnpm product:check` |
 
 说明：
 
@@ -229,7 +229,7 @@ CLI 子命令（`cli.ts` + 根脚本）：
 正式产品
   Clicky → Kernel → packages/runtime
   AgentRuntime 协议
-  ├── PiRuntimeAdapter（唯一正式 Agent 循环，mode=pi）
+  ├── YishuLoopRuntimeAdapter（唯一正式 Agent 循环；mode=pi 是兼容值）
   └── MockAgentRuntime（协议测试替身，mode=mock）
         │
         ▼
@@ -256,7 +256,7 @@ pnpm agent -- staged "列目录 . 并写 summary.md"
 pnpm agent -- serve-events
 pnpm agent -- verify packages/agent-core/data/trajectories/<id>.json
 pnpm agent -- promote-skill packages/agent-core/data/trajectories/<id>.json
-pnpm product:check                                 # 正式 Kernel + Runtime/Pi + Swift
+pnpm product:check                                 # 正式 Kernel + Yishu Runtime + Swift
 # AgentCore 只能通过 lab/agent CLI 独立试验，不能切为产品 Runtime
 ```
 
