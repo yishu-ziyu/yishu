@@ -2,7 +2,7 @@
 
 Type: decision
 Status: current
-Verified:
+Verified: dd5a362 2026-08-23
 Review: Memory write, recall, or sidecar changes (supersedes the homemade implementation of ADR 0013 / 0016)
 
 ## Status

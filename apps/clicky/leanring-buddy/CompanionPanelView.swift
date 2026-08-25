@@ -150,10 +150,17 @@ struct CompanionPanelView: View {
     @ViewBuilder
     private var permissionsCopySection: some View {
         if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("按住 Control + Option")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(DS.Colors.textPrimary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("按住")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    keyboardKey("Control")
+                    Text("+")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    keyboardKey("Option")
+                }
                 Text("松开就发送")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.textTertiary)
@@ -946,6 +953,22 @@ struct CompanionPanelView: View {
     }
 
     // MARK: - Visual Helpers
+
+    private func keyboardKey(_ label: String) -> some View {
+        Text(label)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(DS.Colors.textPrimary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(DS.Colors.surface3)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(DS.Colors.borderStrong, lineWidth: 1)
+            )
+    }
 
     private var panelBackground: some View {
         RoundedRectangle(cornerRadius: 12, style: .continuous)

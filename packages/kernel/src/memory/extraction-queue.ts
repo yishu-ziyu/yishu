@@ -11,7 +11,7 @@ import { mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ExtractionSnapshot } from "./extraction.js";
+import type { ExtractionSnapshot } from "./extraction-types.js";
 
 export type ExtractionStatus = "pending" | "done" | "skipped_model" | "failed";
 

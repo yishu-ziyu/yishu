@@ -22,6 +22,7 @@ import {
   type ComputerControlToolAction,
 } from "./computer-control-tool.js";
 import { isCurrentPageActionsNoteUtterance } from "./delegation.js";
+import { DEFAULT_SESSION_TOOL_POLICY, type SessionToolPolicy } from "./session-policy.js";
 import {
   ComputerActionError,
   UnavailableComputerUsePort,
@@ -36,6 +37,7 @@ import {
   type AuthTransitionKind,
 } from "./auth-service.js";
 import { createYishuCredentialStore } from "./auth-store.js";
+import { readModelConfigSync } from "./model-config.js";
 import type { AuthProviderId } from "./auth-protocol.js";
 import {
   LOCAL_GROK_BASE_URL,
@@ -630,6 +632,7 @@ export function createDefaultProviderRuntime(): ModelProviderRuntime {
   return createYishuProviderRuntime({
     credentialStore: createYishuCredentialStore(),
     localGrokBearer: { value: () => LOCAL_PROXY_AUTH_SENTINEL },
+    modelConfig: readModelConfigSync(),
   });
 }
 
@@ -658,27 +661,6 @@ export interface YishuLoopRuntimeAdapterOptions {
   createSession?: typeof createYishuAgentSession;
   interruptionSteerTimeoutMs?: number;
 }
-
-/**
- * Per-conversation tool surface decided at the createSession boundary
- * (delegation V1, ADR 0009). Main sessions keep computer control, search
- * the public web, and may delegate long work. Delegated child sessions
- * search the web but receive neither computer control nor recursive
- * delegate.
- */
-export interface SessionToolPolicy {
-  readonly computerControl: boolean;
-  /** Tools always registered in Main session registry, but not necessarily active this turn. */
-  readonly registeredExtraTools?: readonly ToolDefinition[];
-  readonly extraTools: ToolDefinition[];
-  /** Explicit active Main-tool names for this prompt; absent keeps extraTools active. */
-  readonly activeExtraToolNames?: readonly string[];
-}
-
-export const DEFAULT_SESSION_TOOL_POLICY: SessionToolPolicy = {
-  computerControl: true,
-  extraTools: [],
-};
 
 export class YishuLoopRuntimeAdapter implements AgentRuntime {
   private readonly workingDirectory: string;
@@ -1085,7 +1067,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       provider: preference.provider,
       model: preference.model,
       generation: generationState.currentGeneration,
-      ...(preference.provider === LOCAL_GROK_PROVIDER ? { baseUrl: LOCAL_GROK_BASE_URL } : {}),
+      ...(preference.provider === LOCAL_GROK_PROVIDER ? { baseUrl: model.baseUrl } : {}),
     }));
 
     const computerTurn: ActiveComputerTurn = {

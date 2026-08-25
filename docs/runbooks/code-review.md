@@ -5,16 +5,15 @@ Status: current
 Verified: e49ac5a 2026-08-18
 Review: when the review trigger, spec-source order, or report shape changes
 
-Use this after implement / before merge or ship. Do not replace tests or `run-local.sh`.
+Use this only when the user types `/code-review` / `/review` or explicitly asks for two-axis review. Do not auto-run after implement. Do not replace tests or `run-local.sh`.
 Canonical method: Matt `/code-review` (Standards × Spec, two parallel agents, never one ranked list).
 Playbook page: `/Users/mahaoxuan/Desktop/coding/wiki/skills/code-review.md`
-Full process: `/private/tmp/blobatar/.agents/skills/code-review/SKILL.md`
 
 ## When
 
-- A product implement, fix, or refactor is ready to accept.
-- A PR or WIP needs review against a named baseline.
-- Not for chat-only questions, translations, or source-import static reads.
+- The user invoked `/code-review`, `/review`, or asked to review a named baseline.
+- A PR or WIP the user pointed at.
+- Not after ordinary implement/fix. Not for chat-only questions, translations, or source-import static reads.
 
 ## Pin the fixed point
 

@@ -2,18 +2,18 @@
 
 Type: wiki
 Status: current
-Verified: 34c0eaa 2026-08-15
+Verified: dd5a362 2026-08-23
 Review: 仓库顶层结构变化时
 
 ## 产品是什么
 
-奕枢（Yishu）是一款**上下文原生的个人 Agent Super App**（macOS）。用户按住 `Control+Option` 对着光标说话，奕枢采集鼠标指向的证据上下文（光标、前台应用、辅助功能元素、屏幕截图），由 Pi Runtime 生成可流式、可取消的回应，再以浮层与 TTS 呈现；并能执行经过验证的桌面动作（点击、Finder 返回、输入文本、新建备忘录、定时提醒）。
+奕枢（Yishu）是一款**上下文原生的个人 Agent Super App**（macOS）。用户按住 `Control+Option` 对着光标说话，奕枢采集鼠标指向的证据上下文（光标、前台应用、辅助功能元素、屏幕截图），由自有 Runtime 生成可流式、可取消的回应，再以浮层与 TTS 呈现；并能执行经过验证的桌面动作（点击、Finder 返回、输入文本、新建备忘录、定时提醒）。
 
 产品的三条根本约束（见根 [README.md](../../README.md) 与 [AGENTS.md](../../AGENTS.md)）：
 
 - **一个身份**：奕枢是唯一用户可见人格；Hanako 是已被吸收的人格设计来源，不是第二个产品。
 - **一个常驻应用**：`apps/clicky` 是唯一 macOS App 源码/构建/安装/验收入口（bundle id `com.yishu.yishu-buddy`，安装于 `/Applications/奕枢.app`）。
-- **一条任务真相**：任务状态只来自 typed Pi `AgentRuntime` 事件经 Kernel `TaskTruth` 的投影；工具成功不等于任务完成。
+- **一条任务真相**：任务状态只来自 typed `AgentRuntime` 事件经 Kernel `TaskTruth` 的投影；工具成功不等于任务完成。
 
 ## 技术栈
 
@@ -25,7 +25,7 @@ Review: 仓库顶层结构变化时
 | Monorepo | pnpm 10 workspace（`packages/*`） |
 | 数据 | SQLite（`node:sqlite` 内置，默认后端）、JSON / 内存后端（测试与开发回退） |
 | Schema | Zod v4（kernel 动作输入、runtime 线协议） |
-| Agent 循环 | Pi（`@earendil-works/pi-coding-agent`），唯一正式执行 harness |
+| Agent 循环 | `packages/runtime/src/model-loop/`，奕枢自有且唯一正式执行 harness |
 | ASR / TTS | StepFun ASR（经本机代理 8787）、MiniMax TTS；Apple Speech 作 shadow partial |
 | CI | GitHub Actions `macos-15`，`pnpm product:verify` + agent-core 独立验收 |
 
@@ -43,7 +43,7 @@ Review: 仓库顶层结构变化时
 ├── Tests/YishuContextTests/      # Swift 契约测试
 ├── packages/
 │   ├── kernel/                   # @yishu/kernel：产品动作、ContextTrail、证据存储
-│   ├── runtime/                  # @yishu/runtime：版本化协议、Pi 适配器、产品投影、stdio server
+│   ├── runtime/                  # @yishu/runtime：版本化协议、自有循环、产品投影、stdio server
 │   └── agent-core/               # @yishu/agent-core：独立离线实验室（非产品依赖）
 ├── docs/                         # ADR、runbooks、架构文档、研究、验收记录
 ├── script/                       # verify-product.sh / check-product-boundaries.sh
@@ -59,7 +59,7 @@ Review: 仓库顶层结构变化时
 | `apps/clicky` | 用户可见常驻存在、语音、TTS、权限、设置、bundle 身份、安装与验收 | 第二个 App、产品真相 |
 | `Sources/YishuContext` | 跨 App/Runtime 的 Swift 证据协议 | UI、权限、生命周期 |
 | `packages/kernel` | 对话、记忆、规则、Action、Skill、TaskTruth、Result Inbox（唯一产品真相） | 模型循环 |
-| `packages/runtime` | Pi `AgentRuntime` 适配器与版本化协议 | 产品身份/记忆/任务真相 |
+| `packages/runtime` | 自有 model-tool loop、`AgentRuntime` 适配器与版本化协议 | 产品身份/记忆/任务真相 |
 | `packages/agent-core` | 离线实验室（ReAct/评估/自进化实验） | 任何产品路径（ADR 0011 禁止接入） |
 
 ## 明确排除项

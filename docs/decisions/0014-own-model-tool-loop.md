@@ -2,7 +2,7 @@
 
 Type: decision
 Status: current
-Verified: 34c0eaa 2026-08-15
+Verified: dd5a362 2026-08-23
 Review: 执行循环、provider 通道或 OAuth 流变化时（只能由新 ADR supersede）
 
 ## Status

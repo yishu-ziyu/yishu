@@ -31,6 +31,13 @@ export type {
   VisibleConversation,
   VisibleConversationTurn,
 } from "./conversation/ledger.js";
+export { createContextWatchLedger } from "./context-watch/ledger.js";
+export type {
+  ContextWatchAdvance,
+  ContextWatchCancellation,
+  ContextWatchLedger,
+  ContextWatchObservationInput,
+} from "./context-watch/ledger.js";
 export {
   routeProductUtterance,
   formatProductActionSpeech,
@@ -49,6 +56,7 @@ export {
   MEMORY_RECALL_MAX_TOTAL_CHARS,
   MEMORY_RECALL_SUMMARY_CHARS,
   contentTokens,
+  createMemoryLedger,
   recallFromVisibleFacts,
   recallRelevantMemories,
   visibleFactId,
@@ -68,6 +76,7 @@ export {
   visibleFactFingerprint,
 } from "./memory/index.js";
 export type {
+  MemoryLedger,
   RecalledMemory,
   RecallRelevantMemoriesOptions,
   VisibleMemoryAuthoritySnapshot,

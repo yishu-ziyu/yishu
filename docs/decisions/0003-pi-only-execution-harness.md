@@ -1,13 +1,13 @@
 # ADR 0003: Pi 是唯一 execution harness
 
 Type: decision
-Status: current
+Status: superseded
 Verified: 21629d6 2026-08-10
 Review: 该决策被重新讨论或推翻时（只能由新 ADR supersede）
 
 ## Status
 
-Accepted
+Superseded by [ADR 0014](0014-own-model-tool-loop.md). The single-harness invariant remains; the harness is now Yishu-owned and Pi is no longer a dependency.
 
 ## Context
 

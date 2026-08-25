@@ -14,18 +14,7 @@ import { MemoryTruthLayer } from "./truth-layer.js";
 import type { VisibleMemoryFile } from "./visible-file.js";
 import { EXTRACTION_MAX_ATTEMPTS, type ExtractionQueuePort } from "./extraction-queue.js";
 
-export interface ExtractionSnapshot {
-  readonly turnId: string;
-  readonly conversationId: string;
-  /** Durable memory namespace (never private). */
-  readonly scopeKey: string;
-  readonly utterance: string;
-  readonly replyText: string;
-  /** Provider/model of the completed turn; extraction follows it (ADR 0016 #4). */
-  readonly providerId: string;
-  readonly modelId: string;
-  readonly capturedAt: string;
-}
+export type { ExtractionSnapshot } from "./extraction-types.js";
 
 export interface MemoryExtractionInput {
   readonly providerId: string;

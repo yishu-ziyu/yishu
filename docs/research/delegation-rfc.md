@@ -2,7 +2,7 @@
 
 Type: research
 Status: current
-Verified: 48da76e 2026-08-11
+Verified: dd5a362 2026-08-23
 Review: 进入 Scope Definition 前；或任一已验证结论被新证据推翻时
 
 **Acceptance: Accepted 2026-08-11。**
@@ -13,18 +13,20 @@ Review: 进入 Scope Definition 前；或任一已验证结论被新证据推翻
 
 Supersedes: Delegation RFC v1（未入库，存在于 2026-08-10 设计对话；v2 第一节记录被删除/修正的 v1 设计）
 
+> ADR 0014 修订：本 RFC 的 2026-08-11 spike 证据发生在旧 `PiRuntimeAdapter` 上；当前生产实现是 `YishuLoopRuntimeAdapter` + `model-loop/`，并由现有 loop-adapter concurrency / delegation tests 保护。旧名称仅描述当时证据，不是当前依赖。
+
 ## 1. v1 → v2：被删除或修正的设计
 
 以下 v1 设计与 spike 证据冲突，**明确删除**，不得在任何后续设计中复活：
 
-1. ~~同一 `PiRuntimeAdapter` 不能并行执行多个独立 execution（v1 视为 blocker 级 unknown）~~ → 已验证可并行，见 §2.1。
+1. ~~同一执行适配器不能并行执行多个独立 execution（v1 视为 blocker 级 unknown）~~ → 已验证可并行，见 §2.1。
 2. ~~Delegation 需要新增 `AgentTask.status` 或独立的 delegated-task 状态系统~~ → 已删除。`TaskTruth` 保持唯一任务状态真相源，见 §2.4。
 3. ~~delegate 需要等待 child result 后才能返回（同步 receipt）~~ → 已删除。异步 `{ accepted, taskId }` receipt 成立，见 §2.3。
 4. ~~parent-child truth 需要新的关联/终态机制~~ → 已删除。现有 `parentId + terminal guard` 足够，见 §2.6。
 
 ## 2. 已验证结论（spike 证据：docs/spikes/2026-08-10-delegation-concurrency.md）
 
-1. **同一 `PiRuntimeAdapter` 可以并行执行不同 `conversationId` 的真实 Pi session。** 真实证据：B 在 A 完成前 3.806s 启动，两个不同真实 sessionId，双双完成（2026-08-11，openai-codex/gpt-5.4-mini）。
+1. **同一执行适配器可以并行执行不同 `conversationId` 的独立 session。** 历史 spike 证据：B 在 A 完成前 3.806s 启动，两个不同真实 sessionId，双双完成（2026-08-11，旧 Pi adapter，openai-codex/gpt-5.4-mini）；当前等价边界由 `loop-adapter-concurrency.test.ts` 保护。
 2. **request / session / event / cancel 可以保持隔离。** 事件按 requestId 归属零交叉；cancel A 不影响并发 B；dispose 终止全部 in-flight session。
 3. **Delegation 可以采用异步 `{ accepted, taskId }` receipt。** receipt 在 child 仍 running 时返回；child 独立到达终态。
 4. **`TaskTruth` 继续作为唯一任务状态真相源。**
@@ -88,8 +90,8 @@ Supersedes: Delegation RFC v1（未入库，存在于 2026-08-10 设计对话；
 - Gmail integration
 - Presence UI
 - 真实进行中 turn 的 cancel 传播
-- computer-use profile 并发时的 Desktop 动作互斥（Spike E 只验证 lease 语义，不验证真实 Pi 并发 desktop 执行）
+- computer-use profile 并发时的 Desktop 动作互斥（Spike E 只验证 lease 语义，不验证真实 provider 并发 desktop 执行）
 
 ## 5. 不变量继承
 
-本 RFC 不改变任何已有架构约束：`kernel ← runtime → agent-core`；Pi 为唯一 execution harness；Clicky identity / TCC / signing 不变；协议 `schemaVersion 1` 内 additive 演进；不引入 Kairos 或第二套 runtime。
+本 RFC 不改变任何已有架构约束：`runtime → kernel` 且 agent-core 与产品解耦；`packages/runtime/src/model-loop/` 为唯一 execution harness；Clicky identity / TCC / signing 不变；协议 `schemaVersion 1` 内 additive 演进；不引入 Kairos 或第二套 runtime。

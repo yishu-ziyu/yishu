@@ -40,7 +40,7 @@ swift test
 pnpm product:verify
 ```
 
-After implement / before merge: Matt two-axis code review (Standards × Spec). Procedure: `docs/runbooks/code-review.md`. Do not merge the two axes into one ranked list.
+Matt two-axis code review (Standards × Spec) only when the user types `/code-review` / `/review` or explicitly asks. Procedure: `docs/runbooks/code-review.md`. Do not auto-run after implement. Do not merge the two axes into one ranked list.
 
 For user-visible changes, launch the app and inspect the real floating presence. A build alone is not product acceptance.
 

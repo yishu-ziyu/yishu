@@ -2,7 +2,7 @@
 
 Type: wiki
 Status: current
-Verified: 34c0eaa 2026-08-15
+Verified: dd5a362 2026-08-23
 Review: 包依赖或边界守卫规则变化时
 
 ## 包间依赖图
@@ -24,7 +24,8 @@ flowchart TD
     AC["@yishu/agent-core"]
   end
 
-  PI["Pi SDK<br/>@earendil-works/pi-coding-agent"]
+  ML["Yishu model-loop<br/>runtime 内部源码"]
+  STAGEHAND["Stagehand<br/>browser automation"]
   GROK["本机 8317 上游代理<br/>(cli-proxy, 仓外)"]
 
   SW -->|"import（typealias 唯一边界）"| YC
@@ -32,7 +33,8 @@ flowchart TD
   SW -->|"spawn + bearer token<br/>127.0.0.1:8787"| WP
   WP --> GROK
   R -->|"workspace 依赖（唯一库消费者）"| K
-  R --> PI
+  R --> ML
+  R --> STAGEHAND
   K -.->|"❌ 不依赖 runtime / agent-core"| R
   AC -.->|"❌ 与产品完全解耦（ADR 0011）"| R
   AC -.->|"❌"| K
@@ -50,7 +52,7 @@ flowchart TD
 |----|-----------|-----------------|
 | 根（workspace） | — | —（脚本入口） |
 | `@yishu/kernel` | `zod ^4.1.12` | typescript、tsx、@types/node |
-| `@yishu/runtime` | `@earendil-works/pi-coding-agent@0.83.0`、`@yishu/kernel`（workspace）、`typebox`、`zod` | typescript、tsx、@types/node |
+| `@yishu/runtime` | `@browserbasehq/stagehand`、`@yishu/kernel`（workspace）、`typebox`、`zod` | typescript、tsx、@types/node |
 | `@yishu/agent-core` | （无外部运行时依赖，纯 Node 内置） | typescript、tsx 等 |
 | `apps/clicky`（Swift） | `YishuContext`（根 Swift 包）；系统框架（SwiftUI/AppKit/AVFoundation/Vision/ScreenCaptureKit/UNUserNotificationCenter/AXUIElement/Quartz） | — |
 | `apps/clicky/worker` | —（node http / CF runtime） | wrangler |
@@ -62,7 +64,7 @@ flowchart TD
 | 数据 | 位置 | 拥有者 |
 |------|------|--------|
 | 产品真相（对话/记忆/任务/Mind/suggestion） | `~/Library/Application Support/Yishu/Store/*.sqlite`（默认） | `@yishu/kernel` store |
-| runtime 会话 | 进程内（Pi 内存缓存，非真相） | `@yishu/runtime` |
+| runtime 会话 | 进程内（自有 model-loop 缓存，非真相） | `@yishu/runtime` |
 | provider OAuth 凭据 | runtime 凭据存储（0700/0600 文件锁） | `@yishu/runtime` auth-store |
 | 语音/模型 API key | `worker/.dev.vars` → `~/Library/Application Support/Yishu/Worker/.dev.vars`（0600） | worker |
 | 会话身份（conversationId、scope、语速等） | UserDefaults | Clicky |
@@ -75,7 +77,7 @@ flowchart TD
 | # | 规则 | 实现 |
 |---|------|------|
 | 1 | 唯一 macOS App 源码 | pbxproj 必含 `com.yishu.yishu-buddy`；Package.swift 必含 `Sources/YishuContext`；`apps/macos` 不得存在；不得出现第二个 executableTarget |
-| 2 | 正式 Clicky 固定启动 Pi | `YishuAgentRuntimeClient.swift` 必含 `YISHU_RUNTIME_MODE = "pi"` 与 `YISHU_PRODUCT_KERNEL = "1"`；run-local.sh 必含 `rm -rf bundle_root` 与 `ENABLE_DEBUG_DYLIB=NO` |
+| 2 | 正式 Clicky 固定启动唯一自有循环 | `YishuAgentRuntimeClient.swift` 必含兼容值 `YISHU_RUNTIME_MODE = "pi"` 与 `YISHU_PRODUCT_KERNEL = "1"`；`runtime-factory.ts` 只能把该值装配为 `YishuLoopRuntimeAdapter`；run-local.sh 必含 `rm -rf bundle_root` 与 `ENABLE_DEBUG_DYLIB=NO` |
 | 3 | AgentCore 不得接回产品 | `apps/clicky/leanring-buddy`、`packages/runtime/src`、runtime `package.json`、run-local.sh 不得含 `@yishu/agent-core` / `AgentCoreRuntime` / `packages/agent-core` |
 | 4 | Kairos 不得复活 | `apps/` 与 `packages/` 不得含 `KairosBridgeClient` / `RunProgressPresenter` / `forceKairosRouting` |
 

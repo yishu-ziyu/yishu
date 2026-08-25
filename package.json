@@ -11,6 +11,8 @@
     "build": "pnpm -r build",
     "check": "pnpm -r check",
     "test": "pnpm -r test",
+    "dep:check": "depcruise --config dependency-cruiser.config.cjs --output-type err packages",
+    "size:check": "node script/check-file-size-limit.cjs",
     "product:check": "./script/verify-product.sh core",
     "product:verify": "./script/verify-product.sh full",
     "product:boundaries": "./script/check-product-boundaries.sh",
@@ -41,5 +43,8 @@
       "brace-expansion": "5.0.9",
       "undici": "8.10.0"
     }
+  },
+  "devDependencies": {
+    "dependency-cruiser": "^18.2.0"
   }
 }

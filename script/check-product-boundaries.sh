@@ -59,12 +59,13 @@ reject_source_pattern '@yishu/agent-core|AgentCoreRuntime' packages/runtime/src 
 # The canonical Clicky bundle may not copy the standalone AgentCore laboratory.
 reject_source_pattern '@yishu/agent-core|packages/agent-core|AgentCoreRuntime' apps/clicky/scripts/run-local.sh
 
-echo "Product boundary check passed: Clicky body -> Product Kernel -> Pi runtime"
+echo "Product boundary check passed: Clicky body -> Product Kernel -> Yishu runtime"
 
-# PR-1 ratchet: history list/open/archive left the raw store. Count the
-# kernel.store token (not storeBackend). Remaining backdoors until later PRs:
-# PKR other domains, delegation.ts (2 store + YishuStorePort), suggestion-loop
-# still holds YishuKernel.
+# Narrow-port ratchet: history, product-memory, and context-watch progression /
+# cancellation left the raw store. Count the kernel.store token (not
+# storeBackend). Remaining backdoors until later PRs: PKR other domains,
+# delegation.ts (2 store + YishuStorePort), suggestion-loop still holds
+# YishuKernel.
 #
 # Caps are ceilings: counts and allowlisted files may fall to zero. Only a new
 # file or a count above the ceiling fails.
@@ -124,14 +125,14 @@ assert_files_in_allowlist() {
 }
 
 PKR_STORE_COUNT="$(count_source_matches 'kernel\.store\b' packages/runtime/src/product-kernel-runtime.ts)"
-if [[ "$PKR_STORE_COUNT" -gt 49 ]]; then
-  echo "Product boundary check failed: product-kernel-runtime.ts kernel.store count $PKR_STORE_COUNT exceeds 49" >&2
+if [[ "$PKR_STORE_COUNT" -gt 37 ]]; then
+  echo "Product boundary check failed: product-kernel-runtime.ts kernel.store count $PKR_STORE_COUNT exceeds 37" >&2
   exit 1
 fi
 
 RUNTIME_STORE_COUNT="$(count_source_matches 'kernel\.store\b' packages/runtime/src)"
-if [[ "$RUNTIME_STORE_COUNT" -gt 51 ]]; then
-  echo "Product boundary check failed: packages/runtime/src kernel.store count $RUNTIME_STORE_COUNT exceeds 51" >&2
+if [[ "$RUNTIME_STORE_COUNT" -gt 39 ]]; then
+  echo "Product boundary check failed: packages/runtime/src kernel.store count $RUNTIME_STORE_COUNT exceeds 39" >&2
   exit 1
 fi
 
@@ -148,4 +149,4 @@ fi
 assert_files_in_allowlist 'YishuStorePort\b' 'YishuStorePort' \
   packages/runtime/src/delegation.ts
 
-echo "Product boundary check passed: runtime kernel.store cap PKR<=49 src<=51 files<=delegation+PKR; YishuStorePort<=2 files<=delegation"
+echo "Product boundary check passed: runtime kernel.store cap PKR<=37 src<=39 files<=delegation+PKR; YishuStorePort<=2 files<=delegation"

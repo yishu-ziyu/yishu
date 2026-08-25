@@ -5,10 +5,11 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 /**
- * PR-1 ratchet: history list/open/archive must not use the raw store.
+ * Narrow-port ratchet: history, product-memory, and context-watch methods must
+ * not use the raw store.
  *
  * Remaining backdoors until later PRs finish the narrow-port migration:
- * - ProductKernelRuntime still has other kernel.store calls (cap 49)
+ * - ProductKernelRuntime still has other kernel.store calls (cap 37)
  * - packages/runtime/src/delegation.ts: 2 kernel.store + 2 YishuStorePort
  * - suggestion-loop.ts holds YishuKernel and invokes registry
  *
@@ -30,8 +31,16 @@ const ALLOWED_STORE_PORT_FILES = new Set([
   "packages/runtime/src/delegation.ts",
 ]);
 const HISTORY_METHODS = ["listHistory", "openHistory", "deleteHistory"] as const;
-const PKR_STORE_MAX = 49;
-const RUNTIME_SRC_STORE_MAX = 51;
+const MEMORY_METHODS = [
+  "hydrateVisibleMemory",
+  "listMemories",
+  "forgetMemory",
+  "rememberMemory",
+  "recallForOrdinaryTurn",
+] as const;
+const CONTEXT_WATCH_METHODS = ["observeTrailSerial", "cancelTask"] as const;
+const PKR_STORE_MAX = 37;
+const RUNTIME_SRC_STORE_MAX = 39;
 const RUNTIME_SRC_STORE_PORT_MAX = 2;
 
 function countStoreTokens(source: string): number {
@@ -113,9 +122,13 @@ async function listTsFiles(dir: string): Promise<string[]> {
   return out;
 }
 
-test("history methods do not use the raw store; remaining kernel.store stays capped", async () => {
+test("migrated product methods avoid the raw store; remaining access stays capped", async () => {
   const pkrSource = await readFile(PKR, "utf8");
-  for (const methodName of HISTORY_METHODS) {
+  for (const methodName of [
+    ...HISTORY_METHODS,
+    ...MEMORY_METHODS,
+    ...CONTEXT_WATCH_METHODS,
+  ]) {
     const body = extractAsyncMethodBody(pkrSource, methodName);
     assert.equal(
       countStoreTokens(body),

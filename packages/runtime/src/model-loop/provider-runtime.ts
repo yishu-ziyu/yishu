@@ -7,6 +7,13 @@
  */
 
 import type { YishuCredentialStore } from "../auth-store.js";
+import {
+  defaultLocalModelConfig,
+  providerById,
+  resolveProviderApiKey,
+  type LocalModelConfig,
+  type LocalModelProviderConfig,
+} from "../model-config.js";
 import { LOCAL_GROK_BASE_URL, LOCAL_GROK_PROVIDER } from "../protocol.js";
 import {
   isExpiring,
@@ -31,13 +38,13 @@ export interface LocalGrokBearer {
 const LOCAL_GROK_CONTEXT_WINDOW = 128_000;
 const LOCAL_GROK_MAX_TOKENS = 8_192;
 
-function localGrokModel(id: string): ProviderModelListing & ResolvedModel {
+function localGrokModel(id: string, baseUrl: string): ProviderModelListing & ResolvedModel {
   return {
     id,
     name: id,
     providerId: LOCAL_GROK_PROVIDER,
     api: "openai-completions",
-    baseUrl: LOCAL_GROK_BASE_URL,
+    baseUrl,
     input: ["text", "image"],
     contextWindow: LOCAL_GROK_CONTEXT_WINDOW,
     maxTokens: LOCAL_GROK_MAX_TOKENS,
@@ -74,20 +81,30 @@ const CODEX_PROVIDER: ProviderDefinition = {
 export interface YishuProviderRuntimeOptions {
   credentialStore: YishuCredentialStore;
   localGrokBearer: LocalGrokBearer;
+  modelConfig?: LocalModelConfig;
 }
 
 export class YishuProviderRuntime implements ModelProviderRuntime {
   private readonly localGrokModels = new Map<string, ReturnType<typeof localGrokModel>>();
   private readonly providerVersions = new Map<string, number>();
 
-  constructor(private readonly options: YishuProviderRuntimeOptions) {}
+  constructor(private readonly options: YishuProviderRuntimeOptions) {
+    const cfg = this.localGrokProvider();
+    for (const modelId of cfg.models) {
+      this.localGrokModels.set(modelId, localGrokModel(modelId, cfg.baseUrl));
+    }
+  }
+
+  private localGrokProvider(): LocalModelProviderConfig {
+    return providerById(this.options.modelConfig ?? defaultLocalModelConfig());
+  }
 
   getProvider(providerId: string): ProviderDefinition | undefined {
     if (providerId === LOCAL_GROK_PROVIDER) {
       return {
         id: LOCAL_GROK_PROVIDER,
-        name: "Yishu Local Grok",
-        baseUrl: LOCAL_GROK_BASE_URL,
+        name: this.localGrokProvider().name,
+        baseUrl: this.localGrokProvider().baseUrl,
         oauth: false,
         models: [...this.localGrokModels.values()].map(({ id, name }) => ({ id, name })),
       };
@@ -103,7 +120,10 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   }
 
   async checkAuth(providerId: string): Promise<{ type: "api_key" | "oauth" } | undefined> {
-    if (providerId === LOCAL_GROK_PROVIDER) return { type: "api_key" };
+    if (providerId === LOCAL_GROK_PROVIDER) {
+      const key = resolveProviderApiKey(this.localGrokProvider()) ?? this.options.localGrokBearer.value();
+      return key && key.length > 0 ? { type: "api_key" } : undefined;
+    }
     const provider = this.getProvider(providerId);
     if (!provider?.oauth) return undefined;
     const credential = await this.readCredential(providerId);
@@ -111,7 +131,10 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   }
 
   async getAuth(providerId: string): Promise<unknown> {
-    if (providerId === LOCAL_GROK_PROVIDER) return { apiKey: this.options.localGrokBearer.value() };
+    if (providerId === LOCAL_GROK_PROVIDER) {
+      const key = resolveProviderApiKey(this.localGrokProvider()) ?? this.options.localGrokBearer.value();
+      return key && key.length > 0 ? { apiKey: key } : undefined;
+    }
     const credential = await this.usableCredential(providerId);
     if (!credential) return undefined;
     const email = typeof credential.email === "string" ? credential.email : undefined;
@@ -138,7 +161,7 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
     if (providerId === LOCAL_GROK_PROVIDER) {
       let model = this.localGrokModels.get(modelId);
       if (!model) {
-        model = localGrokModel(modelId);
+        model = localGrokModel(modelId, this.localGrokProvider().baseUrl);
         this.localGrokModels.set(modelId, model);
       }
       return model;
@@ -164,7 +187,10 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   }
 
   async bearer(providerId: string): Promise<string> {
-    if (providerId === LOCAL_GROK_PROVIDER) return this.options.localGrokBearer.value();
+    if (providerId === LOCAL_GROK_PROVIDER) {
+      const key = resolveProviderApiKey(this.localGrokProvider()) ?? this.options.localGrokBearer.value();
+      if (key && key.length > 0) return key;
+    }
     const credential = await this.usableCredential(providerId);
     if (!credential) throw new Error(`OAuth is not configured for ${providerId}.`);
     return credential.access;

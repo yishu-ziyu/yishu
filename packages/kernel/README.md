@@ -2,7 +2,7 @@
 
 Type: architecture
 Status: current
-Verified: 21629d6 2026-08-10
+Verified: dd5a362 2026-08-23
 Review: kernel 公开能力或验收标准变化时
 
 Product kernel for Yishu: typed `YishuAction` registry, `ContextTrail`, evidence store (`YishuStore`), and `ContextCapsule` handoff.
@@ -12,26 +12,27 @@ Product kernel for Yishu: typed `YishuAction` registry, `ContextTrail`, evidence
 - Product actions with authority, risk, verify, and audit `ActionReceipt`
 - Rolling context trail (sanitized frames, no screenshot bytes)
 - Evidence store: `MemoryClaim`, `Learning`, `SkillCandidate` / `VerifiedSkill`, `Mandate`, `TaskTruth`
+- Narrow ledgers: `ConversationLedger`, `MemoryLedger`, and `ContextWatchLedger` keep Runtime away from raw-store policy
 - Product-owned `TaskTruthProjector`: execution observations → monotonic, durable task state
 - Backends: `memory` | `json` | **`sqlite`** (`node:sqlite`, default for product hosts)
 - Trail-replay skill verification (ordered app/window evidence, not mouse coords)
 - Utterance router for short voice commands
-- Short-lived `ContextCapsule` for multi-agent handoff (Pi / Codex / Claude / Cua)
+- Short-lived `ContextCapsule` for multi-agent handoff (Yishu loop / Codex / Claude / Cua)
 
 ## What this is not
 
-- Not a Pi replacement
+- Not the model-tool execution loop
 - Not an Agent-Native runtime or dependency
 - Not the Clicky shell or Swift actuator
 
-Pi stays the execution harness. This package is the product layer above it.
+The Yishu-owned loop stays the execution harness. This package is the product layer above it.
 
 ## Quick start
 
 ```ts
 import { createYishuKernel } from "@yishu/kernel";
 
-const { registry, store, trail, taskTruth, defaultActionNames } = createYishuKernel();
+const { registry, store, conversations, memories, contextWatches, trail, taskTruth, defaultActionNames } = createYishuKernel();
 // defaultActionNames: remember, forget, remember_how, share_context, record_learning
 
 // Optional: feed recent frames (no raw image bytes stored in trail)
@@ -104,6 +105,8 @@ src/
               record_suggestion, settle_suggestion, learn_mind_from_pattern
   mind/       sectioned Yishu Mind document + outcome thresholds
   context/    ContextTrail, ContextCapsule, sanitize
+  conversation/  ConversationLedger bounded product facade
+  memory/     MemoryLedger, recall policy, visible-memory authority
   store/      YishuStore, MemoryClaim / Skill / Mandate / Mind / Suggestion types
   task-truth.ts  execution progress -> durable TaskTruth policy
   kernel.ts   createYishuKernel

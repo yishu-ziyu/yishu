@@ -2,7 +2,7 @@
 
 Type: debt
 Status: current
-Verified: 4b1e3b1 2026-08-12
+Verified: dd5a362 2026-08-23
 Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 使用规则：
@@ -13,26 +13,26 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 ## debt-001: god-file CompanionManager.swift
 
-- what: `CompanionManager.swift` 约 3004 行，identity / relationship / cancellation / presentation 多职责集中于单文件。
+- what: `CompanionManager.swift` 4613 行，identity / relationship / cancellation / presentation / desktop execution 多职责集中于单文件。
 - why deferred: 触及正式外壳核心路径，拆分无即时功能收益，留待职责边界变化时重构。
-- evidence: `apps/clicky/leanring-buddy/CompanionManager.swift`（2026-08-10 实测 3004 行）
+- evidence: `apps/clicky/leanring-buddy/CompanionManager.swift`（2026-08-23 实测 4613 行）
 - revisit trigger: 需要改动 Companion 职责边界或新增职责域时。
 - severity: medium
 
 ## debt-002: god-file yishu-store.ts
 
-- what: kernel 证据存储单文件约 2324 行。
+- what: kernel 证据存储单文件 3163 行。
 - why deferred: 同上——行为稳定，拆分留待存储域扩张时。
-- evidence: `packages/kernel/src/store/yishu-store.ts`（2026-08-10 实测 2324 行）
+- evidence: `packages/kernel/src/store/yishu-store.ts`（2026-08-23 实测 3163 行）
 - revisit trigger: 新增证据类型或 backend 导致文件继续膨胀时。
 - severity: medium
 
 ## debt-003: god-file product-kernel-runtime.ts
 
-- what: runtime 产品内核单文件约 2084 行，宜按 history / memory / turn 域拆分。
-- why deferred: 拆分是纯结构改动，待域边界稳定后一次做。
-- evidence: `packages/runtime/src/product-kernel-runtime.ts`（2026-08-10 实测 2084 行）
-- revisit trigger: 任一域（history / memory / turn）需要独立演进或独立测试时。
+- what: runtime 产品内核单文件 4496 行。history、memory list/read-back/forget/visible hydration/recall、context-watch 推进/取消已分别通过 `ConversationLedger`、`MemoryLedger`、`ContextWatchLedger` 收回 Kernel；turn/task/delegation 等域仍直接访问 raw store。
+- why deferred: 继续按真实独立演进的领域逐个抽取，不做一次性机械拆文件。
+- evidence: `packages/runtime/src/product-kernel-runtime.ts`（2026-08-23 实测 4496 行）；边界棘轮中该文件 `kernel.store` 访问由 50 降至 37，门槛同步从 49 降至 37，没有放宽。
+- revisit trigger: turn/task/delegation 任一域需要独立演进，或新增 raw-store 访问时；棘轮必须单调下降。
 - severity: medium
 
 ## debt-005: 死代码（OpenAIAPI / ElementLocationDetector）
@@ -79,15 +79,15 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 - what: `cancelTurn` 不校验 requestId 是否存在，统一发 `turn.cancelled`。
 - why deferred: 行为对调用方无害，修正属语义收紧，需评估兼容性。
-- evidence: `packages/runtime/src/pi-runtime-adapter.ts:411` `cancelTurn()`——`hasActiveRequest` 检查仅控制 `cancelledRequestIds` 登记，`turn.cancelled` 事件于 :422 无条件 emit。
+- evidence: `packages/runtime/src/loop-adapter.ts` 的 `cancelTurn()`——`hasActiveRequest` 检查仅控制 `cancelledRequestIds` 登记，`turn.cancelled` 仍无条件 emit。
 - revisit trigger: 有调用方依赖取消幂等语义，或协议 schemaVersion 演进时。
 - severity: low
 
 ## debt-012: 纯工具回合被判 failed 的隐性规则
 
-- what: `response.completed` 要求 `streamedText` 非空，纯工具回合（无文本输出）会被判 failed——隐性规则未显式表达。
+- what: `response.completed` 要求最终 `authoritativeText` 非空，纯工具回合（无文本输出）会被判 failed——隐性规则未显式表达。
 - why deferred: 修正涉及 TaskTruth 语义，需与产品确认"纯工具回合"的终态定义。
-- evidence: `packages/runtime/src/pi-runtime-adapter.ts:367` `runTurn()`——`streamedText` 为空即 `throw "Pi completed the turn without a user-visible response."`，纯工具回合落入 failed 路径。
+- evidence: `packages/runtime/src/loop-adapter.ts` 的 `startTurn()`——`authoritativeText` 为空即抛出 `completed the turn without a user-visible response`，纯工具回合落入 failed 路径。
 - revisit trigger: 出现纯工具回合误报，或定义任务终态语义时。
 - severity: medium
 
@@ -95,7 +95,7 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 - what: 模型解析早期失败统一归因为 `invalid_model_preference`，覆盖非 preference 类失败，命名误导。
 - why deferred: 改名影响错误码消费方，需区分失败类别后一次做。
-- evidence: `packages/runtime/src/pi-runtime-adapter.ts:255`（模型解析早期失败统一发 `invalid_model_preference`）
+- evidence: `packages/runtime/src/loop-adapter.ts` 的模型/会话准备 catch（模型解析早期失败统一发 `invalid_model_preference`）
 - revisit trigger: 错误码消费方（UI / 日志分析）需要区分失败类别时。
 - severity: low
 
@@ -125,10 +125,10 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 
 ## debt-017: delegated child session release 缺少穷举生命周期回归
 
-- what: `DelegationCoordinator` 已在 child promise 的 `finally` 中按 conversationId 调用 `PiRuntimeAdapter.releaseConversationSession()`，实现终态后精确释放；但尚缺一项回归，穷举 success / failed / cancel / exception / dispose 后都断言 child cache 尺寸不增长。
+- what: `DelegationCoordinator` 已在 child promise 的 `finally` 中按 conversationId 调用 `YishuLoopRuntimeAdapter.releaseConversationSession()`，实现终态后精确释放；但尚缺一项回归，穷举 success / failed / cancel / exception / dispose 后都断言 child cache 尺寸不增长。
 - why deferred: 生产接线和全套 Runtime 回归已通过；保留一项聚焦的测试债，不扩展成重复的终态组合测试。
 - evidence: `packages/runtime/src/delegation.ts` 的 child `finally`，`packages/runtime/src/loop-adapter.ts` 的 `releaseConversationSession()`；现有 suite 已跑通实际 child session 创建边界，但未穷举各类终态的 cache non-growth。
-- revisit trigger: 修改 delegation 终态、cancel / dispose、Pi session cache 或 child promise 生命周期时；或出现 session 累积证据时。
+- revisit trigger: 修改 delegation 终态、cancel / dispose、model-loop session cache 或 child promise 生命周期时；或出现 session 累积证据时。
 - severity: low
 
 ## debt-018: 循环内化后的残留命名
@@ -138,3 +138,19 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 - evidence: `packages/runtime/src/loop-adapter.ts`（构造参数）、`packages/runtime/src/capability-profiles.ts`、`packages/runtime/src/runtime-factory.ts`
 - revisit trigger: 触及 runtime-factory / capability 档位 / Clicky 启动环境变量时。
 - severity: low
+
+## debt-019: 巨型循环依赖组件（product-kernel-runtime hub）
+
+- what: dependency-cruiser（`pnpm dep:check`）检出 326 条参与循环的边，集中在 `packages/runtime/src` 的巨型强连通组件。根因是 `product-kernel-runtime.ts`（4496 行 god-file）同时 import 大量模块又被其 import，形成辐辏式循环网；这不是若干独立小环，而是以 hub 为中心的一个大 SCC。
+- why deferred: 拆 hub 是重构性工作，触达验证 / 桌面执行核心路径，无即时功能收益；机械一次性拆文件风险高，需按域逐个抽取（与 debt-003 同路径）。
+- evidence: `pnpm dep:check`（2026-08-25）no-circular warn 326 条；跨包架构边界 0 error（已由 dependency-cruiser `forbidden` 规则锁定为 error 门禁）。两处直接小环 `delegation↔loop-adapter`（SessionToolPolicy 抽至 `session-policy.ts`）、`extraction-queue↔extraction`（ExtractionSnapshot 抽至 `extraction-types.ts`）已抽离，madge 清零，但边数主体未降——证明必须拆 hub 才治本。
+- revisit trigger: 拆分 `product-kernel-runtime.ts` 或减少 raw store 访问时；或任何触达 Turn / Task / Delegation 域时。SCC 边数必须随 hub 拆分单调下降。
+- severity: high
+
+## debt-020: 循环第一刀 + 尺寸红线判定改进
+
+- what: 第一刀拆出 `product-kernel-runtime.helpers.ts`（966 行模块级纯函数/常量层，无 this），`product-kernel-runtime.ts` 从 4499 → 3542 行；同关 loop `delegation↔loop-adapter`（抽 `session-policy.ts`）、`extraction-queue↔extraction`（抽 `extraction-types.ts`）已清零。同时把 `script/check-file-size-limit.cjs` 判定从"所有 >400 文件"收紧为"**含 class 定义**的 >400 文件"（14 个为基线，纯函数 helper 文件不计数，因其是拆分中间态且对改动传播风险低）。
+- why deferred: 这是把 god-file 按"纯函数层 / class 本体"切分的第一步，帮助 hub SCC 根因定位；但 class 本体（turn/task/delegation 域方法）仍全部集中，是下一刀目标。
+- evidence: `packages/runtime/src/product-kernel-runtime.helpers.ts`（新增，966 行）；`packages/runtime/src/product-kernel-runtime.ts` 3542 行；`script/check-file-size-limit.cjs`（BASELINE=14，按 class 判定）。
+- revisit trigger: 继续拆 `product-kernel-runtime.ts` 的 class 方法域时；把 helpers 进一步拆到每文件 ≤400 后回调基线时。
+- severity: medium
