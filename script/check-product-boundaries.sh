@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+SEARCH=(node "$ROOT_DIR/script/search-source.cjs")
+
 require_literal() {
   local file="$1"
   local literal="$2"
@@ -18,7 +20,7 @@ reject_source_pattern() {
   local output status
   shift
   set +e
-  output="$(rg -n --glob '!**/dist/**' --glob '!**/.build/**' "$pattern" "$@" 2>&1)"
+  output="$("${SEARCH[@]}" reject "$pattern" "$@" 2>&1)"
   status=$?
   set -e
   if [[ $status -eq 0 ]]; then
@@ -74,19 +76,15 @@ count_source_matches() {
   shift
   local output status
   set +e
-  output="$(rg -o --glob '!**/dist/**' --glob '!**/.build/**' "$pattern" "$@" 2>&1)"
+  output="$("${SEARCH[@]}" count "$pattern" "$@" 2>&1)"
   status=$?
   set -e
-  if [[ $status -eq 1 ]]; then
-    printf '0'
-    return
-  fi
   if [[ $status -ne 0 ]]; then
     printf '%s\n' "$output" >&2
     echo "Product boundary check failed: source search could not complete" >&2
     exit "$status"
   fi
-  printf '%s\n' "$output" | wc -l | tr -d '[:space:]'
+  printf '%s' "$output"
 }
 
 # Hits may disappear. Reject only files outside the allowlist.
@@ -96,7 +94,7 @@ assert_files_in_allowlist() {
   shift 2
   local files status file allowed candidate
   set +e
-  files="$(rg -l --glob '!**/dist/**' --glob '!**/.build/**' "$pattern" packages/runtime/src | sort)"
+  files="$("${SEARCH[@]}" files "$pattern" packages/runtime/src | sort)"
   status=$?
   set -e
   if [[ $status -eq 1 ]]; then

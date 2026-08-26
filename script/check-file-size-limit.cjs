@@ -14,6 +14,11 @@
  * lowers the count; lower BASELINE after a deliberate shrink so the ratchet
  * only ever moves down.
  *
+ * Swift: CompanionManager.swift is the current product god-file at 4609 lines.
+ * That number is a ceiling for product Swift under apps/clicky/leanring-buddy/
+ * (not Tests, not build/, not DerivedSources). Never raise it. Do not split
+ * CompanionManager in this gate; shrink in place, then lower SWIFT_LINE_CEILING.
+ *
  * Report with: pnpm size:check
  */
 
@@ -86,3 +91,74 @@ if (pureOver.length > 0) {
     console.log(`  [pure ] ${x.lines} ${path.relative(ROOT, x.file)}`);
   }
 }
+
+const SWIFT_ROOT = path.join(ROOT, "apps/clicky/leanring-buddy");
+// CompanionManager.swift current size. Ceiling only: never raise.
+const SWIFT_LINE_CEILING = 4609;
+const COMPANION_MANAGER = "CompanionManager.swift";
+const SWIFT_SKIP_DIRS = new Set(["Tests", "build", "DerivedSources"]);
+
+function collectProductSwift(dir, out = []) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    console.error(`Swift god-file ratchet FAILED: cannot read ${dir}: ${err.message}`);
+    process.exit(1);
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (SWIFT_SKIP_DIRS.has(entry.name)) continue;
+      collectProductSwift(full, out);
+    } else if (entry.name.endsWith(".swift")) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+function swiftLineCount(content) {
+  if (content.length === 0) return 0;
+  const parts = content.split("\n");
+  return content.endsWith("\n") ? parts.length - 1 : parts.length;
+}
+
+if (!fs.existsSync(SWIFT_ROOT)) {
+  console.error(
+    `Swift god-file ratchet FAILED: missing product Swift root ${path.relative(ROOT, SWIFT_ROOT)}`,
+  );
+  process.exit(1);
+}
+
+const swiftFiles = collectProductSwift(SWIFT_ROOT)
+  .map((file) => ({
+    file,
+    lines: swiftLineCount(fs.readFileSync(file, "utf8")),
+  }))
+  .sort((a, b) => b.lines - a.lines);
+
+const companion = swiftFiles.find((x) => path.basename(x.file) === COMPANION_MANAGER);
+if (!companion) {
+  console.error(
+    `Swift god-file ratchet FAILED: ${COMPANION_MANAGER} missing under apps/clicky/leanring-buddy/`,
+  );
+  process.exit(1);
+}
+
+const swiftOver = swiftFiles.filter((x) => x.lines > SWIFT_LINE_CEILING);
+if (swiftOver.length > 0) {
+  console.error(
+    `Swift god-file ratchet FAILED: ${swiftOver.length} product Swift file(s) exceed ` +
+      `${SWIFT_LINE_CEILING} lines (CompanionManager.swift ceiling, only down).`,
+  );
+  for (const x of swiftOver) {
+    console.error(`  ${x.lines} ${path.relative(ROOT, x.file)}`);
+  }
+  process.exit(1);
+}
+
+console.log(
+  `Swift god-file ratchet passed: ${COMPANION_MANAGER} ${companion.lines}/${SWIFT_LINE_CEILING} ` +
+    `(ceiling, only down); ${swiftFiles.length} product Swift files scanned.`,
+);
