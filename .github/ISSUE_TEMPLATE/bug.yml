@@ -1,0 +1,23 @@
+name: Bug
+description: A user-visible defect
+labels: ["bug"]
+body:
+  - type: textarea
+    id: scene
+    attributes:
+      label: User scene
+      description: What you did, what you saw, what should have happened.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Receipt status, TaskTruth, logs without secrets, or a redacted diagnostics pack.
+  - type: dropdown
+    id: false-completion
+    attributes:
+      label: Did the product claim completion incorrectly?
+      options:
+        - "No"
+        - "Yes — treat as false completion"

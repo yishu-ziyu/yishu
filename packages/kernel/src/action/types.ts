@@ -325,9 +325,22 @@ export interface InvokeOptions {
  */
 export type BrowserRequest =
   | { op: "goto"; url: string }
-  | { op: "observe" }
+  | { op: "observe"; mode?: "interactive" | "content" | "both" }
   | { op: "click"; targetId: string }
-  | { op: "type"; targetId: string; text: string }
+  | { op: "type"; targetId: string; text: string; mode?: "fill" | "append" }
+  | { op: "select"; targetId: string; value: string }
+  | { op: "check"; targetId: string; checked: boolean }
+  | { op: "scroll"; direction: "up" | "down"; amount: "small" | "page" | "end" }
+  | { op: "back" }
+  | { op: "forward" }
+  | { op: "reload" }
+  | { op: "wait_for"; condition: "url" | "title" | "target" | "text" | "network_idle" | "download"; timeoutMs?: number }
+  | { op: "extract"; targetId?: string; format: "text" | "markdown" | "table" }
+  | { op: "open_tab"; url?: string }
+  | { op: "switch_tab"; tabId: string }
+  | { op: "close_tab"; tabId?: string }
+  | { op: "upload"; targetId: string; workspaceFileId: string }
+  | { op: "download"; targetId: string }
   | { op: "close" };
 
 export interface BrowserTarget {
@@ -344,6 +357,8 @@ export interface BrowserResult {
   title?: string;
   targets?: BrowserTarget[];
   evidence?: string;
+  extracted?: string;
+  tabId?: string;
 }
 
 /** Narrow host capability for the agent-owned browser. Not the user's Chrome. */

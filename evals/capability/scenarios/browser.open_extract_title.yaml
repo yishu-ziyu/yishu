@@ -1,0 +1,17 @@
+id: browser.open_extract_title
+category: browser
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Open a page and extract title and body."
+permissions: []
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - file_url
+repeat: 10
+evidence_kind: mock

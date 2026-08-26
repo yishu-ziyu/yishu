@@ -1,0 +1,186 @@
+{
+  "updatedAt": "2026-08-27",
+  "evidenceKind": "mock",
+  "capabilities": {
+    "screen.identify_frontmost": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "screen.explain_regions": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "screen.multi_display_coordinates": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "screen.reject_stale_context_frame": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "desktop.ax_press_verified": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "desktop.set_text_verified": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "desktop.input_then_submit": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "desktop.scroll_reobserve": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "desktop.open_and_focus_app": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "desktop.finder_open_file": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "desktop.notes.create_verified": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "desktop.high_risk_requires_approval": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "browser.open_extract_title": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "browser.scroll_offscreen_target": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "browser.multistep_form_submit": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "browser.reobserve_after_navigation": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "browser.profile_survives_restart": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "browser.download_to_workspace": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "research.single_fact_query": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "research.multi_query_dedupe": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "research.open_source_verify": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "research.claim_evidence_binding": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "memory.save_explicit_fact": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "memory.recall_next_day": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "memory.correction_supersedes": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "memory.scope_isolation": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "recovery.ptt_barge_in_no_late_action": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "recovery.unknown_commit_no_retry": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "recovery.runtime_restart_deliver_once": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    },
+    "recovery.app_restart_no_fake_resume": {
+      "status": "implemented",
+      "lastAcceptedAt": null,
+      "evidence": "evals/capability/reports/.gitkeep",
+      "limits": "Mock protocol evidence only. Not accepted on a real Mac."
+    }
+  }
+}

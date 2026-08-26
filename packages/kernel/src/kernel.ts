@@ -34,6 +34,11 @@ import {
   YishuStore,
   type YishuStorePort,
 } from "./store/yishu-store.js";
+import { createWorkspaceLedger, type WorkspaceLedger } from "./workspace/workspace-ledger.js";
+import { createResearchLedger, type ResearchLedger } from "./research/research-ledger.js";
+import { createCheckpointLedger, type CheckpointLedger } from "./checkpoint/checkpoint.js";
+import { createAutomationLedger, type AutomationLedger } from "./automation/automation-rule.js";
+import { createProjectContinuity, type ProjectContinuity } from "./project/project-continuity.js";
 import { SqliteYishuStore } from "./store/sqlite-store.js";
 import { TaskTruthProjector } from "./task-truth.js";
 import { MemoryTruthLayer } from "./memory/truth-layer.js";
@@ -100,6 +105,11 @@ export interface YishuKernel {
   trail: ContextTrail;
   taskTruth: TaskTruthProjector;
   storeBackend: YishuStoreBackend;
+  workspaces: WorkspaceLedger;
+  research: ResearchLedger;
+  checkpoints: CheckpointLedger;
+  automation: AutomationLedger;
+  projects: ProjectContinuity;
   /** Present only when a memory directory is wired (ADR 0016). */
   memory?: YishuMemoryLayer;
   /** Default product action names registered at create time. */
@@ -206,6 +216,11 @@ export function createYishuKernel(
     trail,
     taskTruth,
     storeBackend: backend,
+    workspaces: createWorkspaceLedger(),
+    research: createResearchLedger(),
+    checkpoints: createCheckpointLedger(),
+    automation: createAutomationLedger(),
+    projects: createProjectContinuity(),
     ...(memory !== undefined ? { memory } : {}),
     defaultActionNames: defaults.map((a) => a.name),
   };

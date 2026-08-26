@@ -1,0 +1,17 @@
+id: screen.reject_stale_context_frame
+category: screen
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Refuse to act on an expired ContextFrame after the UI changes."
+permissions: [accessibility]
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - stale_frame_used
+repeat: 10
+evidence_kind: mock

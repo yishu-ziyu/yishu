@@ -1,0 +1,28 @@
+name: Capability
+description: Raise or add a product capability with evidence
+labels: ["capability"]
+body:
+  - type: input
+    id: scenario
+    attributes:
+      label: Scenario ID
+      placeholder: desktop.notes.create_verified
+    validations:
+      required: true
+  - type: dropdown
+    id: from
+    attributes:
+      label: Current status
+      options: [implemented, demoable, accepted, reliable, shippable]
+  - type: dropdown
+    id: to
+    attributes:
+      label: Target status
+      options: [implemented, demoable, accepted, reliable, shippable]
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Mock evidence cannot raise above implemented. Attach the capability report.
+    validations:
+      required: true

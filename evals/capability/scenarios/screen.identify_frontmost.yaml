@@ -1,0 +1,17 @@
+id: screen.identify_frontmost
+category: screen
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Identify the frontmost app, window, and pointed element."
+permissions: [screen_recording]
+risk: low
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - stale_frame
+repeat: 10
+evidence_kind: mock

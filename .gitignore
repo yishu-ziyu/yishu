@@ -39,6 +39,18 @@ packages/runtime/.everos-venv/
 !.env.example
 *.log
 
+# Coverage and generated reports
+coverage/
+**/coverage/
+.nyc_output/
+*.lcov
+evals/**/reports/*.json
+evals/**/reports/*.md
+!evals/**/reports/.gitkeep
+e2e/**/reports/*
+!e2e/**/reports/.gitkeep
+apps/clicky/**/DerivedData/
+
 # Formal Clicky shell: local secrets and generated Xcode/Node state
 apps/clicky/**/xcuserdata/
 apps/clicky/**/.codegraph/

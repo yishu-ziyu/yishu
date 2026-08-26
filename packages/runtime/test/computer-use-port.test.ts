@@ -519,10 +519,10 @@ test("text input binds exact user authority and the requested action sequence", 
   assert.equal(authorizedTextForUtterance("输入「不用谢？」"), "不用谢？");
   assert.equal(authorizedTextForUtterance("输入「hello」这句话是什么意思？"), undefined);
   assert.equal(authorizedTextForUtterance("输入「hello」然后点击发送是什么意思？"), undefined);
-  assert.equal(computerActionLimitForUtterance("点击发送"), 1);
-  assert.equal(computerActionLimitForUtterance("输入 hello，然后点发送"), 2);
-  assert.equal(computerActionLimitForUtterance("输入 hello"), 1);
-  assert.equal(computerActionLimitForUtterance("解释这个界面"), 1);
+  assert.equal(computerActionLimitForUtterance("点击发送"), 8);
+  assert.equal(computerActionLimitForUtterance("输入 hello，然后点发送"), 12);
+  assert.equal(computerActionLimitForUtterance("输入 hello"), 12);
+  assert.equal(computerActionLimitForUtterance("解释这个界面"), 8);
 
   const requests: unknown[] = [];
   const port: ComputerUsePort = {

@@ -1,0 +1,8 @@
+id: e2e.testbed.single-button
+app: yishu-testbed
+fixture: single-button
+expected:
+  task_terminal: verified
+  false_completion_count: 0
+forbidden:
+  - report_completed_without_readback

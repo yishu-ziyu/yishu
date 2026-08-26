@@ -23,7 +23,12 @@ export interface LocalModelProviderConfig {
   readonly name: string;
   /** OpenAI-compatible base URL, e.g. http://127.0.0.1:8317/v1 */
   readonly baseUrl: string;
-  /** Key stored inline in the local file (0600). Prefer apiKeyEnv for secrets. */
+  /** Keychain or broker reference. Shipping configs must use this instead of apiKey. */
+  readonly credentialRef?: string;
+  /**
+   * Legacy inline secret, accepted only while migrating into Keychain.
+   * `writeModelConfig` refuses to persist this field.
+   */
   readonly apiKey?: string;
   /** Alternative: read the key from this environment variable at runtime. */
   readonly apiKeyEnv?: string;
@@ -82,6 +87,7 @@ export function parseModelConfig(raw: string): LocalModelConfig {
       id: entry.id as string,
       name: typeof entry.name === "string" ? entry.name : (entry.id as string),
       baseUrl: entry.baseUrl as string,
+      ...(typeof entry.credentialRef === "string" ? { credentialRef: entry.credentialRef } : {}),
       ...(typeof entry.apiKey === "string" ? { apiKey: entry.apiKey } : {}),
       ...(typeof entry.apiKeyEnv === "string" ? { apiKeyEnv: entry.apiKeyEnv } : {}),
       models: Array.isArray(entry.models)
@@ -123,12 +129,29 @@ export function providerById(config: LocalModelConfig, id?: string): LocalModelP
   return provider;
 }
 
+export function configContainsInlineSecrets(config: LocalModelConfig): boolean {
+  return config.providers.some((provider) => typeof provider.apiKey === "string" && provider.apiKey.length > 0);
+}
+
+export function redactModelConfigForWrite(config: LocalModelConfig): LocalModelConfig {
+  return {
+    defaultProvider: config.defaultProvider,
+    providers: config.providers.map((provider) => {
+      const { apiKey: _omit, ...rest } = provider;
+      return rest;
+    }),
+  };
+}
+
 export async function writeModelConfig(
   config: LocalModelConfig,
   pathToFile = DEFAULT_LOCAL_MODEL_CONFIG_PATH,
 ): Promise<void> {
+  if (configContainsInlineSecrets(config)) {
+    throw new Error("model-config: refusing to write inline apiKey; store the secret in Keychain and use credentialRef");
+  }
   const directory = path.dirname(pathToFile);
   await mkdir(directory, { recursive: true });
-  await writeFile(pathToFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(pathToFile, `${JSON.stringify(redactModelConfigForWrite(config), null, 2)}\n`, { mode: 0o600 });
   await chmod(pathToFile, 0o600);
 }

@@ -1,0 +1,33 @@
+schemaVersion: 1
+count: 30
+scenarios:
+  - screen.identify_frontmost
+  - screen.explain_regions
+  - screen.multi_display_coordinates
+  - screen.reject_stale_context_frame
+  - desktop.ax_press_verified
+  - desktop.set_text_verified
+  - desktop.input_then_submit
+  - desktop.scroll_reobserve
+  - desktop.open_and_focus_app
+  - desktop.finder_open_file
+  - desktop.notes.create_verified
+  - desktop.high_risk_requires_approval
+  - browser.open_extract_title
+  - browser.scroll_offscreen_target
+  - browser.multistep_form_submit
+  - browser.reobserve_after_navigation
+  - browser.profile_survives_restart
+  - browser.download_to_workspace
+  - research.single_fact_query
+  - research.multi_query_dedupe
+  - research.open_source_verify
+  - research.claim_evidence_binding
+  - memory.save_explicit_fact
+  - memory.recall_next_day
+  - memory.correction_supersedes
+  - memory.scope_isolation
+  - recovery.ptt_barge_in_no_late_action
+  - recovery.unknown_commit_no_retry
+  - recovery.runtime_restart_deliver_once
+  - recovery.app_restart_no_fake_resume

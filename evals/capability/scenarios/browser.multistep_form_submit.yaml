@@ -1,0 +1,17 @@
+id: browser.multistep_form_submit
+category: browser
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Fill a multi-step form and submit with read-back."
+permissions: []
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - retry_after_unknown_commit
+repeat: 10
+evidence_kind: mock

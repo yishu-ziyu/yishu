@@ -2,6 +2,33 @@
 
 export const KERNEL_VERSION = "0.0.1" as const;
 
+export {
+  createWorkspaceLedger,
+  requireActiveGrant,
+} from "./workspace/workspace-ledger.js";
+export type { WorkspaceLedger, CreateWorkspaceGrantInput } from "./workspace/workspace-ledger.js";
+export { grantIsActive, assertGrantMatchesScope } from "./workspace/workspace-grant.js";
+export type { WorkspaceGrant, WorkspaceCapability } from "./workspace/workspace-grant.js";
+export { createResearchLedger } from "./research/research-ledger.js";
+export type { ResearchLedger } from "./research/research-ledger.js";
+export { validateResearchClaims } from "./research/claim-validator.js";
+export type { ClaimValidation, ClaimRejectionCode } from "./research/claim-validator.js";
+export { EVIDENCE_SNIPPET_MAX_CHARS } from "./research/research-record.js";
+export type {
+  ResearchSource,
+  EvidenceSnippet,
+  ResearchClaim,
+  ResearchSourceType,
+  ResearchTrustTier,
+  ResearchConfidence,
+} from "./research/research-record.js";
+export { createCheckpointLedger } from "./checkpoint/checkpoint.js";
+export type { CheckpointLedger, TaskCheckpoint, CheckpointStep } from "./checkpoint/checkpoint.js";
+export { createAutomationLedger } from "./automation/automation-rule.js";
+export type { AutomationLedger, AutomationRule, ToolGrant, AutomationBudget } from "./automation/automation-rule.js";
+export { createProjectContinuity } from "./project/project-continuity.js";
+export type { ProjectContinuity, ProjectFact } from "./project/project-continuity.js";
+
 export * from "./action/index.js";
 export * from "./context/index.js";
 export * from "./store/index.js";

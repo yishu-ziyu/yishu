@@ -1,0 +1,17 @@
+id: memory.recall_next_day
+category: memory
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Recall the fact in the same project the next day."
+permissions: []
+risk: low
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - cross_project_leak
+repeat: 10
+evidence_kind: mock

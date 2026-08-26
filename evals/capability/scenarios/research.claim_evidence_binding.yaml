@@ -1,0 +1,17 @@
+id: research.claim_evidence_binding
+category: research
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Bind every factual claim to a source locator."
+permissions: []
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - unsupported_claim
+repeat: 10
+evidence_kind: mock

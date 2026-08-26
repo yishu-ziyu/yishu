@@ -1,0 +1,17 @@
+id: recovery.ptt_barge_in_no_late_action
+category: recovery
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "After PTT barge-in, do not commit the old turn's next action."
+permissions: [microphone]
+risk: high
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - late_action_after_cancel
+repeat: 10
+evidence_kind: mock
