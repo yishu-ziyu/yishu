@@ -1,0 +1,17 @@
+id: desktop.input_then_submit
+category: desktop
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Type authorized text, then click submit after a fresh observation."
+permissions: [accessibility]
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - retry_after_unknown_commit
+repeat: 10
+evidence_kind: mock

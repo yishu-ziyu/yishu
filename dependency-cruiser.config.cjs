@@ -21,7 +21,7 @@ module.exports = {
     // as "warn" so the CI stays green while the list is churned down to zero;
     // cross-package cycles are already impossible because the package boundary
     // rules below are "error". Report with: pnpm dep:check
-    { name: "no-circular", severity: "warn", from: {}, to: {} },
+    { name: "no-circular", severity: "warn", from: {}, to: { circular: true } },
 
     // Kernel is the product core, not an execution harness. It must not reach
     // up into Runtime or out into the AgentCore laboratory.

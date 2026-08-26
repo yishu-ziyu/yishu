@@ -11,6 +11,7 @@ const browserInputSchema = z.discriminatedUnion("op", [
   }).strict(),
   z.object({
     op: z.literal("observe"),
+    mode: z.enum(["interactive", "content", "both"]).optional(),
   }).strict(),
   z.object({
     op: z.literal("click"),
@@ -20,6 +21,56 @@ const browserInputSchema = z.discriminatedUnion("op", [
     op: z.literal("type"),
     targetId: targetIdSchema,
     text: z.string().min(1).max(2_000),
+    mode: z.enum(["fill", "append"]).optional(),
+  }).strict(),
+  z.object({
+    op: z.literal("select"),
+    targetId: targetIdSchema,
+    value: z.string().min(1).max(500),
+  }).strict(),
+  z.object({
+    op: z.literal("check"),
+    targetId: targetIdSchema,
+    checked: z.boolean(),
+  }).strict(),
+  z.object({
+    op: z.literal("scroll"),
+    direction: z.enum(["up", "down"]),
+    amount: z.enum(["small", "page", "end"]),
+  }).strict(),
+  z.object({ op: z.literal("back") }).strict(),
+  z.object({ op: z.literal("forward") }).strict(),
+  z.object({ op: z.literal("reload") }).strict(),
+  z.object({
+    op: z.literal("wait_for"),
+    condition: z.enum(["url", "title", "target", "text", "network_idle", "download"]),
+    timeoutMs: z.number().int().positive().max(30_000).optional(),
+  }).strict(),
+  z.object({
+    op: z.literal("extract"),
+    targetId: targetIdSchema.optional(),
+    format: z.enum(["text", "markdown", "table"]),
+  }).strict(),
+  z.object({
+    op: z.literal("open_tab"),
+    url: z.string().trim().min(1).max(2_048).optional(),
+  }).strict(),
+  z.object({
+    op: z.literal("switch_tab"),
+    tabId: z.string().min(1).max(80),
+  }).strict(),
+  z.object({
+    op: z.literal("close_tab"),
+    tabId: z.string().min(1).max(80).optional(),
+  }).strict(),
+  z.object({
+    op: z.literal("upload"),
+    targetId: targetIdSchema,
+    workspaceFileId: z.string().min(1).max(120),
+  }).strict(),
+  z.object({
+    op: z.literal("download"),
+    targetId: targetIdSchema,
   }).strict(),
   z.object({
     op: z.literal("close"),
@@ -28,7 +79,28 @@ const browserInputSchema = z.discriminatedUnion("op", [
 
 export type BrowserInput = z.infer<typeof browserInputSchema>;
 
-export function isAllowedBrowserUrl(url: string): boolean {
+const PRIVATE_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "metadata.google.internal"]);
+
+function isPrivateHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (PRIVATE_HOSTS.has(host)) return true;
+  if (host === "169.254.169.254") return true;
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 169 && b === 254) return true;
+  }
+  return host.endsWith(".local");
+}
+
+export function isAllowedBrowserUrl(
+  url: string,
+  options: { allowPrivateNetwork?: boolean } = {},
+): boolean {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -37,6 +109,8 @@ export function isAllowedBrowserUrl(url: string): boolean {
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
   if (parsed.username !== "" || parsed.password !== "") return false;
+  if (parsed.port === "0") return false;
+  if (!options.allowPrivateNetwork && isPrivateHostname(parsed.hostname)) return false;
   return true;
 }
 
@@ -75,9 +149,15 @@ export function createBrowserAction() {
       if (ctx.input.op === "goto" && !isAllowedBrowserUrl(ctx.input.url)) {
         return rejectedUrl();
       }
+      if (ctx.input.op === "open_tab" && ctx.input.url !== undefined && !isAllowedBrowserUrl(ctx.input.url)) {
+        return rejectedUrl();
+      }
       const request = ctx.input as BrowserRequest;
       const result = await executor.perform(request, ctx.signal);
-      if (result.succeeded && ctx.input.op !== "observe") ctx.markCommitted();
+      const readOnly = ctx.input.op === "observe"
+        || ctx.input.op === "extract"
+        || ctx.input.op === "wait_for";
+      if (result.succeeded && !readOnly) ctx.markCommitted();
       return result;
     },
     verify: async (ctx) => ({

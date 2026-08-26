@@ -1,0 +1,17 @@
+id: desktop.set_text_verified
+category: desktop
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Replace focused text and read it back exactly."
+permissions: [accessibility]
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - report_completed_without_readback
+repeat: 10
+evidence_kind: mock

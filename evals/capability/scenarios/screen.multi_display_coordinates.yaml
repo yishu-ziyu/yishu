@@ -1,0 +1,17 @@
+id: screen.multi_display_coordinates
+category: screen
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Bind a screenshot to the correct display coordinate space."
+permissions: [screen_recording]
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - wrong_display
+repeat: 10
+evidence_kind: mock

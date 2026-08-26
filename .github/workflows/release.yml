@@ -1,0 +1,22 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version
+        required: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: YISHU_RELEASE_VERSION="${{ inputs.version }}" ./scripts/release/build-app.sh
+      - run: echo "Signing and notarization require Developer ID secrets and are not run unsigned."

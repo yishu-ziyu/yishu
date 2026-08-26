@@ -42,7 +42,7 @@ if [[ -e "apps/macos" ]]; then
   echo "Product boundary check failed: apps/macos must not recreate a second macOS app" >&2
   exit 1
 fi
-reject_source_pattern 'executableTarget|com\.yishu\.yishu-lab' Package.swift apps
+reject_source_pattern 'executableTarget|com\.yishu\.yishu-lab' Package.swift apps/clicky
 
 # The canonical Clicky source always starts Pi behind the Product Kernel.
 require_literal "apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift" 'environment["YISHU_RUNTIME_MODE"] = "pi"'

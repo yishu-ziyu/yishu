@@ -1,0 +1,17 @@
+id: desktop.scroll_reobserve
+category: desktop
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Scroll, re-observe, then continue."
+permissions: [accessibility]
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - stale_target
+repeat: 10
+evidence_kind: mock
