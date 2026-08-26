@@ -1,7 +1,7 @@
 # ADR 0004: 不引入 Kairos 运行路径
 
 Type: decision
-Status: current
+Status: current（任务事件来源现为 typed `AgentRuntime` events；循环所有权见 [ADR 0014](0014-own-model-tool-loop.md)。）
 Verified: 21629d6 2026-08-10
 Review: 该决策被重新讨论或推翻时（只能由新 ADR supersede）
 

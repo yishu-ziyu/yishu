@@ -75,7 +75,7 @@ CI（.github/workflows/ci.yml，macos-15）
 |------|------|-----------|
 | StepFun / MiniMax / chat key | `worker/.dev.vars`（0600） | `./apps/clicky/scripts/sync-dev-vars-from-ai-providers.sh` 从 `~/.config/ai-providers/env.local` 与 `~/.cli-proxy-api/client.env` 同步（绝不打印值） |
 | 8787 bearer token | 进程内 32 字节（SecRandomCopyBytes） | App 启动时生成，不持久不 log |
-| provider OAuth（Pi） | runtime 凭据存储 | App 内 OAuth 流程；奕枢不复制不打印 |
+| provider OAuth（Runtime） | runtime 凭据存储 | App 内 OAuth 流程；奕枢不复制不打印 |
 
 模型路由默认：chat 走本机 8317 代理（`grok-4.6` 默认），ASR 走 StepFun，TTS 走 MiniMax——全部经 8787 worker 中转，key 不进 Swift 二进制。
 

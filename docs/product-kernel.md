@@ -37,15 +37,15 @@ Yishu may notice, prepare, suggest, speak first, and act within standing authori
 ## Runtime split
 
 - Yishu owns identity, relationship, context, initiative, authorization, and task truth.
-- Pi owns model interaction, session lifecycle, streaming, tool loops, and task execution.
+- The Yishu-owned model-tool loop (`packages/runtime/src/model-loop/`, ADR 0014) owns model interaction, session lifecycle, streaming, tool loops, and task execution. `YISHU_RUNTIME_MODE=pi` is a compatibility value only and maps to `YishuLoopRuntimeAdapter`.
 - Cua owns background computer use.
 - Task cells own process, filesystem, browser, and credential isolation.
 - Skills are validated procedural memory, not raw recordings of a successful run.
 
 ## Product layer (`@yishu/kernel`)
 
-Product-owned capabilities live in `packages/kernel`, above Pi `AgentRuntime`.
-Pi stays the execution harness. Agent-Native is methodology only (typed action, revalidate, receipt, read-back); no Agent-Native package is imported.
+Product-owned capabilities live in `packages/kernel`, above the Yishu-owned `AgentRuntime` adapter.
+The Yishu-owned model-tool loop is the execution harness (ADR 0014). Agent-Native is methodology only (typed action, revalidate, receipt, read-back); no Agent-Native package is imported.
 
 Wire-up entry: `createYishuKernel({ storeBackend?, storeDir?, sqlitePath?, trail?, extraActions? })` returns `{ registry, store, trail, taskTruth, storeBackend, defaultActionNames }`.
 
@@ -117,8 +117,8 @@ content matches, and terminal turns cannot move back to `open`.
 New events cannot be appended to a terminal turn; an identical event retry is
 still idempotent.
 
-`ProductKernelRuntime` creates the open turn before invoking Pi, AgentCore, or a
-local product action. It persists only visible input/final output and safe typed
+`ProductKernelRuntime` creates the open turn before invoking the Yishu-owned loop, a
+protocol mock, or a local product action. It persists only visible input/final output and safe typed
 events, never `response.delta`, tool arguments, screenshots, audio, hidden
 reasoning, or arbitrary nested payloads. A terminal result is emitted to the
 client only after its ledger writes and any relevant `TaskTruth` flush succeed.

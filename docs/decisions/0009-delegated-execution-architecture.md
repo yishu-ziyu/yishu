@@ -1,7 +1,7 @@
 # ADR 0009: 接受 delegated concurrent execution V1 架构
 
 Type: decision
-Status: current
+Status: current（文中 “Pi session” 指当时执行会话；当前实现为 `YishuLoopRuntimeAdapter` + `model-loop/`，见 [ADR 0014](0014-own-model-tool-loop.md)。）
 Verified: 4b1e3b1 2026-08-12
 Review: 该决策被重新讨论或推翻时（只能由新 ADR supersede）
 
