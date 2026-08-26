@@ -65,7 +65,22 @@ struct CompanionPanelView: View {
                         .padding(.horizontal, 16)
                 }
 
-                if !companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
+                if companionManager.allPermissionsGranted {
+                    Spacer()
+                        .frame(height: 16)
+
+                    sessionScopeSection
+                        .padding(.horizontal, 16)
+
+                    lastVerifiedSection
+                        .padding(.top, 12)
+                        .padding(.horizontal, 16)
+                }
+
+                if YishuActivationPolicy.shouldShowStartButton(
+                    introSeen: companionManager.hasSeenIntro,
+                    permissionsGranted: companionManager.allPermissionsGranted
+                ) {
                     Spacer()
                         .frame(height: 16)
 
@@ -149,10 +164,10 @@ struct CompanionPanelView: View {
 
     @ViewBuilder
     private var permissionsCopySection: some View {
-        if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
+        if companionManager.hasSeenIntro && companionManager.allPermissionsGranted {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Text("按住")
+                    Text(YishuPanelFirstScreenCopy.holdToTalkPrefix)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(DS.Colors.textSecondary)
                     keyboardKey("Control")
@@ -161,23 +176,23 @@ struct CompanionPanelView: View {
                         .foregroundColor(DS.Colors.textSecondary)
                     keyboardKey("Option")
                 }
-                Text("松开就发送")
+                Text(YishuPanelFirstScreenCopy.releaseToSend)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.textTertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.allPermissionsGranted {
-            Text("权限已就绪。点「开始」认识奕枢。")
+            Text(YishuPanelFirstScreenCopy.readyToStart)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else if companionManager.hasCompletedOnboarding {
+        } else if companionManager.hasSeenIntro {
             VStack(alignment: .leading, spacing: 6) {
-                Text("需要权限")
+                Text(YishuPanelFirstScreenCopy.needPermissionsTitle)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
-                Text("部分权限被关掉了。请重新授予下面四项，才能继续用奕枢。")
+                Text(YishuPanelFirstScreenCopy.needPermissionsBody)
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -185,16 +200,16 @@ struct CompanionPanelView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             VStack(alignment: .leading, spacing: 6) {
-                Text("你好，我是奕枢。")
+                Text(YishuPanelFirstScreenCopy.greeting)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
-                Text("你说要做什么，奕枢会看当前屏幕，帮你完成并告诉你结果。")
+                Text(YishuPanelFirstScreenCopy.promise)
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("不会后台常录。只有你按住快捷键时才会截屏和听麦克风。")
+                Text(YishuPanelFirstScreenCopy.captureLimit)
                     .font(.system(size: 11))
                     .foregroundColor(Color(red: 0.9, green: 0.4, blue: 0.4))
                     .fixedSize(horizontal: false, vertical: true)
@@ -207,11 +222,14 @@ struct CompanionPanelView: View {
 
     @ViewBuilder
     private var startButton: some View {
-        if !companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
+        if YishuActivationPolicy.shouldShowStartButton(
+            introSeen: companionManager.hasSeenIntro,
+            permissionsGranted: companionManager.allPermissionsGranted
+        ) {
             Button(action: {
                 companionManager.triggerOnboarding()
             }) {
-                Text("开始")
+                Text(YishuPanelFirstScreenCopy.start)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(DS.Colors.textOnAccent)
                     .frame(maxWidth: .infinity)
@@ -224,6 +242,126 @@ struct CompanionPanelView: View {
             .buttonStyle(.plain)
             .pointerCursor()
         }
+    }
+
+    // MARK: - Scope + last verified
+
+    private var sessionScopeSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(YishuPanelFirstScreenCopy.scopeCaption)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundColor(DS.Colors.textTertiary)
+
+            HStack(spacing: 6) {
+                scopeChip(
+                    title: YishuPanelFirstScreenCopy.scopePersonal,
+                    selected: companionManager.sessionScope.kind == .personal
+                ) {
+                    companionManager.activateSessionScope(.personal)
+                }
+                scopeChip(
+                    title: companionManager.sessionScope.kind == .project
+                        ? companionManager.sessionScopeLabel
+                        : YishuPanelFirstScreenCopy.scopeProject,
+                    selected: companionManager.sessionScope.kind == .project
+                ) {
+                    companionManager.activateSessionScope(.project)
+                }
+                scopeChip(
+                    title: YishuPanelFirstScreenCopy.scopePrivate,
+                    selected: companionManager.sessionScope.kind == .privateSession
+                ) {
+                    companionManager.activateSessionScope(.privateSession)
+                }
+            }
+
+            HStack(spacing: 6) {
+                    TextField(
+                        YishuPanelFirstScreenCopy.scopeProjectPlaceholder,
+                        text: $companionManager.projectScopeDraft
+                    )
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
+                    )
+
+                    Button(action: {
+                        companionManager.activateSessionScope(.project)
+                    }) {
+                        Text(YishuPanelFirstScreenCopy.scopeApplyProject)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(DS.Colors.textOnAccent)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule().fill(DS.Colors.accent)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+            }
+
+            if let notice = companionManager.sessionScopeNotice, !notice.isEmpty {
+                Text(notice)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(YishuPanelFirstScreenCopy.scopeCaption)
+        .accessibilityValue(companionManager.sessionScopeLabel)
+    }
+
+    private func scopeChip(
+        title: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: selected ? .semibold : .medium))
+                .foregroundColor(selected ? DS.Colors.textOnAccent : DS.Colors.textSecondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule().fill(selected ? DS.Colors.accent : Color.white.opacity(0.06))
+                )
+                .overlay(
+                    Capsule().stroke(
+                        selected ? Color.clear : DS.Colors.borderSubtle,
+                        lineWidth: 0.8
+                    )
+                )
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .disabled(!companionManager.canSwitchSessionScope && !selected)
+    }
+
+    private var lastVerifiedSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(YishuPanelFirstScreenCopy.lastVerifiedCaption)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundColor(DS.Colors.textTertiary)
+            Text(YishuLastVerifiedProjection.displayLine(companionManager.lastVerifiedSnapshot))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(YishuPanelFirstScreenCopy.lastVerifiedCaption)
+        .accessibilityValue(
+            YishuLastVerifiedProjection.displayLine(companionManager.lastVerifiedSnapshot)
+        )
     }
 
     // MARK: - Permissions
@@ -598,7 +736,7 @@ struct CompanionPanelView: View {
 
     private var controlPanelSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            YishuVisibleMemoryEditor()
+            YishuVisibleMemoryEditor(companionManager: companionManager)
 
             disclosureGroup(
                 title: "设置",
@@ -932,7 +1070,7 @@ struct CompanionPanelView: View {
             .buttonStyle(.plain)
             .pointerCursor()
 
-            if companionManager.hasCompletedOnboarding {
+            if companionManager.hasSeenIntro {
                 Spacer()
 
                 Button(action: {
@@ -941,7 +1079,7 @@ struct CompanionPanelView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "play.circle")
                             .font(.system(size: 11, weight: .medium))
-                        Text("再看一遍引导")
+                        Text(YishuPanelFirstScreenCopy.replayIntro)
                             .font(.system(size: 12, weight: .medium))
                     }
                     .foregroundColor(DS.Colors.textTertiary)
@@ -1020,7 +1158,7 @@ struct CompanionPanelView: View {
         case .ready:
             break
         }
-        if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
+        if !companionManager.hasSeenIntro || !companionManager.allPermissionsGranted {
             return "设置中"
         }
         if !companionManager.isOverlayVisible {

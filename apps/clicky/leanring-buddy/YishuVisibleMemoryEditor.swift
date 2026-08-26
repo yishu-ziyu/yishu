@@ -62,9 +62,14 @@ private struct YishuMemoryTextEditor: NSViewRepresentable {
 
 /// Shows the one memory file in the panel so the user can read and edit it.
 struct YishuVisibleMemoryEditor: View {
+    @ObservedObject private var companionManager: CompanionManager
     @StateObject private var draft: YishuVisibleMemoryDraft
 
-    init(url: URL = YishuVisibleMemoryFile.fileURL) {
+    init(
+        companionManager: CompanionManager,
+        url: URL = YishuVisibleMemoryFile.fileURL
+    ) {
+        _companionManager = ObservedObject(wrappedValue: companionManager)
         _draft = StateObject(wrappedValue: YishuVisibleMemoryDraft(url: url))
     }
 
@@ -100,7 +105,10 @@ struct YishuVisibleMemoryEditor: View {
                 .font(.system(size: 10))
                 .foregroundColor(draft.didFailSave ? DS.Colors.warning : DS.Colors.textTertiary)
         }
-        .onAppear { draft.reload() }
+        .onAppear {
+            draft.reload()
+            companionManager.markVisibleMemoryReadback()
+        }
         .onDisappear { draft.flush() }
     }
 }

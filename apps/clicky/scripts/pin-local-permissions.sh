@@ -86,7 +86,8 @@ install_fixed_path() {
 seed_user_defaults() {
   # In-app gates (not macOS TCC). Same bundle id → survives rebuilds once set.
   defaults write "$BUNDLE_ID" hasScreenContentPermission -bool true
-  defaults write "$BUNDLE_ID" hasCompletedOnboarding -bool true
+  # Intro only. Do not fake first-success activation.
+  defaults write "$BUNDLE_ID" hasSeenIntro -bool true
   defaults write "$BUNDLE_ID" hasSubmittedEmail -bool true
   defaults write "$BUNDLE_ID" com.learningbuddy.hasPreviouslyConfirmedScreenRecordingPermission -bool true
   echo "UserDefaults seeded for $BUNDLE_ID"

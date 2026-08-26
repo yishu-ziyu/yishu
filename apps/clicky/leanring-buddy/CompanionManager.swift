@@ -254,6 +254,8 @@ final class CompanionManager: ObservableObject {
     /// conversation/scope switch, cancel, or failure so a stale line cannot
     /// imply the new context still used that memory.
     @Published private(set) var memorySourceNotice: String?
+    @Published var lastVerifiedSnapshot: YishuLastVerifiedSnapshot? =
+        YishuLastVerifiedProjection.load()
     /// Pending delete confirmation target (title shown in confirm UI).
     @Published private(set) var historyDeleteCandidate: YishuHistoryListItem?
     @Published private(set) var historyDeleteInFlight = false
@@ -992,12 +994,8 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
     }
 
-    /// Whether the user has completed onboarding at least once. Persisted
-    /// to UserDefaults so the Start button only appears on first launch.
-    var hasCompletedOnboarding: Bool {
-        get { UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") }
-        set { UserDefaults.standard.set(newValue, forKey: "hasCompletedOnboarding") }
-    }
+    @Published var hasSeenIntro: Bool = YishuActivationPolicy.introSeen()
+    @Published var hasCompletedOnboarding: Bool = YishuActivationPolicy.isActivated()
 
     /// Personal fork: email gate disabled (always treated as submitted).
     @Published var hasSubmittedEmail: Bool = true
@@ -1016,7 +1014,7 @@ final class CompanionManager: ObservableObject {
         sessionScope = .personal
         projectScopeDraft = ""
         refreshAllPermissions()
-        print("🔑 奕枢 start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
+        print("🔑 奕枢 start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), intro: \(hasSeenIntro), activated: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
         bindShortcutTransitions()
@@ -1114,11 +1112,7 @@ final class CompanionManager: ObservableObject {
             print("⚠️ 奕枢 Runtime unavailable; scheduling bounded restart")
             scheduleAgentRuntimeRestart()
         }
-        // If the user already completed onboarding AND all permissions are
-        // still granted, show the cursor overlay immediately. If permissions
-        // were revoked (e.g. signing change), don't show the cursor — the
-        // panel will show the permissions UI instead.
-        if hasCompletedOnboarding && allPermissionsGranted && isYishuCursorEnabled {
+        if hasSeenIntro && allPermissionsGranted && isYishuCursorEnabled {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
@@ -1560,9 +1554,8 @@ final class CompanionManager: ObservableObject {
         // Post notification so the panel manager can dismiss the panel
         NotificationCenter.default.post(name: .yishuDismissPanel, object: nil)
 
-        // Mark onboarding as completed so the Start button won't appear
-        // again on future launches — the cursor will auto-show instead
-        hasCompletedOnboarding = true
+        // Start is intro / welcome only. Do not mark activation here.
+        markIntroSeen()
 
         ClickyAnalytics.trackOnboardingStarted()
 
@@ -1824,8 +1817,7 @@ final class CompanionManager: ObservableObject {
                     UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
                     ClickyAnalytics.trackPermissionGranted(permission: "screen_content")
 
-                    // If onboarding was already completed, show the cursor overlay now
-                    if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isYishuCursorEnabled {
+                    if hasSeenIntro && allPermissionsGranted && !isOverlayVisible && isYishuCursorEnabled {
                         overlayWindowManager.hasShownOverlayBefore = true
                         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
                         isOverlayVisible = true
@@ -3012,6 +3004,7 @@ final class CompanionManager: ObservableObject {
         activeTurnEffectInFlight = false
         activeTurnLastComputerActionResult = result
         activeTurnLastComputerActionName = request.action
+        recordComputerActionResult(result, action: request.action)
         timing.mark(
             "actuator_readback",
             reason: result.code.rawValue,
@@ -3106,6 +3099,7 @@ final class CompanionManager: ObservableObject {
         activeTurnEffectInFlight = false
         activeTurnLastComputerActionResult = result
         activeTurnLastComputerActionName = "left_click"
+        recordComputerActionResult(result, action: "left_click")
         timing.mark(
             "actuator_readback",
             reason: result.code.rawValue,
@@ -3356,6 +3350,7 @@ final class CompanionManager: ObservableObject {
                         activeTurnEffectInFlight = false
                         activeTurnLastComputerActionResult = result
                         activeTurnLastComputerActionName = request.action
+                        recordComputerActionResult(result, action: request.action)
                     }
                     timing?.mark(
                         "actuator_readback",
@@ -3591,6 +3586,7 @@ final class CompanionManager: ObservableObject {
             turnVisualPhase = .confirmingToolResult
             activeTurnLastComputerActionResult = result
             activeTurnLastComputerActionName = request.action
+            recordComputerActionResult(result, action: request.action)
             timing?.mark(
                 "actuator_readback",
                 reason: result.code.rawValue,
