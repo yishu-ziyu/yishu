@@ -172,10 +172,10 @@ pnpm agent -- --llm=openai judge-eval --judge=llm
 
 `packages/agent-core` 不能切换为产品 Runtime。正式 `createAgentRuntime` 只有：
 
-- `pi`：唯一正式 Agent 循环；
+- `pi`：兼容值，只装配 `YishuLoopRuntimeAdapter`（ADR 0014；Pi 不拥有循环）；
 - `mock`：无模型工具循环的协议测试替身。
 
-旧的 `YISHU_RUNTIME_MODE=agent-core` 不再有效，会按未知值回落到 `pi`。
+旧的 `YISHU_RUNTIME_MODE=agent-core` 不再有效，会按未知值回落到兼容值 `pi`。
 成熟实验能力必须迁入 Kernel/Runtime 的独立产品模块并通过 `pnpm product:check` 和真实 Clicky 验收，不能把 AgentCore 整套循环重新接回产品。
 
 ## 7. 文档

@@ -17,7 +17,7 @@ Review: 对应模块源码结构变化时同步修订
 | [02-architecture.md](02-architecture.md) | 整体架构、产品主线路径、运行时边界、核心不变量 | 跨模块 |
 | [03-yishucontext-swift.md](03-yishucontext-swift.md) | 根 Swift 包：可移植证据协议 `ContextFrame` | `Sources/YishuContext` |
 | [04-kernel.md](04-kernel.md) | `@yishu/kernel`：产品动作、ContextTrail、证据存储 | `packages/kernel` |
-| [05-runtime.md](05-runtime.md) | `@yishu/runtime`：版本化协议、Pi 适配器、产品投影 | `packages/runtime` |
+| [05-runtime.md](05-runtime.md) | `@yishu/runtime`：版本化协议、自有循环适配器、产品投影 | `packages/runtime` |
 | [06-clicky.md](06-clicky.md) | `apps/clicky`：macOS App、语音管线、执行器、语音代理 | `apps/clicky` |
 | [07-agent-core.md](07-agent-core.md) | `@yishu/agent-core`：独立离线实验室 | `packages/agent-core` |
 | [08-dependencies.md](08-dependencies.md) | 包间依赖、外部依赖、边界守卫 | 全仓库 |
@@ -32,4 +32,4 @@ Review: 对应模块源码结构变化时同步修订
 
 ## 一句话架构
 
-`Clicky（身体） → ContextFrame（证据） → Kernel（产品真相/动作） → Runtime/Pi（执行 harness） → verified receipt → presence（可见呈现）`
+`Clicky（身体） → ContextFrame（证据） → Kernel（产品真相/动作） → Runtime/Yishu loop（执行 harness） → verified receipt → presence（可见呈现）`

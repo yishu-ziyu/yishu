@@ -25,7 +25,7 @@ pnpm install
 - `pnpm product:check`：无凭据的日常产品内环，包含共享 Swift contract tests。
 - `pnpm product:verify`：增加 Clicky Xcode tests 与构建脚本 self-test，不安装或启动第二个 App。
 - `pnpm product:build:clicky`：构建正式 Clicky，不安装、不启动。
-- `./apps/clicky/scripts/run-local.sh`：构建、安装并启动 `/Applications/奕枢.app`；Pi 凭据留在 Pi 自己的凭据存储，不进入本仓库。
+- `./apps/clicky/scripts/run-local.sh`：构建、安装并启动 `/Applications/奕枢.app`；provider 凭据留在 Runtime 自己的凭据存储，不进入本仓库。
 
 ## 常用验证
 

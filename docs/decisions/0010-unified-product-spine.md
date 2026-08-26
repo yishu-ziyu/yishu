@@ -1,7 +1,7 @@
 # ADR 0010: 奕枢采用单一产品主干
 
 Type: decision
-Status: current
+Status: current（执行 harness 所有权已被 [ADR 0014](0014-own-model-tool-loop.md) 修订：唯一正式循环现为奕枢自有 `model-loop/`。）
 Verified: c268654 2026-08-13
 Review: 该决策被重新讨论或推翻时（只能由新 ADR supersede）
 

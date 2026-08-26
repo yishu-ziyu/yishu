@@ -7,7 +7,7 @@ Review: packages/kernel 源码结构变化时
 
 ## 模块职责
 
-`@yishu/kernel`（[packages/kernel](../../packages/kernel)）是产品层：**turn 之上的产品真相**——`YishuAction` 注册表、`ContextTrail`、证据存储（MemoryClaim / Learning / Skill / Mandate / TaskTruth / Conversation 账本）、`ContextCapsule`。它不替代 Pi、不依赖 `@yishu/runtime`（依赖方向：runtime → kernel）。运行时依赖仅 `zod`；Node ≥ 22.19（SQLite 后端用内置 `node:sqlite`）。
+`@yishu/kernel`（[packages/kernel](../../packages/kernel)）是产品层：**turn 之上的产品真相**——`YishuAction` 注册表、`ContextTrail`、证据存储（MemoryClaim / Learning / Skill / Mandate / TaskTruth / Conversation 账本）、`ContextCapsule`。它不替代执行循环、不依赖 `@yishu/runtime`（依赖方向：runtime → kernel）。运行时依赖仅 `zod`；Node ≥ 22.19（SQLite 后端用内置 `node:sqlite`）。
 
 入口 `src/index.ts`：`KERNEL_VERSION = "0.0.1"`，导出产品动作、上下文、存储、Mind，以及 conversation / memory / context-watch 三个窄账本与顶层产品模块。
 
@@ -148,7 +148,7 @@ SQLite 表：`memories`、`learnings`、`skill_candidates`、`verified_skills`�
 - `session-scope.ts`：`SessionScope = personal | project(projectId, projectLabel) | private`；`normalizeSessionScope`（legacy → personal）、`sessionScopeKey`（`"project:<uuid>"`）、`memoryScopeForSession`（private → null）、`assertDurableSessionScope`（private 抛 `private_session_not_persistable`）。
 - `intent-frame.ts`：`deriveTurnIntentFrame` 为每个 turn 产出唯一不可变 `TurnIntentFrame`（objective / speechAct / route / effect / successMode / authority / risk / steerable）；`resolveTurnIntentCandidate` 把规则或未来模型候选与产品权限政策解耦；Runtime 的任务合同、产品动作路由、插话和工具 effect 准入共用同一帧，工具只能收紧参数权限，不能扩大 effect 边界。
 - `task-contract.ts`：`createTaskExecutionContract`——objective ≤160 字符、**强制 `maxAttempts === 1`**、`Object.freeze`；`evaluateTaskCompletion`（read_only_delivery 看 responseText / external_effect 看外部验证）；`evaluateActionBoundary` / `decideTaskRetry`（authority 变化或 risk 升级 → escalate，不消耗 attempt）。
-- `utterance-router.ts`：`routeProductUtterance(utterance, contextFrame?)` 把短语音映射到产品动作（优先级：相对时间提醒 0.99 → 新建备忘录 0.99 → Finder 返回 0.99 → 应用返回提醒 0.99 → 记住流程 0.95 → 交给 Codex/分享上下文 0.9 → 记录学习 0.85 → 记住事实 0.88），不命中返回 null 落回 Pi；`formatProductActionSpeech` 生成动作回执后的中英文口语播报；`classifyRelativeTimeReminder` 单分类器（schedule/question/incomplete——question 与 incomplete 永远产品自留，不落 Pi）。
+- `utterance-router.ts`：`routeProductUtterance(utterance, contextFrame?)` 把短语音映射到产品动作（优先级：相对时间提醒 0.99 → 新建备忘录 0.99 → Finder 返回 0.99 → 应用返回提醒 0.99 → 记住流程 0.95 → 交给 Codex/分享上下文 0.9 → 记录学习 0.85 → 记住事实 0.88），不命中返回 null 落回 Yishu-owned loop；`formatProductActionSpeech` 生成动作回执后的中英文口语播报；`classifyRelativeTimeReminder` 单分类器（schedule/question/incomplete——question 与 incomplete 永远产品自留，不落执行循环）。
 - `task-truth.ts`：`TaskTruthProjector`——runtime 只报 observation，kernel 决定持久 status（no tool → no task；verified → done；completed without verification → blocked；terminal 不可被 late event 覆盖）。
 
 ## 7. 测试（test/）

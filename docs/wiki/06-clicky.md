@@ -95,7 +95,7 @@ Ctrl+Option（GlobalPushToTalkShortcutMonitor，CGEvent tap）
 - 路由：
   - `/health`、`/config`（无 secret 的能力面，Swift 据此判 ready）；
   - `/chat`：Anthropic Messages ↔ OpenAI chat/completions 双向转换（含 SSE）；
-  - `/v1/chat/completions`：Pi sidecar loopback，仅 `YISHU_RUNTIME_MODELS` 白名单模型，凭据只在 worker→8317 转发时注入；
+  - `/v1/chat/completions`：Yishu runtime sidecar loopback，仅 `YISHU_RUNTIME_MODELS` 白名单模型，凭据只在 worker→8317 转发时注入；
   - `/tts`：MiniMax `t2a_v2`（hex → mp3）；
   - `/transcribe`：StepFun SSE ASR（热词经 `stepfun-hotwords.mjs` 校验：≤50 个、单条 ≤64 Unicode 字符、去重）。
 - 凭据：`worker/.dev.vars`（本地）或 `wrangler secret`（部署）；[YishuVoiceProxySupervisor.swift](../../apps/clicky/leanring-buddy/YishuVoiceProxySupervisor.swift) 负责启动/健康探测/指数退避重启（≤3 次/分钟）/只回收真正孤儿 8787 占用者。

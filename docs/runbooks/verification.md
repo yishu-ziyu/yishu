@@ -23,7 +23,7 @@ pnpm product:verify
 `product:verify` 额外运行 Clicky Xcode 测试与正式构建脚本的无副作用 self-test。
 完整工作区（含 AgentCore 实验室）仍运行 `pnpm test && pnpm run check`。
 
-产品边界守卫同时确认：正式 Clicky 固定启动 Pi、Runtime 不依赖 `@yishu/agent-core`、
+产品边界守卫同时确认：正式 Clicky 固定注入兼容值 `YISHU_RUNTIME_MODE=pi`（只装配 `YishuLoopRuntimeAdapter`，ADR 0014）、Runtime 不依赖 `@yishu/agent-core`、
 不存在 `AgentCoreRuntime` 产品接线。AgentCore 实验室不再是 Runtime pretest；它由完整
 工作区与 CI 的独立 laboratory 步骤验收。
 
