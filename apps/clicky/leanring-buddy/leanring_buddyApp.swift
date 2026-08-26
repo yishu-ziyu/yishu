@@ -59,9 +59,12 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
-        // Auto-open the panel if the user still needs to do something:
-        // either they haven't onboarded yet, or permissions were revoked.
-        if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
+        // Auto-open when intro has not been shown, or permissions were revoked.
+        // Activation is a later gate and must not force the first-run panel.
+        if YishuActivationPolicy.shouldOpenPanelOnLaunch(
+            introSeen: companionManager.hasSeenIntro,
+            permissionsGranted: companionManager.allPermissionsGranted
+        ) {
             menuBarPanelManager?.showPanelOnLaunch()
         }
         registerAsLoginItemIfNeeded()

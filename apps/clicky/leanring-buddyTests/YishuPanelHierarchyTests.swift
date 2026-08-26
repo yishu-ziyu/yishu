@@ -50,5 +50,8 @@ struct YishuPanelHierarchyTests {
         }
         #expect(YishuVisibleMemoryEditorMetrics.editorHeight <= 80)
         #expect(YishuVisibleMemoryEditorMetrics.editorHeight < 168)
+        #expect(YishuPanelFirstScreenCopy.promise.contains("验证"))
+        #expect(!YishuPanelFirstScreenCopy.promise.contains("帮你完成并告诉你结果"))
+        #expect(YishuPanelFirstScreenCopy.noVerifiedCompletion == "还没有验证过的完成")
     }
 }
