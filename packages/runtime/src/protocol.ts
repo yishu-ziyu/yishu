@@ -272,6 +272,26 @@ export const computerActionResultPayloadSchema = z.object({
   receiptId: z.string().trim().min(1).max(160).optional(),
   attemptId: z.string().uuid().optional(),
   clockLabel: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  observationId: z.string().uuid().optional(),
+  numberedTargets: z.array(z.object({
+    id: numberedTargetIdSchema,
+    role: z.string().nullable(),
+    title: z.string().nullable(),
+    description: z.string().nullable(),
+    enabled: z.boolean().nullable().optional(),
+  })).max(50).optional(),
+  screenshots: z.array(z.object({
+    label: z.string().min(1),
+    sourceWindowNumber: z.number().int().positive().optional(),
+    mediaType: z.literal("image/jpeg"),
+    base64Data: z.string().min(1),
+    displayWidthPoints: z.number().int().positive(),
+    displayHeightPoints: z.number().int().positive(),
+    screenshotWidthPixels: z.number().int().positive(),
+    screenshotHeightPixels: z.number().int().positive(),
+    displayOriginXPoints: z.number().finite().optional(),
+    displayOriginYPoints: z.number().finite().optional(),
+  })).max(1).optional(),
 });
 
 export const pointerSampleSchema = z.object({

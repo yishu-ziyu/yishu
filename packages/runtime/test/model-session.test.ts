@@ -468,3 +468,57 @@ test("cancel still skips a later sequential tool when a parallel tool is in the 
   assert.ok(order.includes("slow-start"));
   assert.equal(order.includes("later"), false);
 });
+
+test("a tool recapture image is sent on the next model call, not the turn-start image", async (t) => {
+  const bodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = [];
+  const realFetch = globalThis.fetch;
+  let callIndex = 0;
+  globalThis.fetch = (async (_input, init) => {
+    if (init && typeof init === "object" && "body" in init && typeof init.body === "string") {
+      bodies.push(JSON.parse(init.body) as { messages?: Array<{ role?: string; content?: unknown }> });
+    }
+    const body = callIndex === 0
+      ? toolCallsResponse([{ id: "call_click", name: "click_a", argumentsJson: "{}" }])
+      : stopResponse();
+    callIndex += 1;
+    return okStream(sseBody(body));
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const click: ToolDefinition = {
+    name: "click_a",
+    label: "click",
+    description: "click",
+    promptSnippet: "",
+    promptGuidelines: [],
+    parameters: { type: "object" },
+    executionMode: "sequential",
+    async execute() {
+      return {
+        content: [{ type: "text", text: "clicked" }],
+        details: undefined,
+        images: [{ type: "image", data: "abc123", mimeType: "image/jpeg", label: "after" }],
+      };
+    },
+  };
+  const { session } = await createYishuAgentSession({
+    model: MODEL,
+    providerRuntime,
+    systemPrompt: "PERSONA",
+    customTools: [click],
+  });
+  t.after(() => session.dispose());
+  await session.prompt("点一下", {
+    images: [{ type: "image", data: "turn-start", mimeType: "image/jpeg" }],
+  });
+  const followUp = bodies.at(-1)?.messages ?? [];
+  const recapture = followUp.find((message) => (
+    message.role === "user"
+    && JSON.stringify(message.content).includes("abc123")
+  ));
+  assert.ok(recapture, "follow-up model call must include the recaptured screenshot");
+  assert.match(JSON.stringify(recapture.content), /Fresh observation after the last action/);
+  assert.equal(JSON.stringify(followUp).includes("turn-start"), true);
+});

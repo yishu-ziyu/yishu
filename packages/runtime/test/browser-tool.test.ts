@@ -133,6 +133,22 @@ test("product runtime exposes browser next to delegate on main sessions", async 
   }
 });
 
+test("goto records an opened primary page for research evidence", async () => {
+  const opened: Array<{ url: string; title?: string }> = [];
+  const tool = createBrowserTool(async () => receipt({
+    succeeded: true,
+    message: "opened",
+    url: "https://example.com/mars",
+    title: "Mars",
+  }), {
+    recordPrimaryPage: (page) => opened.push(page),
+  });
+  await tool.execute("1", { op: "goto", url: "https://example.com/mars" } as never);
+  assert.deepEqual(opened, [{ url: "https://example.com/mars", title: "Mars" }]);
+  await tool.execute("2", { op: "observe" } as never);
+  assert.equal(opened.length, 1);
+});
+
 test("old browser target ids expire after a mutation and extract is untrusted", async () => {
   const state = { url: "https://example.com/", title: "Example", clicks: [] as string[] };
   const hub = new BrowserSessionHub(async () => ({

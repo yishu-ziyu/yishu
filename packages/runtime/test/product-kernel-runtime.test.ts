@@ -3441,7 +3441,7 @@ test("workspace.grant populates the file-tool ledger; revoke stops writes", asyn
   const root = await mkdtemp(path.join(tmpdir(), "yishu-pkr-ws-"));
   const workspaceId = randomUUID();
   const grantEvents: RuntimeEvent[] = [];
-  await runtime.grantWorkspace({
+  await runtime.delegation.workspace.grant({
     schemaVersion: PROTOCOL_VERSION,
     type: "workspace.grant",
     requestId: randomUUID(),
@@ -3477,7 +3477,7 @@ test("workspace.grant populates the file-tool ledger; revoke stops writes", asyn
   assert.match(read.content[0]?.type === "text" ? read.content[0].text : "", /^alpha/);
 
   const listed: RuntimeEvent[] = [];
-  await runtime.listWorkspaces({
+  await runtime.delegation.workspace.list({
     schemaVersion: PROTOCOL_VERSION,
     type: "workspace.list",
     requestId: randomUUID(),
@@ -3492,7 +3492,7 @@ test("workspace.grant populates the file-tool ledger; revoke stops writes", asyn
   assert.equal(items[0]?.id, workspaceId);
   assert.equal(items[0]?.rootPath, undefined);
 
-  await runtime.revokeWorkspace({
+  await runtime.delegation.workspace.revoke({
     schemaVersion: PROTOCOL_VERSION,
     type: "workspace.revoke",
     requestId: randomUUID(),

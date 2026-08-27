@@ -24,6 +24,7 @@ import type {
   AnyToolDefinition,
   CanonicalMessage,
   ModelProviderRuntime,
+  PromptImage,
   ModelSession,
   PromptOptions,
   ResolvedModel,
@@ -363,7 +364,13 @@ export class YishuModelSession implements ModelSession {
 
   private async executeToolCalls(toolCalls: readonly WireToolCall[], signal: AbortSignal): Promise<void> {
     if (signal.aborted) throw abortError(signal);
-    type Slot = { call: WireToolCall; output: string; isError: boolean; ran: boolean };
+    type Slot = {
+      call: WireToolCall;
+      output: string;
+      isError: boolean;
+      ran: boolean;
+      images?: PromptImage[];
+    };
     const slots: Slot[] = toolCalls.map((call) => ({
       call,
       output: "",
@@ -392,6 +399,7 @@ export class YishuModelSession implements ModelSession {
       try {
         const result = await tool.execute(call.id, params, signal);
         slot.output = result.content.map((part) => part.text).join("\n");
+        if (result.images && result.images.length > 0) slot.images = [...result.images];
       } catch (error) {
         slot.isError = true;
         slot.output = error instanceof Error ? error.message : String(error);
@@ -432,6 +440,14 @@ export class YishuModelSession implements ModelSession {
       });
       this.lastToolName = slot.call.name;
       this.lastToolFailed = slot.isError;
+    }
+    const recapture = slots.flatMap((slot) => slot.images ?? []).slice(0, 1);
+    if (recapture.length > 0) {
+      this.history.push({
+        role: "user",
+        text: "Fresh observation after the last action. Use these numberedTargets. Do not reuse the earlier screenshot.",
+        images: recapture,
+      });
     }
     if (signal.aborted) throw abortError(signal);
     const rejected = settled.find((result) => result.status === "rejected");
