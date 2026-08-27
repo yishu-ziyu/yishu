@@ -89,3 +89,44 @@ test("child file tool is read-only even with a write grant", async () => {
   const listed = await child.execute("2", { op: "list", workspaceId: grant.id, path: "." } as never);
   assert.match(listed.content[0]?.type === "text" ? listed.content[0].text : "", /note\.txt/);
 });
+
+test("file tool completes find-read-edit-readback-trash-restore", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "yishu-files-task-"));
+  await mkdir(path.join(root, "docs"));
+  await writeFile(path.join(root, "docs", "note.txt"), "alpha\n");
+  const ledger = createWorkspaceLedger();
+  const grant = ledger.create({
+    displayName: "task",
+    rootPathReference: root,
+    scope: { kind: "personal" },
+    capabilities: ["read", "create", "edit", "trash"],
+  });
+  const tool = createFileTool({
+    ledger,
+    resolveRoot: (ref) => ref,
+    scope: { kind: "personal" },
+    approved: true,
+  });
+  const found = await tool.execute("1", { op: "search", workspaceId: grant.id, query: "alpha" } as never);
+  assert.match(found.content[0]?.type === "text" ? found.content[0].text : "", /note\.txt/);
+  const read = await tool.execute("2", { op: "read_text", workspaceId: grant.id, path: "docs/note.txt" } as never);
+  const before = (read.details as { afterSha256?: string }).afterSha256;
+  assert.ok(before);
+  const patched = await tool.execute("3", {
+    op: "apply_patch",
+    workspaceId: grant.id,
+    path: "docs/note.txt",
+    baseSha256: before,
+    patch: "@@ -1,1 +1,1 @@\n-alpha\n+beta\n",
+  } as never);
+  assert.equal((patched.details as { verified?: boolean }).verified, true);
+  const readback = await tool.execute("4", { op: "read_text", workspaceId: grant.id, path: "docs/note.txt" } as never);
+  assert.match(readback.content[0]?.type === "text" ? readback.content[0].text : "", /^beta/);
+  const trashed = await tool.execute("5", { op: "trash", workspaceId: grant.id, path: "docs/note.txt" } as never);
+  const restoreRef = (trashed.details as { restoreRef?: string }).restoreRef;
+  assert.ok(restoreRef);
+  const restored = await tool.execute("6", { op: "restore_from_trash", receiptId: restoreRef } as never);
+  assert.equal((restored.details as { verified?: boolean }).verified, true);
+  const again = await tool.execute("7", { op: "read_text", workspaceId: grant.id, path: "docs/note.txt" } as never);
+  assert.match(again.content[0]?.type === "text" ? again.content[0].text : "", /^beta/);
+});

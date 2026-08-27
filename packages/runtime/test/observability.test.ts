@@ -6,6 +6,7 @@ import test from "node:test";
 import { QualityEventRejectedError } from "../src/observability/quality-event.js";
 import { sanitizeQualityAttributes } from "../src/observability/quality-redaction.js";
 import { createQualityRecorder } from "../src/observability/quality-recorder.js";
+import { computeQualityMetrics } from "../src/observability/quality-metrics.js";
 import { percentile, startQualitySpan } from "../src/observability/quality-span.js";
 import { detectFalseCompletions, speechClaimsCompletion } from "../src/observability/false-completion.js";
 import { buildDiagnosticsPackContents, writeDiagnosticsPack } from "../src/observability/diagnostics-pack.js";
@@ -99,4 +100,39 @@ test("diagnostics pack blocks credential-like content", async () => {
 test("percentile is defined for a populated series", () => {
   assert.equal(percentile([10, 20, 30, 40], 50), 20);
   assert.equal(percentile([], 95), undefined);
+});
+
+test("quality metrics compute verified, unknown, and false-completion rates", async () => {
+  const recorder = createQualityRecorder();
+  await recorder.record({
+    name: "task.terminal",
+    sessionId: "s",
+    durationMs: 10,
+    attributes: { verified: true, taskTerminal: "verified" },
+  });
+  await recorder.record({
+    name: "task.terminal",
+    sessionId: "s",
+    durationMs: 40,
+    status: "unknown",
+    attributes: { verified: false, taskTerminal: "unknown" },
+  });
+  await recorder.record({ name: "false_completion_detected", sessionId: "s" });
+  const metrics = computeQualityMetrics(await recorder.list());
+  assert.equal(metrics.eventCount, 3);
+  assert.equal(metrics.verifiedRate, 0.5);
+  assert.equal(metrics.unknownRate, 1 / 3);
+  assert.equal(metrics.falseCompletionCount, 1);
+  assert.equal(metrics.p50DurationMs, 10);
+  const dir = await mkdtemp(path.join(tmpdir(), "yishu-metrics-"));
+  await writeDiagnosticsPack(dir, {
+    appVersion: "0.0.1",
+    runtimeVersion: "0.0.1",
+    osVersion: "15.0",
+    arch: "arm64",
+    events: await recorder.list(),
+    permissionFlags: { microphone: false },
+  });
+  const packed = JSON.parse(await readFile(path.join(dir, "metrics.json"), "utf8"));
+  assert.equal(packed.falseCompletionCount, 1);
 });

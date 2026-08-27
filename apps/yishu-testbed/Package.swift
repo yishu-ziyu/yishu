@@ -5,10 +5,12 @@ let package = Package(
     name: "YishuTestbed",
     platforms: [.macOS(.v14)],
     products: [
+        .library(name: "YishuTestbedKit", targets: ["YishuTestbedKit"]),
         .executable(name: "YishuTestbed", targets: ["YishuTestbed"]),
     ],
     targets: [
-        .executableTarget(name: "YishuTestbed"),
-        .testTarget(name: "YishuTestbedTests", dependencies: ["YishuTestbed"]),
+        .target(name: "YishuTestbedKit"),
+        .executableTarget(name: "YishuTestbed", dependencies: ["YishuTestbedKit"]),
+        .testTarget(name: "YishuTestbedTests", dependencies: ["YishuTestbedKit"]),
     ]
 )

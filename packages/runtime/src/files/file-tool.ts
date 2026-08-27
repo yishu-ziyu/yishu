@@ -263,8 +263,17 @@ async function searchWorkspace(fullPath: string, query: string, glob?: string): 
       if (glob !== undefined && glob.length > 0 && !entry.name.includes(glob.replaceAll("*", ""))) {
         continue;
       }
+      const filePath = path.join(dir, entry.name);
       if (needle.length === 0 || nextRel.toLowerCase().includes(needle) || entry.name.toLowerCase().includes(needle)) {
         hits.push(nextRel);
+        continue;
+      }
+      try {
+        const body = await readFile(filePath);
+        if (body.length === 0 || body.length > 256_000 || body.includes(0)) continue;
+        if (body.toString("utf8").toLowerCase().includes(needle)) hits.push(nextRel);
+      } catch {
+        continue;
       }
     }
   }

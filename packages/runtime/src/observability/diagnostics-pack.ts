@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { computeQualityMetrics } from "./quality-metrics.js";
 import { textLooksLikeSecret } from "./quality-redaction.js";
 import type { QualityEvent } from "./quality-event.js";
 
@@ -21,7 +22,7 @@ export interface DiagnosticsPackManifest {
   blockReason?: string;
 }
 
-const PACK_FILE_NAMES = ["versions.json", "events.json", "permissions.json", "timeline.json"] as const;
+const PACK_FILE_NAMES = ["versions.json", "events.json", "permissions.json", "timeline.json", "metrics.json"] as const;
 
 export function buildDiagnosticsPackContents(input: DiagnosticsPackInput): {
   files: Record<string, string>;
@@ -48,11 +49,13 @@ export function buildDiagnosticsPackContents(input: DiagnosticsPackInput): {
     traceId: event.traceId ?? null,
     spanId: event.spanId ?? null,
   })), null, 2);
+  const metrics = JSON.stringify(computeQualityMetrics(input.events), null, 2);
   const files = {
     "versions.json": versions,
     "events.json": events,
     "permissions.json": permissions,
     "timeline.json": timeline,
+    "metrics.json": metrics,
   };
   const joined = Object.values(files).join("\n");
   if (textLooksLikeSecret(joined)) {
