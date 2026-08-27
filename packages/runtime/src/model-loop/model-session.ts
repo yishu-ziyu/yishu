@@ -35,7 +35,7 @@ import type { TurnContextProviders } from "./turn-context.js";
 
 const MAX_MODEL_ITERATIONS = 16;
 const MAX_HISTORY_MESSAGES = 200;
-const STREAM_FIRST_BYTE_TIMEOUT_MS = 20_000;
+const STREAM_FIRST_BYTE_TIMEOUT_MS = 45_000;
 const TRANSIENT_RETRY_MAX = 2;
 export const FIRST_BYTE_TIMEOUT_MESSAGE = "Model stream timed out waiting for the first byte.";
 
