@@ -5,138 +5,25 @@ on:
   pull_request:
 
 jobs:
-  boundaries:
+  verify:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - run: corepack enable
+
+      - name: Enable pnpm
+        run: corepack enable
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-      - run: node -v && pnpm -v && swift --version && xcodebuild -version
+
       - run: pnpm install --frozen-lockfile
-      - run: pnpm product:boundaries
-      - run: pnpm dep:check
-      - run: pnpm size:check
-      - run: pnpm generated:check
-      - run: pnpm arch:check
-      - run: node script/check-capability-tools.mjs
 
-  kernel:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - run: corepack enable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @yishu/kernel check
-      - run: pnpm --filter @yishu/kernel test:coverage
+      - name: Verify unified Yishu product spine
+        run: pnpm product:verify
 
-  runtime:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - run: corepack enable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @yishu/runtime check
-      - run: pnpm --filter @yishu/runtime test:coverage
-
-  worker:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - run: corepack enable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter yishu-proxy check
-      - run: pnpm --filter yishu-proxy test
-
-  swift-package:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - run: swift test
-
-  clicky-xcode:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - run: corepack enable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: |
-          xcodebuild \
-            -project apps/clicky/leanring-buddy.xcodeproj \
-            -scheme leanring-buddy \
-            -destination 'platform=macOS' \
-            CODE_SIGNING_ALLOWED=NO \
-            ENABLE_HARDENED_RUNTIME=NO \
-            ENABLE_DEBUG_DYLIB=NO \
-            test
-      - run: ./apps/clicky/scripts/run-local.sh self-test
-
-  agent-core-lab:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - run: corepack enable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm lab:verify
-
-  capability-mock:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - run: corepack enable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @yishu/capability-evals test
-      - run: node script/check-capability-tools.mjs
-      - run: node script/render-capability-matrix.mjs
-      - run: git diff --exit-code README.md docs/capabilities/CAPABILITY_MATRIX.md
-
-  required:
-    if: always()
-    needs:
-      - boundaries
-      - kernel
-      - runtime
-      - worker
-      - swift-package
-      - clicky-xcode
-      - agent-core-lab
-      - capability-mock
-    runs-on: macos-15
-    steps:
-      - name: Require every CI job
+      - name: Verify AgentCore laboratory
         run: |
-          python3 - <<'PY'
-          import json, sys
-          needs = json.loads('''${{ toJSON(needs) }}''')
-          failed = [name for name, body in needs.items() if body.get("result") != "success"]
-          if failed:
-              print("failed jobs:", ", ".join(failed))
-              sys.exit(1)
-          print("ci / required passed")
-          PY
+          pnpm --filter @yishu/agent-core check
+          pnpm --filter @yishu/agent-core test
