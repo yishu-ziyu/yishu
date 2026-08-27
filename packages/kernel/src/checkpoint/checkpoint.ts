@@ -30,10 +30,16 @@ export interface CheckpointLedger {
   }, now?: Date): TaskCheckpoint;
   resume(checkpointId: string, now?: Date): TaskCheckpoint;
   consume(checkpointId: string, now?: Date): TaskCheckpoint;
+  snapshot(): TaskCheckpoint[];
 }
 
-export function createCheckpointLedger(): CheckpointLedger {
-  const rows = new Map<string, TaskCheckpoint>();
+export function createCheckpointLedger(seed: readonly TaskCheckpoint[] = []): CheckpointLedger {
+  const rows = new Map<string, TaskCheckpoint>(
+    seed.map((checkpoint) => [checkpoint.checkpointId, {
+      ...checkpoint,
+      steps: checkpoint.steps.map((step) => ({ ...step })),
+    }]),
+  );
   return {
     create(input, now = new Date()) {
       const checkpoint: TaskCheckpoint = {
@@ -84,6 +90,12 @@ export function createCheckpointLedger(): CheckpointLedger {
       const next: TaskCheckpoint = { ...current, status: "consumed", updatedAt: now.toISOString() };
       rows.set(checkpointId, next);
       return next;
+    },
+    snapshot() {
+      return [...rows.values()].map((checkpoint) => ({
+        ...checkpoint,
+        steps: checkpoint.steps.map((step) => ({ ...step })),
+      }));
     },
   };
 }

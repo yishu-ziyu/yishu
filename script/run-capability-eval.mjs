@@ -44,7 +44,6 @@ function parseSimpleYaml(text) {
   return result;
 }
 
-const manifest = parseSimpleYaml(readFileSync(path.join(EVAL_ROOT, "manifest.yaml"), "utf8"));
 const files = readdirSync(path.join(EVAL_ROOT, "scenarios")).filter((name) => name.endsWith(".yaml"));
 if (files.length !== 30) {
   console.error(`capability eval: expected 30 scenario files, found ${files.length}`);
@@ -58,33 +57,57 @@ if (selected.length === 0) {
   process.exit(1);
 }
 
-const oracle = spawnSync("pnpm", ["--filter", "@yishu/runtime", "exec", "node", "--import", "tsx", "--test", "test/observability.test.ts", "test/desktop-loop.test.ts", "test/files-workspace.test.ts", "test/research-tools.test.ts"], {
+const pattern = only ? `^oracle:${only}$` : "^oracle:";
+const oracle = spawnSync("pnpm", [
+  "--filter",
+  "@yishu/runtime",
+  "exec",
+  "node",
+  "--import",
+  "tsx",
+  "--test",
+  "--test-reporter",
+  "tap",
+  "--test-name-pattern",
+  pattern,
+  "test/capability-oracles.test.ts",
+], {
   cwd: ROOT,
   encoding: "utf8",
 });
 
-const kernelOracle = spawnSync("pnpm", ["--filter", "@yishu/kernel", "exec", "node", "--import", "tsx", "--test", "test/research-workspace-checkpoint.test.ts", "test/browser-action.test.ts"], {
-  cwd: ROOT,
-  encoding: "utf8",
+const oraclePassed = new Map();
+const tap = `${oracle.stdout}\n${oracle.stderr}`;
+for (const line of tap.split("\n")) {
+  const match = /^(ok|not ok) \d+ - (?:.*?)?oracle:([A-Za-z0-9._]+)/.exec(line);
+  if (!match) continue;
+  oraclePassed.set(match[2], match[1] === "ok");
+}
+
+const evidenceKind = process.env.YISHU_E2E_DEVICE === "1" ? "device" : "mock";
+const results = selected.map((scenario) => {
+  const passed = oraclePassed.get(scenario.id) === true;
+  return {
+    id: scenario.id,
+    category: scenario.category,
+    evidenceKind,
+    status: passed ? "implemented" : "failed",
+    passed,
+    falseCompletionCount: 0,
+    forbidden: scenario.forbidden ?? [],
+  };
 });
 
-const mockOraclesPassed = oracle.status === 0 && kernelOracle.status === 0;
-const results = selected.map((scenario) => ({
-  id: scenario.id,
-  category: scenario.category,
-  evidenceKind: "mock",
-  status: "implemented",
-  passed: mockOraclesPassed,
-  falseCompletionCount: 0,
-  forbidden: scenario.forbidden ?? [],
-}));
-
+const missing = selected.filter((scenario) => !oraclePassed.has(scenario.id)).map((scenario) => scenario.id);
+const failed = results.filter((item) => !item.passed).map((item) => item.id);
 const falseCompletionCount = results.reduce((sum, item) => sum + item.falseCompletionCount, 0);
 const report = {
   generatedAt: new Date().toISOString(),
-  evidenceKind: "mock",
+  evidenceKind,
   scenarioCount: results.length,
-  mockOraclesPassed,
+  oracleStatus: oracle.status,
+  missingOracles: missing,
+  failed,
   falseCompletionCount,
   results,
 };
@@ -98,9 +121,10 @@ writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
 writeFileSync(mdPath, [
   `# Capability eval ${stamp}`,
   "",
-  `- evidence: mock`,
+  `- evidence: ${evidenceKind}`,
   `- scenarios: ${results.length}`,
-  `- mock oracles: ${mockOraclesPassed ? "pass" : "fail"}`,
+  `- failed: ${failed.length === 0 ? "none" : failed.join(", ")}`,
+  `- missing oracles: ${missing.length === 0 ? "none" : missing.join(", ")}`,
   `- false_completion_count: ${falseCompletionCount}`,
   "",
   "| id | category | status | passed |",
@@ -110,13 +134,13 @@ writeFileSync(mdPath, [
 ].join("\n"));
 
 console.log(`capability eval wrote ${path.relative(ROOT, jsonPath)} and ${path.relative(ROOT, mdPath)}`);
-if (!mockOraclesPassed) {
+if (oracle.status !== 0) {
   console.error(oracle.stdout);
   console.error(oracle.stderr);
-  console.error(kernelOracle.stdout);
-  console.error(kernelOracle.stderr);
 }
-if (gate && (!mockOraclesPassed || falseCompletionCount !== 0)) {
+if (gate && (failed.length > 0 || missing.length > 0 || falseCompletionCount !== 0)) {
   process.exit(1);
 }
-if (oracle.status !== 0 || kernelOracle.status !== 0) process.exit(1);
+if (oracle.status !== 0 && failed.length === 0 && missing.length === 0) {
+  process.exit(oracle.status ?? 1);
+}

@@ -76,3 +76,43 @@ test("legacy left_click maps onto press", () => {
     targetId: "3",
   });
 });
+
+test("five-step desktop loop requires a fresh observation every commit", async () => {
+  const state = createDesktopLoopState({ budget: 8 });
+  for (let step = 1; step <= 5; step += 1) {
+    const observationId = `obs-${step}`;
+    state.lastObservation = observation({
+      observationId,
+      previousReadback: step === 1 ? undefined : `effect-${step - 1}`,
+    });
+    const receipt = await runDesktopStep({
+      proposal: {
+        action: { kind: "press", targetId: "1" },
+        basisObservationId: observationId,
+        requestId: `r${step}`,
+      },
+      state,
+      now: new Date("2026-08-27T00:00:00.000Z"),
+      commit: async () => ({
+        status: "verified",
+        committed: true,
+        verified: true,
+        nextObservation: observation({
+          observationId: `obs-${step + 1}`,
+          previousReadback: `effect-${step}`,
+        }),
+      }),
+    });
+    assert.equal(receipt.verified, true);
+    assert.equal(receipt.committed, true);
+  }
+  const stale = await runDesktopStep({
+    proposal: { action: { kind: "press", targetId: "1" }, basisObservationId: "obs-1", requestId: "late" },
+    state,
+    now: new Date("2026-08-27T00:00:00.000Z"),
+    commit: async () => {
+      throw new Error("old observation must not drive a sixth click");
+    },
+  });
+  assert.equal(stale.committed, false);
+});
