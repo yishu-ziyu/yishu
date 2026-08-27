@@ -1,11 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createResearchLedger } from "@yishu/kernel";
+import { createResearchLedger, type ResearchLedger } from "@yishu/kernel";
+import { detectFalseCompletions } from "../src/observability/false-completion.js";
 import { buildResearchPlan } from "../src/research/research-plan.js";
+import {
+  gateResearchTurnCompletion,
+  researchFactualAnswerVerified,
+} from "../src/research/research-completion-gate.js";
 import { canonicalizeUrl, dedupeSearchHits } from "../src/research/search-provider.js";
 import { createResearchToolset } from "../src/research/research-tools.js";
 import { issueApprovalToken, verifyApprovalToken } from "../src/executor/approval-token.js";
 import { isPrivilegedActionKind } from "../src/executor/privileged-action.js";
+
+function addOpenedPrimaryPage(ledger: ResearchLedger, url = "https://example.com/mars") {
+  return ledger.addSource({
+    url,
+    canonicalUrl: url,
+    title: "Mars",
+    retrievedAt: "2026-08-27T00:00:00.000Z",
+    sourceType: "documentation",
+    trustTier: 2,
+    kind: "primary_page",
+  });
+}
 
 test("research plan stays between 2 and 6 queries", () => {
   const plan = buildResearchPlan("What is Yishu?");
@@ -37,16 +54,27 @@ test("capture_evidence plus finalize accepts a sourced factual claim", async () 
   const finalize = toolset.tools.find((tool) => tool.name === "finalize_research");
   assert.ok(search && capture && finalize);
   await search.execute("1", { query: "mars color" } as never);
-  const sourceId = ledger.listSources()[0]?.sourceId;
-  assert.ok(sourceId);
-  const captured = await capture.execute("2", {
-    sourceId,
+  const snippetId = ledger.listSources()[0]?.sourceId;
+  assert.ok(snippetId);
+  await assert.rejects(
+    () => capture.execute("2", {
+      sourceId: snippetId,
+      locatorKind: "paragraph",
+      locatorValue: "p1",
+      text: "Mars appears red because of iron oxide.",
+    } as never),
+    /snippet_claimed_as_primary/,
+  );
+  assert.equal(ledger.listSources().every((source) => source.kind === "search_snippet"), true);
+  const primary = addOpenedPrimaryPage(ledger);
+  const captured = await capture.execute("3", {
+    sourceId: primary.sourceId,
     locatorKind: "paragraph",
     locatorValue: "p1",
     text: "Mars appears red because of iron oxide.",
   } as never);
   const evidenceId = (captured.details as { evidenceId: string }).evidenceId;
-  const done = await finalize.execute("3", {
+  const done = await finalize.execute("4", {
     claims: [{
       text: "Mars appears red because of iron oxide.",
       evidenceIds: [evidenceId],
@@ -56,6 +84,57 @@ test("capture_evidence plus finalize accepts a sourced factual claim", async () 
     }],
   } as never);
   assert.match(done.content[0]?.type === "text" ? done.content[0].text : "", /accepted/);
+});
+
+test("web_search then speak without capture or finalize is not a verified completion", () => {
+  const gated = gateResearchTurnCompletion({
+    toolsUsed: [{ name: "web_search" }],
+    speech: "Mars is red because of iron oxide.",
+    verified: true,
+  });
+  assert.equal(gated.verified, false);
+  assert.equal(gated.verifier, "research-unverified");
+  assert.equal(researchFactualAnswerVerified({
+    searchUsed: true,
+    captureSucceeded: false,
+    finalizeAccepted: false,
+  }), false);
+  assert.ok(gated.findings.some((item) => item.code === "search_without_primary_evidence"));
+  const captureOnly = gateResearchTurnCompletion({
+    toolsUsed: [{ name: "search_web" }, { name: "capture_evidence" }],
+    speech: "Mars is red because of iron oxide.",
+    verified: true,
+  });
+  assert.equal(captureOnly.verified, false);
+  const finalizeWithoutCapture = gateResearchTurnCompletion({
+    toolsUsed: [{ name: "web_search" }, { name: "finalize_research" }],
+    speech: "Mars is red because of iron oxide.",
+    verified: true,
+  });
+  assert.equal(finalizeWithoutCapture.verified, false);
+  const honest = gateResearchTurnCompletion({
+    toolsUsed: [
+      { name: "search_web" },
+      { name: "capture_evidence" },
+      { name: "finalize_research" },
+    ],
+    speech: "Mars is red because of iron oxide.",
+    verified: false,
+  });
+  assert.equal(honest.verified, false);
+  assert.equal(honest.findings.length, 0);
+  assert.equal(honest.verifier, "conversation-response-only");
+  const findings = detectFalseCompletions({
+    tasks: [{
+      taskId: "t-search",
+      status: "completed",
+      verified: true,
+      searchUsed: true,
+      researchFinalized: false,
+    }],
+    utterances: [{ text: "Mars is red because of iron oxide.", taskId: "t-search" }],
+  });
+  assert.ok(findings.some((item) => item.code === "search_without_primary_evidence"));
 });
 
 test("finalize_research rejects factual claims with no evidence", async () => {
