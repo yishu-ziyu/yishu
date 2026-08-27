@@ -112,10 +112,9 @@ export class StdioComputerUsePort implements ComputerUsePort {
 
   constructor(
     private readonly emit: RuntimeEventSink,
-    // Click + AX read-back + recapture JPEG on stdio often exceeds 8s on
-    // a retina display. Timing out here makes the mouth say 没点成功 after
-    // the window already changed.
-    private readonly timeoutMilliseconds = 25_000,
+    // Click + AX read-back + recapture JPEG on stdio. Live 奕枢 still timed
+    // out at 25s after the Testbed already showed effect-1.
+    private readonly timeoutMilliseconds = 60_000,
   ) {}
 
   perform(
