@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createYishuAgentSession } from "../src/model-loop/model-session.js";
+import { createYishuAgentSession, MAX_MODEL_ITERATIONS } from "../src/model-loop/model-session.js";
 import type {
   ModelProviderRuntime,
   ResolvedModel,
@@ -220,11 +220,26 @@ test("cancel stops later tools in the same batch", async (t) => {
   assert.deepEqual(order, ["slow-start"]);
 });
 
-test("hitting the tool-call iteration cap fails instead of pretending the turn finished", async (t) => {
-  const fetchStub = installFetchStub(() => okStream(sseBody(toolCallsResponse([
-    { id: "call_loop", name: "echo", argumentsJson: "{}" },
-  ]))));
-  t.after(fetchStub.restore);
+test("the last model call withholds tools so a looping turn can still speak", async (t) => {
+  const requests: Array<{
+    tools?: unknown;
+    messages?: Array<{ role?: string; content?: unknown }>;
+  }> = [];
+  let callIndex = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input, init) => {
+    if (init && typeof init === "object" && "body" in init && typeof init.body === "string") {
+      requests.push(JSON.parse(init.body) as (typeof requests)[number]);
+    }
+    const lines = callIndex < MAX_MODEL_ITERATIONS - 1
+      ? toolCallsResponse([{ id: `call_${callIndex}`, name: "echo", argumentsJson: "{}" }])
+      : stopResponse();
+    callIndex += 1;
+    return okStream(sseBody(lines));
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
 
   const echo: ToolDefinition = {
     name: "echo",
@@ -247,8 +262,25 @@ test("hitting the tool-call iteration cap fails instead of pretending the turn f
   });
   t.after(() => session.dispose());
 
-  await assert.rejects(session.prompt("循环"), /iteration limit/);
-  assert.match(String(session.agent.state.errorMessage), /iteration limit/);
+  const deltas: string[] = [];
+  const unsubscribe = session.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      deltas.push(event.assistantMessageEvent.delta);
+    }
+  });
+  t.after(unsubscribe);
+
+  await session.prompt("循环");
+  assert.equal(callIndex, MAX_MODEL_ITERATIONS);
+  assert.equal(requests.length, MAX_MODEL_ITERATIONS);
+  for (const request of requests.slice(0, MAX_MODEL_ITERATIONS - 1)) {
+    assert.ok(Array.isArray(request.tools) && request.tools.length > 0);
+  }
+  assert.equal(requests[MAX_MODEL_ITERATIONS - 1]?.tools, undefined);
+  const lastMessages = requests[MAX_MODEL_ITERATIONS - 1]?.messages ?? [];
+  const lastUser = [...lastMessages].reverse().find((message) => message.role === "user");
+  assert.match(String(lastUser?.content ?? ""), /不要再调用工具/);
+  assert.match(deltas.join(""), /好/);
 });
 
 function stopResponse(): readonly string[] {

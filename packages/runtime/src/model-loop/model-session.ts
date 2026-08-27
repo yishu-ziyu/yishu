@@ -33,11 +33,13 @@ import type {
 } from "./types.js";
 import type { TurnContextProviders } from "./turn-context.js";
 
-const MAX_MODEL_ITERATIONS = 16;
+export const MAX_MODEL_ITERATIONS = 16;
 const MAX_HISTORY_MESSAGES = 200;
 const STREAM_FIRST_BYTE_TIMEOUT_MS = 45_000;
 const TRANSIENT_RETRY_MAX = 2;
 export const FIRST_BYTE_TIMEOUT_MESSAGE = "Model stream timed out waiting for the first byte.";
+const FINAL_REPLY_HINT =
+  "工具次数已用尽。根据已经打开的页面和搜索结果，直接说出结论。不要再调用工具。";
 
 export interface YishuModelSessionOptions {
   readonly model: ResolvedModel;
@@ -161,15 +163,22 @@ export class YishuModelSession implements ModelSession {
       let lastHadTools = false;
       for (let iteration = 0; iteration < MAX_MODEL_ITERATIONS; iteration += 1) {
         if (controller.signal.aborted) throw abortError(controller.signal);
-        const { text, toolCalls } = await this.streamOneMessage(controller.signal, reportPreflight);
-        lastHadTools = toolCalls.length > 0;
+        const offerTools = iteration < MAX_MODEL_ITERATIONS - 1;
+        if (!offerTools) this.pendingStatusText = FINAL_REPLY_HINT;
+        const { text, toolCalls } = await this.streamOneMessage(
+          controller.signal,
+          reportPreflight,
+          { offerTools },
+        );
+        const runnableCalls = offerTools ? toolCalls : [];
+        lastHadTools = runnableCalls.length > 0;
         this.history.push({
           role: "assistant",
           text,
-          toolCalls: toolCalls.map((call) => ({ id: call.id, name: call.name, argumentsJson: call.argumentsJson })),
+          toolCalls: runnableCalls.map((call) => ({ id: call.id, name: call.name, argumentsJson: call.argumentsJson })),
         });
-        if (toolCalls.length > 0) {
-          await this.executeToolCalls(toolCalls, controller.signal);
+        if (runnableCalls.length > 0) {
+          await this.executeToolCalls(runnableCalls, controller.signal);
           // ADR 0015: refresh the end-of-context status bar after every
           // tool batch; it rides only the next model call.
           await this.refreshStatusBar().catch(() => undefined);
@@ -181,7 +190,7 @@ export class YishuModelSession implements ModelSession {
           steer.released();
           continue;
         }
-        if (toolCalls.length === 0) break;
+        if (runnableCalls.length === 0) break;
         // Tool results are in history; loop back for the model's next reply.
       }
       if (lastHadTools) {
@@ -222,11 +231,14 @@ export class YishuModelSession implements ModelSession {
   private async streamOneMessage(
     signal: AbortSignal,
     reportPreflight: (accepted: boolean) => void,
+    options: { offerTools?: boolean } = {},
   ): Promise<{ text: string; toolCalls: readonly WireToolCall[] }> {
     const { model, providerRuntime } = this.options;
-    const activeTools = this.activeToolNames
-      .map((name) => this.tools.get(name))
-      .filter((tool): tool is AnyToolDefinition => tool !== undefined);
+    const activeTools = options.offerTools === false
+      ? []
+      : this.activeToolNames
+        .map((name) => this.tools.get(name))
+        .filter((tool): tool is AnyToolDefinition => tool !== undefined);
     const isResponses = model.api === "codex-responses";
     const transientTail = this.pendingStatusText !== undefined
       ? { role: "user" as const, text: this.pendingStatusText }

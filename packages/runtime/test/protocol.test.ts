@@ -786,7 +786,9 @@ test("Yishu persona keeps agency without leaking private reflection", () => {
   assert.match(YISHU_SYSTEM_PROMPT, /互不抢同一块屏幕的事一次一起做/);
   assert.match(YISHU_SYSTEM_PROMPT, /越聊越准/);
   assert.match(YISHU_SYSTEM_PROMPT, /不要宣告做完了/);
-  assert.match(YISHU_SYSTEM_PROMPT, /不要读网址/);
+  assert.match(YISHU_SYSTEM_PROMPT, /只说打开过的那一张网址/);
+  assert.match(YISHU_SYSTEM_PROMPT, /打开网页后不要连点十几下/);
+  assert.match(YISHU_SYSTEM_PROMPT, /搜索摘要不是答案/);
   assert.match(YISHU_SYSTEM_PROMPT, /光球/);
   assert.match(YISHU_SYSTEM_PROMPT, /\[POINT:x,y:标签\]/);
   assert.match(YISHU_SYSTEM_PROMPT, /image dimensions/);

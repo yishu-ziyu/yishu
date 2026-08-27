@@ -562,6 +562,7 @@ export class DelegationCoordinator {
       }, { browser: executor })
     ), {
       recordPrimaryPage: (page) => recordOpenedPrimaryPage(this.researchTools.ledger, page),
+      turnId: () => this.mainTurns.get(conversationId)?.requestId ?? conversationId,
     }) as unknown as ToolDefinition;
   }
 
