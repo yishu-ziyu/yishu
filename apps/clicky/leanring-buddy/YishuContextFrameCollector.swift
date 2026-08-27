@@ -113,6 +113,28 @@ final class YishuContextFrameCollector {
         )
     }
 
+    /// Fresh numbered targets after a desktop action, without ScreenCaptureKit.
+    /// Full-display JPEG recapture blocked `computer.action.result` for 60s+.
+    func recaptureObservation() -> YishuContextFrame {
+        let snapshot = captureMetadata(
+            includePointerTrail: false,
+            includeNumberedTargets: true,
+            pointerSince: nil
+        )
+        return YishuContextFrame(
+            capturedAt: snapshot.capturedAt,
+            expiresAt: snapshot.capturedAt.addingTimeInterval(30),
+            cursor: snapshot.cursor,
+            pointerTrail: snapshot.pointerTrail,
+            frontmostApplication: snapshot.frontmostApplication,
+            activeWindow: snapshot.activeWindow,
+            elementUnderCursor: snapshot.elementUnderCursor,
+            screenshots: [],
+            numberedTargets: snapshot.numberedTargets,
+            warnings: snapshot.warnings + ["recapture:no-screenshot"]
+        )
+    }
+
     /// Metadata-only capture for ContextTrail background sampling.
     /// Omits screenshot bytes so trail.observe stays cheap and private by default.
     func captureTrailSample() -> YishuContextFrame {
