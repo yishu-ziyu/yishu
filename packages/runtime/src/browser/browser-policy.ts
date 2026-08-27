@@ -1,7 +1,10 @@
-import { isAllowedBrowserUrl } from "@yishu/kernel";
+import { isAllowedBrowserUrl, type AllowedBrowserUrlOptions } from "@yishu/kernel";
 
-export function browserUrlIsAllowed(url: string, allowPrivateNetwork = false): boolean {
-  return isAllowedBrowserUrl(url, { allowPrivateNetwork });
+export function browserUrlIsAllowed(
+  url: string,
+  options: AllowedBrowserUrlOptions = {},
+): boolean {
+  return isAllowedBrowserUrl(url, options);
 }
 
 export function observationTargetIsLive(

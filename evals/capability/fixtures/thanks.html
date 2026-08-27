@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Thanks</title>
+</head>
+<body>
+  <h1>Thanks</h1>
+  <p id="readback">thanks {{name}}</p>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const name = params.get("name") || "";
+    const readback = document.getElementById("readback");
+    if (readback) readback.textContent = name ? ("thanks " + name) : "thanks";
+  </script>
+</body>
+</html>
