@@ -32,6 +32,10 @@ import {
   memoryListCommandSchema,
   memoryRememberCommandSchema,
   speechExcerptCommandSchema,
+  workspaceApproveCommandSchema,
+  workspaceGrantCommandSchema,
+  workspaceListCommandSchema,
+  workspaceRevokeCommandSchema,
   LOCAL_GROK_BASE_URL,
   LOCAL_GROK_PROVIDER,
   modelPreferenceSchema,
@@ -572,6 +576,69 @@ test("speech.excerpt is a versioned client command at protocol 1", () => {
     sentAt: new Date().toISOString(),
     payload: { visibleText: "   " },
   }));
+});
+
+test("workspace grant commands are versioned client commands at protocol 1", () => {
+  const requestId = makeTurnStartCommand().requestId;
+  const granted = workspaceGrantCommandSchema.parse({
+    schemaVersion: 1,
+    type: "workspace.grant",
+    requestId,
+    traceId: requestId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      workspaceId: requestId,
+      displayName: "文档",
+      rootPath: "/Users/demo/Documents",
+      sessionScope: { kind: "personal" },
+    },
+  });
+  assert.equal(granted.type, "workspace.grant");
+  assert.equal(clientCommandSchema.parse(granted).type, "workspace.grant");
+
+  assert.throws(() => workspaceGrantCommandSchema.parse({
+    schemaVersion: 1,
+    type: "workspace.grant",
+    requestId,
+    traceId: requestId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      workspaceId: requestId,
+      displayName: "文档",
+      rootPath: "relative/path",
+      sessionScope: { kind: "personal" },
+    },
+  }));
+
+  const revoked = workspaceRevokeCommandSchema.parse({
+    schemaVersion: 1,
+    type: "workspace.revoke",
+    requestId,
+    traceId: requestId,
+    sentAt: new Date().toISOString(),
+    payload: { workspaceId: requestId, sessionScope: { kind: "personal" } },
+  });
+  assert.equal(clientCommandSchema.parse(revoked).type, "workspace.revoke");
+
+  const listed = workspaceListCommandSchema.parse({
+    schemaVersion: 1,
+    type: "workspace.list",
+    requestId,
+    traceId: requestId,
+    sentAt: new Date().toISOString(),
+    payload: { sessionScope: { kind: "personal" } },
+  });
+  assert.equal(clientCommandSchema.parse(listed).type, "workspace.list");
+
+  const approved = workspaceApproveCommandSchema.parse({
+    schemaVersion: 1,
+    type: "workspace.approve",
+    requestId,
+    traceId: requestId,
+    sentAt: new Date().toISOString(),
+    payload: { workspaceId: requestId, op: "trash", allowed: true },
+  });
+  assert.equal(clientCommandSchema.parse(approved).type, "workspace.approve");
 });
 
 test("left_click accepts numbered target ids without pixels", () => {

@@ -656,6 +656,70 @@ export const speechExcerptCommandSchema = z.object({
   }),
 });
 
+const workspaceCapabilitySchema = z.enum(["read", "create", "edit", "move", "trash"]);
+
+const absoluteFolderPathSchema = z.string().trim().min(1).max(4096).refine(
+  (value) => value.startsWith("/") && !value.includes("\0"),
+  { message: "rootPath must be an absolute folder path." },
+);
+
+/**
+ * Trusted desktop ingest of a user-picked folder. The model cannot mint a
+ * grant; Clicky sends the bookmark id plus the resolved absolute path.
+ */
+export const workspaceGrantCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("workspace.grant"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    workspaceId: z.string().uuid(),
+    displayName: z.string().trim().min(1).max(80),
+    rootPath: absoluteFolderPathSchema,
+    sessionScope: sessionScopeSchema.default({ kind: "personal" }),
+    capabilities: z.array(workspaceCapabilitySchema).min(1).max(5).optional(),
+  }).strict(),
+}).strict();
+
+export const workspaceRevokeCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("workspace.revoke"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    workspaceId: z.string().uuid(),
+    sessionScope: sessionScopeSchema.default({ kind: "personal" }),
+  }).strict(),
+}).strict();
+
+export const workspaceListCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("workspace.list"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    sessionScope: sessionScopeSchema.default({ kind: "personal" }),
+  }).strict().default({ sessionScope: { kind: "personal" } }),
+}).strict();
+
+/** One-shot / session approval so trash is not silently stuck at needs_approval. */
+export const workspaceApproveCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("workspace.approve"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    workspaceId: z.string().uuid(),
+    op: z.literal("trash"),
+    allowed: z.boolean().default(true),
+    sessionScope: sessionScopeSchema.default({ kind: "personal" }),
+  }).strict(),
+}).strict();
+
 export const clientCommandSchema = z.discriminatedUnion("type", [
   turnStartCommandSchema,
   turnInterruptCommandSchema,
@@ -678,6 +742,10 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   memoryForgetCommandSchema,
   memoryRememberCommandSchema,
   speechExcerptCommandSchema,
+  workspaceGrantCommandSchema,
+  workspaceRevokeCommandSchema,
+  workspaceListCommandSchema,
+  workspaceApproveCommandSchema,
 ]);
 
 export type ContextFrame = z.infer<typeof contextFrameSchema>;
@@ -712,6 +780,10 @@ export type MemoryListCommand = z.infer<typeof memoryListCommandSchema>;
 export type MemoryForgetCommand = z.infer<typeof memoryForgetCommandSchema>;
 export type MemoryRememberCommand = z.infer<typeof memoryRememberCommandSchema>;
 export type SpeechExcerptCommand = z.infer<typeof speechExcerptCommandSchema>;
+export type WorkspaceGrantCommand = z.infer<typeof workspaceGrantCommandSchema>;
+export type WorkspaceRevokeCommand = z.infer<typeof workspaceRevokeCommandSchema>;
+export type WorkspaceListCommand = z.infer<typeof workspaceListCommandSchema>;
+export type WorkspaceApproveCommand = z.infer<typeof workspaceApproveCommandSchema>;
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 
 /**
@@ -761,7 +833,12 @@ export type RuntimeEventType =
   /** Controlled durable-memory use notice for the product UI (not full claim dumps). */
   | "memory.used"
   | "speech.excerpted"
-  | "speech.failed";
+  | "speech.failed"
+  | "workspace.granted"
+  | "workspace.revoked"
+  | "workspace.listed"
+  | "workspace.approved"
+  | "workspace.failed";
 
 export interface RuntimeEvent<Payload = Record<string, unknown>> {
   schemaVersion: typeof PROTOCOL_VERSION;

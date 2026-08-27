@@ -6,7 +6,11 @@ import test from "node:test";
 import { createWorkspaceLedger } from "@yishu/kernel";
 import { createFileTool } from "../src/files/file-tool.js";
 import { evaluateFileOp } from "../src/files/file-policy.js";
-import { assertPathInsideWorkspace, joinWorkspacePath } from "../src/files/path-guard.js";
+import {
+  assertPathInsideWorkspace,
+  joinWorkspacePath,
+  resolveWorkspaceRoot,
+} from "../src/files/path-guard.js";
 import { applyPatchAtomically, writeTextAtomically } from "../src/files/patch-applier.js";
 import { sha256Of } from "../src/files/text-reader.js";
 
@@ -129,4 +133,56 @@ test("file tool completes find-read-edit-readback-trash-restore", async () => {
   assert.equal((restored.details as { verified?: boolean }).verified, true);
   const again = await tool.execute("7", { op: "read_text", workspaceId: grant.id, path: "docs/note.txt" } as never);
   assert.match(again.content[0]?.type === "text" ? again.content[0].text : "", /^beta/);
+});
+
+test("revoke stops further writes on the same ledger the file tool uses", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "yishu-files-revoke-"));
+  const ledger = createWorkspaceLedger();
+  const grant = ledger.ingest({
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    displayName: "task",
+    rootPathReference: root,
+    scope: { kind: "personal" },
+    capabilities: ["read", "create", "edit"],
+  });
+  const tool = createFileTool({
+    ledger,
+    resolveRoot: resolveWorkspaceRoot,
+    scope: { kind: "personal" },
+  });
+  const listed = await tool.execute("0", { op: "list_workspaces" } as never);
+  assert.match(listed.content[0]?.type === "text" ? listed.content[0].text : "", /task/);
+  await tool.execute("1", { op: "create_text", workspaceId: grant.id, path: "a.txt", content: "one" } as never);
+  ledger.revoke(grant.id);
+  await assert.rejects(
+    () => tool.execute("2", { op: "create_text", workspaceId: grant.id, path: "b.txt", content: "two" } as never),
+    /not active/,
+  );
+  const after = await tool.execute("3", { op: "list_workspaces" } as never);
+  assert.match(after.content[0]?.type === "text" ? after.content[0].text : "", /No folder workspace/);
+});
+
+test("trash waits for live approval instead of throwing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "yishu-files-trash-"));
+  await writeFile(path.join(root, "note.txt"), "keep");
+  const ledger = createWorkspaceLedger();
+  const grant = ledger.create({
+    displayName: "task",
+    rootPathReference: root,
+    scope: { kind: "personal" },
+    capabilities: ["read", "trash"],
+  });
+  const allowed = new Set<string>();
+  const tool = createFileTool({
+    ledger,
+    resolveRoot: resolveWorkspaceRoot,
+    scope: { kind: "personal" },
+    approved: (op, workspaceId) => op === "trash" && allowed.has(workspaceId),
+  });
+  const blocked = await tool.execute("1", { op: "trash", workspaceId: grant.id, path: "note.txt" } as never);
+  assert.equal((blocked.details as { status?: string }).status, "needs_approval");
+  assert.equal(await readFile(path.join(root, "note.txt"), "utf8"), "keep");
+  allowed.add(grant.id);
+  const trashed = await tool.execute("2", { op: "trash", workspaceId: grant.id, path: "note.txt" } as never);
+  assert.equal((trashed.details as { status?: string }).status, "verified");
 });

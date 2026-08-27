@@ -3,7 +3,7 @@ import { copyFile, mkdir, readdir, readFile, rename, stat } from "node:fs/promis
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { SessionScope } from "@yishu/kernel";
-import { requireActiveGrant, type WorkspaceLedger } from "@yishu/kernel";
+import { grantIsActive, requireActiveGrant, type WorkspaceLedger } from "@yishu/kernel";
 import type { ToolDefinition } from "../model-loop/types.js";
 import { evaluateFileOp, type FileOp } from "./file-policy.js";
 import { applyPatchAtomically, StalePatchError, writeTextAtomically } from "./patch-applier.js";
@@ -12,6 +12,7 @@ import { readWorkspaceText } from "./text-reader.js";
 import type { FileReceipt } from "./file-receipt.js";
 
 const fileParameters = Type.Union([
+  Type.Object({ op: Type.Literal("list_workspaces") }),
   Type.Object({ op: Type.Literal("list"), workspaceId: Type.String(), path: Type.String(), depth: Type.Optional(Type.Number()) }),
   Type.Object({ op: Type.Literal("stat"), workspaceId: Type.String(), path: Type.String() }),
   Type.Object({ op: Type.Literal("search"), workspaceId: Type.String(), query: Type.String(), glob: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }),
@@ -31,7 +32,7 @@ export interface FileToolContext {
   resolveRoot: (reference: string) => string;
   scope: SessionScope;
   now?: () => Date;
-  approved?: boolean;
+  approved?: boolean | ((op: FileOp, workspaceId: string) => boolean);
   trashDir?: string;
   /** Delegated child sessions are read-only even when the grant includes writes. */
   writeAccess?: boolean;
@@ -42,12 +43,13 @@ export function createFileTool(context: FileToolContext): ToolDefinition {
   return {
     name: "files",
     label: "Workspace files",
-    description: "Read and edit files inside a user-granted workspace. Never accept raw absolute paths as a new grant.",
-    promptSnippet: "Use files only inside an authorized workspaceId.",
+    description: "Read and edit files inside a user-granted workspace. Call list_workspaces to discover workspaceId values. Never accept raw absolute paths as a new grant.",
+    promptSnippet: "Use files only inside an authorized workspaceId from list_workspaces.",
     promptGuidelines: [
+      "Call list_workspaces before other file ops if you do not already have a workspaceId.",
       "Do not guess absolute paths.",
       "apply_patch must reuse the sha256 from the last read.",
-      "trash is recoverable; do not claim permanent deletion.",
+      "trash is recoverable and may need the user to allow it in 设置.",
     ],
     parameters: fileParameters,
     executionMode: "sequential",
@@ -90,6 +92,21 @@ async function performFileOp(
   if (context.writeAccess === false && !isReadFileOp(params.op)) {
     return receipt(params.op, params.workspaceId ?? "", "denied", false, false, "Delegated child sessions are read-only for files.");
   }
+  if (params.op === "list_workspaces") {
+    const grants = context.ledger.list(context.scope).filter((grant) => grantIsActive(grant, now));
+    if (grants.length === 0) {
+      return receipt(
+        "list_workspaces",
+        "",
+        "verified",
+        false,
+        true,
+        "No folder workspace is granted. Ask the user to add one in 设置.",
+      );
+    }
+    const lines = grants.map((grant) => `${grant.id} ${grant.displayName}`);
+    return receipt("list_workspaces", "", "verified", false, true, lines.join("\n"));
+  }
   if (params.op === "restore_from_trash") {
     const saved = params.receiptId === undefined ? undefined : trash.get(params.receiptId);
     if (saved === undefined) {
@@ -118,7 +135,7 @@ async function performFileOp(
   if (decision.decision === "deny") {
     return receipt(params.op, grant.id, "denied", false, false, decision.reason);
   }
-  if (decision.decision === "approval_required" && context.approved !== true) {
+  if (decision.decision === "approval_required" && !isFileOpApproved(context, params.op, grant.id)) {
     return receipt(params.op, grant.id, "needs_approval", false, false, decision.reason);
   }
   const root = context.resolveRoot(grant.rootPathReference);
@@ -226,7 +243,12 @@ async function performFileOp(
   }
 }
 
-const READ_FILE_OPS: ReadonlySet<FileOp> = new Set(["list", "stat", "search", "read_text"]);
+const READ_FILE_OPS: ReadonlySet<FileOp> = new Set(["list_workspaces", "list", "stat", "search", "read_text"]);
+
+function isFileOpApproved(context: FileToolContext, op: FileOp, workspaceId: string): boolean {
+  if (typeof context.approved === "function") return context.approved(op, workspaceId);
+  return context.approved === true;
+}
 
 function isReadFileOp(op: FileOp): boolean {
   return READ_FILE_OPS.has(op);

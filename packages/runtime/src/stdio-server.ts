@@ -419,6 +419,74 @@ lineReader.on("line", (line) => {
     return;
   }
 
+  if (command.type === "workspace.grant") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.grantWorkspace(command, emit).catch((error) => {
+        emit(runtimeEvent("workspace.failed", command.requestId, command.traceId, {
+          code: "workspace_grant_failed",
+          message: safeRuntimeErrorMessage(error, "这次没有加上这个文件夹。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("workspace.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "这次没有加上这个文件夹。",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "workspace.revoke") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.revokeWorkspace(command, emit).catch((error) => {
+        emit(runtimeEvent("workspace.failed", command.requestId, command.traceId, {
+          code: "workspace_revoke_failed",
+          message: safeRuntimeErrorMessage(error, "这次没有撤销。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("workspace.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "这次没有撤销。",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "workspace.list") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.listWorkspaces(command, emit).catch((error) => {
+        emit(runtimeEvent("workspace.failed", command.requestId, command.traceId, {
+          code: "workspace_list_failed",
+          message: safeRuntimeErrorMessage(error, "暂时无法读取文件夹工作区。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("workspace.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "暂时无法读取文件夹工作区。",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "workspace.approve") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.approveWorkspace(command, emit).catch((error) => {
+        emit(runtimeEvent("workspace.failed", command.requestId, command.traceId, {
+          code: "workspace_approve_failed",
+          message: safeRuntimeErrorMessage(error, "这次没有改废纸篓许可。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("workspace.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "这次没有改废纸篓许可。",
+      }));
+    }
+    return;
+  }
+
   if (command.type === "speech.excerpt") {
     if (runtime instanceof ProductKernelRuntime) {
       void runtime.excerptSpeech(command, emit).catch((error) => {

@@ -3,6 +3,7 @@ import type { SessionScope } from "@yishu/kernel";
 export type FileCapability = "read" | "create" | "edit" | "move" | "trash";
 
 export type FileOp =
+  | "list_workspaces"
   | "list"
   | "stat"
   | "search"
@@ -16,7 +17,8 @@ export type FileOp =
   | "restore_from_trash"
   | "open_in_app";
 
-export const FILE_OP_CAPABILITY: Record<FileOp, FileCapability | "restore"> = {
+export const FILE_OP_CAPABILITY: Record<FileOp, FileCapability | "restore" | "none"> = {
+  list_workspaces: "none",
   list: "read",
   stat: "read",
   search: "read",
@@ -51,10 +53,13 @@ export function evaluateFileOp(input: {
   if (input.grantRevoked === true) {
     return { decision: "deny", reason: "Workspace grant is revoked." };
   }
-  if (input.scope.kind === "private" && input.op !== "list" && input.op !== "stat" && input.op !== "read_text" && input.op !== "search") {
+  if (input.scope.kind === "private" && input.op !== "list_workspaces" && input.op !== "list" && input.op !== "stat" && input.op !== "read_text" && input.op !== "search") {
     return { decision: "deny", reason: "Private grants are read-only for the current session." };
   }
   const needed = FILE_OP_CAPABILITY[input.op];
+  if (needed === "none") {
+    return { decision: "allow" };
+  }
   if (needed !== "restore" && !input.capabilities.includes(needed)) {
     return { decision: "deny", reason: `Workspace grant does not include ${needed}.` };
   }

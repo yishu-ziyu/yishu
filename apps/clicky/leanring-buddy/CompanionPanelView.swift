@@ -746,6 +746,7 @@ struct CompanionPanelView: View {
                 chatModelPickerSection
                 ProviderAccountsView(viewModel: accountViewModel)
                 showYishuCursorToggleRow
+                WorkspaceSettingsView()
             }
         }
     }
