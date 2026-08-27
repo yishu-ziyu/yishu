@@ -36,6 +36,54 @@ test("browser rejects file and credential URLs before the executor runs", async 
   assert.equal(isAllowedBrowserUrl("https://user:pass@example.com"), false);
 });
 
+test("loopback fixture URLs are opt-in and still deny RFC1918 and unsafe schemes", () => {
+  const fixture = { allowLocalFixture: true };
+  assert.equal(isAllowedBrowserUrl("http://127.0.0.1:8765/form.html", fixture), true);
+  assert.equal(isAllowedBrowserUrl("http://localhost:8765/form.html", fixture), true);
+  assert.equal(isAllowedBrowserUrl("http://[::1]:8765/form.html", fixture), true);
+  assert.equal(isAllowedBrowserUrl("http://127.0.0.1:8765/form.html"), false);
+  assert.equal(isAllowedBrowserUrl("http://192.168.1.20/admin", fixture), false);
+  assert.equal(isAllowedBrowserUrl("http://10.0.0.8/admin", fixture), false);
+  assert.equal(isAllowedBrowserUrl("http://172.16.0.2/admin", fixture), false);
+  assert.equal(isAllowedBrowserUrl("http://0.0.0.0:8080/", fixture), false);
+  assert.equal(isAllowedBrowserUrl("file:///etc/passwd", fixture), false);
+  assert.equal(isAllowedBrowserUrl("javascript:alert(1)", fixture), false);
+  assert.equal(isAllowedBrowserUrl("http://user:pass@127.0.0.1/form.html", fixture), false);
+});
+
+test("production browser action allows loopback fixtures and still denies RFC1918", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const seen: string[] = [];
+  const deps = {
+    browser: {
+      async perform(request: BrowserRequest) {
+        if (request.op === "goto") seen.push(request.url);
+        return { succeeded: true, verified: true, message: "Opened page." };
+      },
+    },
+  };
+  const fixture = await kernel.registry.invoke("browser", {
+    caller: "pi",
+    input: { op: "goto", url: "http://127.0.0.1:8765/form.html" },
+  }, deps);
+  assert.equal(fixture.status, "verified");
+  const localhost = await kernel.registry.invoke("browser", {
+    caller: "pi",
+    input: { op: "goto", url: "http://localhost:8765/form.html" },
+  }, deps);
+  assert.equal(localhost.status, "verified");
+  const rfc1918 = await kernel.registry.invoke("browser", {
+    caller: "pi",
+    input: { op: "goto", url: "http://192.168.1.20/admin" },
+  }, deps);
+  assert.equal(rfc1918.status, "failed");
+  assert.equal((rfc1918.output as BrowserResult).message, "Only http and https URLs are allowed.");
+  assert.deepEqual(seen, [
+    "http://127.0.0.1:8765/form.html",
+    "http://localhost:8765/form.html",
+  ]);
+});
+
 test("observe returns numbered targets and does not mark a side effect committed", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const receipt = await kernel.registry.invoke("browser", {

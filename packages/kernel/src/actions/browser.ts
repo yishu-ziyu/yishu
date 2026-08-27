@@ -80,9 +80,24 @@ const browserInputSchema = z.discriminatedUnion("op", [
 export type BrowserInput = z.infer<typeof browserInputSchema>;
 
 const PRIVATE_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "metadata.google.internal"]);
+const LOOPBACK_FIXTURE_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+export interface AllowedBrowserUrlOptions {
+  /** Allow RFC1918, loopback, link-local, and .local hosts. */
+  allowPrivateNetwork?: boolean;
+  /**
+   * Allow loopback fixture URLs (localhost / 127.0.0.1 / ::1) only.
+   * Still denies file:, javascript:, credentials-in-URL, and RFC1918.
+   */
+  allowLocalFixture?: boolean;
+}
+
+function hostnameKey(hostname: string): string {
+  return hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
 
 function isPrivateHostname(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const host = hostnameKey(hostname);
   if (PRIVATE_HOSTS.has(host)) return true;
   if (host === "169.254.169.254") return true;
   const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
@@ -97,9 +112,13 @@ function isPrivateHostname(hostname: string): boolean {
   return host.endsWith(".local");
 }
 
+function isLoopbackFixtureHost(hostname: string): boolean {
+  return LOOPBACK_FIXTURE_HOSTS.has(hostnameKey(hostname));
+}
+
 export function isAllowedBrowserUrl(
   url: string,
-  options: { allowPrivateNetwork?: boolean } = {},
+  options: AllowedBrowserUrlOptions = {},
 ): boolean {
   let parsed: URL;
   try {
@@ -110,7 +129,9 @@ export function isAllowedBrowserUrl(
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
   if (parsed.username !== "" || parsed.password !== "") return false;
   if (parsed.port === "0") return false;
-  if (!options.allowPrivateNetwork && isPrivateHostname(parsed.hostname)) return false;
+  if (options.allowPrivateNetwork) return true;
+  if (options.allowLocalFixture && isLoopbackFixtureHost(parsed.hostname)) return true;
+  if (isPrivateHostname(parsed.hostname)) return false;
   return true;
 }
 
@@ -146,10 +167,11 @@ export function createBrowserAction() {
     run: async (ctx): Promise<BrowserResult> => {
       const executor = ctx.deps?.browser;
       if (!executor) return unavailable();
-      if (ctx.input.op === "goto" && !isAllowedBrowserUrl(ctx.input.url)) {
+      const urlPolicy = { allowLocalFixture: true };
+      if (ctx.input.op === "goto" && !isAllowedBrowserUrl(ctx.input.url, urlPolicy)) {
         return rejectedUrl();
       }
-      if (ctx.input.op === "open_tab" && ctx.input.url !== undefined && !isAllowedBrowserUrl(ctx.input.url)) {
+      if (ctx.input.op === "open_tab" && ctx.input.url !== undefined && !isAllowedBrowserUrl(ctx.input.url, urlPolicy)) {
         return rejectedUrl();
       }
       const request = ctx.input as BrowserRequest;

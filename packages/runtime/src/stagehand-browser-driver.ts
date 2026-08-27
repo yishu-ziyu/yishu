@@ -1,8 +1,11 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { localBrowser, Stagehand, type Page, type StagehandBrowser } from "@browserbasehq/stagehand";
 import type { BrowserTarget } from "@yishu/kernel";
 import type { BrowserDriver } from "./browser-session.js";
 
-const COLLECT_NUMBERED_TARGETS = `() => {
+const COLLECT_NUMBERED_TARGETS = `(() => {
   const selector = "a[href], button, input, textarea, select, [role='button'], [role='link'], [role='textbox'], [role='checkbox'], [role='menuitem']";
   const nodes = Array.from(document.querySelectorAll(selector));
   const visible = nodes.filter((node) => {
@@ -25,23 +28,36 @@ const COLLECT_NUMBERED_TARGETS = `() => {
     ).trim().slice(0, 120);
     return { id, role, name };
   });
-}`;
+})()`;
 
 /**
  * Stagehand as a Playwright-level hand. Numbered targets come from the DOM.
  * Do not call Stagehand.act / observe / extract — those start a nested model.
+ * Uses a throwaway Chromium profile, never the user's Chrome/Safari cookies.
  */
 export async function openStagehandDriver(): Promise<BrowserDriver> {
-  const browser = await localBrowser.launch({ headless: true });
-  const stagehand = await Stagehand.create({ browser });
-  const page = await browser.context.activePage()
-    ?? (await browser.context.pages())[0];
-  if (!page) {
-    await stagehand.close().catch(() => undefined);
-    await browser.close().catch(() => undefined);
-    throw new Error("Stagehand launched without a page.");
+  const userDataDir = await mkdtemp(path.join(tmpdir(), "yishu-browser-"));
+  let browser: StagehandBrowser | undefined;
+  let stagehand: Stagehand | undefined;
+  try {
+    browser = await localBrowser.launch({
+      headless: true,
+      userDataDir,
+      preserveUserDataDir: false,
+    });
+    stagehand = await Stagehand.create({ browser });
+    const page = await browser.context.activePage()
+      ?? (await browser.context.pages())[0];
+    if (!page) {
+      throw new Error("Stagehand launched without a page.");
+    }
+    return new StagehandPageDriver(browser, page, stagehand, userDataDir);
+  } catch (error) {
+    await stagehand?.close().catch(() => undefined);
+    await browser?.close().catch(() => undefined);
+    await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
   }
-  return new StagehandPageDriver(browser, page, stagehand);
 }
 
 class StagehandPageDriver implements BrowserDriver {
@@ -49,10 +65,12 @@ class StagehandPageDriver implements BrowserDriver {
     private readonly browser: StagehandBrowser,
     private readonly page: Page,
     private readonly stagehand: Stagehand,
+    private readonly userDataDir: string,
   ) {}
 
   async goto(url: string): Promise<{ url: string; title: string }> {
     await this.page.goto(url);
+    await this.settle();
     return this.location();
   }
 
@@ -68,6 +86,7 @@ class StagehandPageDriver implements BrowserDriver {
       throw new Error(`Target ${targetId} is no longer on the page.`);
     }
     await locator.click();
+    await this.settle();
     return this.location();
   }
 
@@ -118,16 +137,19 @@ class StagehandPageDriver implements BrowserDriver {
 
   async back(): Promise<{ url: string; title: string }> {
     await this.page.evaluate("history.back()");
+    await this.settle();
     return this.location();
   }
 
   async forward(): Promise<{ url: string; title: string }> {
     await this.page.evaluate("history.forward()");
+    await this.settle();
     return this.location();
   }
 
   async reload(): Promise<{ url: string; title: string }> {
     await this.page.evaluate("location.reload()");
+    await this.settle();
     return this.location();
   }
 
@@ -161,6 +183,11 @@ class StagehandPageDriver implements BrowserDriver {
   async close(): Promise<void> {
     await this.stagehand.close().catch(() => undefined);
     await this.browser.close().catch(() => undefined);
+    await rm(this.userDataDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  private async settle(): Promise<void> {
+    await this.page.waitForLoadState("domcontentloaded", 8_000).catch(() => undefined);
   }
 
   private async location(): Promise<{ url: string; title: string }> {
