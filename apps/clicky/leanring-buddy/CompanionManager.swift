@@ -3311,8 +3311,6 @@ final class CompanionManager: ObservableObject {
                           ownsVoiceTurn(turnToken) else {
                         continue
                     }
-                    // Once a desktop effect enters the turn, stop speculative
-                    // speech and wait for the verified final confirmation.
                     stopCoverSpeech()
                     if let sentenceSpeechPipeline {
                         sentenceSpeechPipeline.cancel()
@@ -3338,7 +3336,9 @@ final class CompanionManager: ObservableObject {
                     let result = await YishuComputerUseActuator.perform(
                         request,
                         screenCaptures: screenCaptures,
-                        numberedTargets: contextFrame.numberedTargets,
+                        numberedTargets: YishuNumberedAccessibility.liveTargets(
+                            fallback: contextFrame.numberedTargets
+                        ),
                         authorizationFence: { [weak self] in
                             self?.activeRuntimeRequestId == turn.requestId
                                 && self?.ownsVoiceTurn(turnToken) == true

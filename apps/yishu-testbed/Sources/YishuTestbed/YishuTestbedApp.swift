@@ -14,8 +14,12 @@ enum YishuTestbedMain {
             defer: false
         )
         window.title = "Yishu Testbed"
+        window.identifier = NSUserInterfaceItemIdentifier("yishu-testbed")
+        window.setAccessibilityIdentifier("yishu-testbed")
+        window.setAccessibilityTitle("Yishu Testbed")
         window.contentView = TestbedView(fixture: fixture)
         window.makeKeyAndOrderFront(nil)
+        app.activate(ignoringOtherApps: true)
         app.run()
     }
 }

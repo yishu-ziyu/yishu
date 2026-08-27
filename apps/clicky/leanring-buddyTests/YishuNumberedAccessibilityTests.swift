@@ -35,6 +35,16 @@ struct YishuNumberedAccessibilityTests {
         #expect(targets.count == 50)
     }
 
+    @Test func liveTargetsFallsBackWhenTheSceneIsEmpty() {
+        let fallback = [
+            NumberedAccessibilityTarget(
+                id: "1", role: "AXButton", title: "Primary", description: nil, enabled: true
+            ),
+        ]
+        let live = YishuNumberedAccessibility.liveTargets(fallback: fallback)
+        #expect(!live.isEmpty)
+    }
+
     @Test func fingerprintMismatchIsStale() {
         let expected = NumberedAccessibilityTarget(
             id: "1", role: "AXButton", title: "Back", description: "后退", enabled: true

@@ -4,6 +4,14 @@ import XCTest
 
 @MainActor
 final class FixtureTests: XCTestCase {
+    func testEffectFieldExposesAccessibilityIdentifier() {
+        let view = TestbedView(fixture: "single-button")
+        XCTAssertEqual(view.effectField.identifier?.rawValue, "testbed-effect")
+        XCTAssertEqual(view.effectField.accessibilityIdentifier(), "testbed-effect")
+        let primary = view.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Primary" }
+        XCTAssertEqual(primary?.accessibilityIdentifier(), "testbed-primary")
+    }
+
     func testSingleButtonClickIsReadBack() {
         let view = TestbedView(fixture: "single-button")
         XCTAssertEqual(view.effectText, "idle")

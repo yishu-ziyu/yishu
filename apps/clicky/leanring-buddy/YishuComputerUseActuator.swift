@@ -1633,9 +1633,41 @@ enum YishuComputerUseActuator {
                     attemptId: attemptId
                 )
             case .unsupported:
-                return failed(
-                    "The numbered target does not support AXPress.",
-                    code: .axPressUnsupported,
+                guard YishuComputerUseReadBack.focusEditable(
+                    element,
+                    authorizationFence: authorizationFence
+                ) else {
+                    return failed(
+                        "The numbered target does not support AXPress.",
+                        code: .axPressUnsupported,
+                        receiptId: receiptId,
+                        attemptId: attemptId
+                    )
+                }
+                if let beforeCapture,
+                   let verification = await readBack(
+                    before: beforeCapture,
+                    system: system,
+                    focusedElementBefore: focusedElementBefore,
+                    windowSignatureBefore: windowSignatureBefore,
+                    candidate: element,
+                    candidateSnapshotBefore: before
+                   ) {
+                    return verifiedResult(
+                        verification,
+                        method: .axPress,
+                        receiptId: receiptId,
+                        attemptId: attemptId
+                    )
+                }
+                return YishuComputerActionResult(
+                    succeeded: true,
+                    verified: false,
+                    message: "The text field was focused, but the visible outcome was not confirmed.",
+                    evidence: "method=ax;code=ax_press_unverified;targetId=\(targetId);focused=true",
+                    status: .delivered,
+                    method: .axPress,
+                    code: .axPressUnverified,
                     receiptId: receiptId,
                     attemptId: attemptId
                 )
@@ -2130,15 +2162,6 @@ enum YishuComputerUseActuator {
         )
     }
 
-    private static func becameSelectedOrFocused(
-        before: AccessibilitySnapshot,
-        after: AccessibilitySnapshot
-    ) -> Bool {
-        (after.selected == true && before.selected != true)
-            || (after.focused == true && before.focused != true)
-            || (before.value != nil && after.value != before.value)
-    }
-
     private enum PressAttempt {
         case blocked
         case unsupported
@@ -2274,55 +2297,32 @@ enum YishuComputerUseActuator {
         let evidence: String
     }
 
-    /// Read-back is deliberately limited to observable state. A successful
-    /// event post is delivery evidence, not proof that the requested control
-    /// changed. We accept an accessibility state transition or a meaningful
-    /// full-screen change; otherwise the result remains delivered/unverified.
     private static func readBack(
         before screenCapture: CompanionScreenCapture,
-        system: AXUIElement,
+        system _: AXUIElement,
         focusedElementBefore: AXUIElement?,
         windowSignatureBefore: String?,
         candidate: AXUIElement?,
         candidateSnapshotBefore: AccessibilitySnapshot?
     ) async -> VerificationEvidence? {
-        guard !Task.isCancelled else { return nil }
-        try? await Task.sleep(nanoseconds: 280_000_000)
-        guard !Task.isCancelled else { return nil }
-
-        let candidateChanged: Bool
-        if let candidate, let candidateSnapshotBefore {
-            candidateChanged = becameSelectedOrFocused(
-                before: candidateSnapshotBefore,
-                after: snapshot(of: candidate)
-            )
-        } else {
-            candidateChanged = false
-        }
-
-        let focusedElementAfter = elementAttribute(
-            kAXFocusedUIElementAttribute as String,
-            from: system
-        )
-        let windowSignatureAfter = frontmostWindowSignature()
-        let accessibilityChanged = candidateChanged
-            || !sameElement(focusedElementBefore, focusedElementAfter)
-            || windowSignatureBefore != windowSignatureAfter
-        if accessibilityChanged {
-            return VerificationEvidence(
-                code: .verifiedAccessibilityChange,
-                evidence: "method=accessibility;code=verified_accessibility_change"
-            )
-        }
-
-        let displayFrame = screenCapture.globalTopLeftDisplayFrame
-        guard await didScreenContentChange(before: screenCapture, matching: displayFrame) else {
-            return nil
-        }
-        return VerificationEvidence(
-            code: .verifiedScreenChange,
-            evidence: "method=screen_readback;code=verified_screen_change"
-        )
+        guard let evidence = await YishuComputerUseReadBack.wait(
+            processIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            focusedElementBefore: focusedElementBefore,
+            windowSignatureBefore: windowSignatureBefore,
+            candidate: candidate,
+            candidateBefore: candidateSnapshotBefore.map {
+                YishuComputerUseReadBack.ElementSnapshot(
+                    selected: $0.selected, focused: $0.focused, value: $0.value
+                )
+            },
+            screenChanged: {
+                await didScreenContentChange(
+                    before: screenCapture,
+                    matching: screenCapture.globalTopLeftDisplayFrame
+                )
+            }
+        ) else { return nil }
+        return VerificationEvidence(code: evidence.code, evidence: evidence.evidence)
     }
 
     private static func targetFrameIsFresh(at point: CGPoint, capturedFrame: CGRect) -> Bool {
