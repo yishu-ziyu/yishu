@@ -121,6 +121,17 @@ test("unknown commits are remembered and not retried", () => {
   assert.equal(next.previousReadback, "testbed-effect=idle");
 });
 
+test("fresh observation prefers recaptured numbered targets over the turn-start list", () => {
+  const next = nextDesktopObservation(observation({ targets: [{ targetId: "1" }] }), {
+    succeeded: true,
+    verified: true,
+    message: "clicked",
+    numberedTargets: [{ targetId: "2", role: "AXButton" }],
+  }, { action: "left_click", targetId: "1" });
+  assert.deepEqual(next.targets, [{ targetId: "2", role: "AXButton" }]);
+  assert.notEqual(next.observationId, "obs-1");
+});
+
 test("legacy left_click maps onto press", () => {
   assert.deepEqual(desktopActionFromLegacy({ action: "left_click", targetId: "3" }), {
     kind: "press",

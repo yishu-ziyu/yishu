@@ -59,7 +59,8 @@ import { createWebSearchTool } from "./web-search-tool.js";
 import { createBrowserTool } from "./browser-tool.js";
 import { createFileTool } from "./files/file-tool.js";
 import { resolveWorkspaceRoot } from "./files/path-guard.js";
-import { createResearchToolset } from "./research/research-tools.js";
+import { createResearchToolset, recordOpenedPrimaryPage } from "./research/research-tools.js";
+import { WorkspaceCommandHandler } from "./workspace/workspace-runtime.js";
 
 /** Delivery metadata describing what kind of result this is — never a task status. */
 export type DelegatedResultKind = "succeeded" | "completed" | "unverified" | "failed" | "cancelled";
@@ -395,6 +396,7 @@ export class DelegationCoordinator {
   /** Runtime-owned child identity: child conversationId -> taskId. */
   private readonly childConversations = new Map<string, string>();
   private readonly researchTools = createResearchToolset();
+  readonly workspace: WorkspaceCommandHandler;
   private readonly fileTools = new Map<string, ToolDefinition>();
   private readonly trashApprovals = new Set<string>();
   private readonly runningChildren = new Set<Promise<void>>();
@@ -411,6 +413,13 @@ export class DelegationCoordinator {
     this.browser = deps.browser;
     this.now = deps.now ?? (() => new Date());
     this.inbox = new ResultInbox(deps.kernel.store);
+    this.workspace = new WorkspaceCommandHandler({
+      kernel: this.kernel,
+      isTrashApproved: (workspaceId) => this.isTrashApproved(workspaceId),
+      clearTrashApproval: (workspaceId) => this.clearTrashApproval(workspaceId),
+      approveTrash: (workspaceId, allowed) => this.approveTrash(workspaceId, allowed),
+      isDisposed: () => this.disposing,
+    });
   }
 
   setPresenceSink(sink?: (update: DelegatedTaskPresenceUpdate) => void): void {
@@ -551,7 +560,9 @@ export class DelegationCoordinator {
         input: request,
         ...(signal === undefined ? {} : { signal }),
       }, { browser: executor })
-    )) as unknown as ToolDefinition;
+    ), {
+      recordPrimaryPage: (page) => recordOpenedPrimaryPage(this.researchTools.ledger, page),
+    }) as unknown as ToolDefinition;
   }
 
   private createCurrentPageNoteTool(conversationId: string): ToolDefinition {

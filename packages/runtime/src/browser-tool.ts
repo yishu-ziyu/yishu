@@ -96,6 +96,9 @@ const browserParameters = Type.Union([
 
 export function createBrowserTool(
   invoke: (request: BrowserRequest, signal?: AbortSignal) => Promise<ActionReceipt>,
+  options: {
+    recordPrimaryPage?: (page: { url: string; title?: string }) => void;
+  } = {},
 ): ToolDefinition<typeof browserParameters, { receiptStatus: string }> {
   return {
     name: "browser",
@@ -125,6 +128,13 @@ export function createBrowserTool(
         || receipt.status === "needs_approval";
       if (!output.succeeded || terminalFailure) {
         throw new Error(output.message || receipt.message || "Browser action failed.");
+      }
+      const opened = params as BrowserRequest;
+      if ((opened.op === "goto" || opened.op === "open_tab") && output.url) {
+        options.recordPrimaryPage?.({
+          url: output.url,
+          ...(output.title === undefined ? {} : { title: output.title }),
+        });
       }
       return {
         content: [{ type: "text", text: formatBrowserReceipt(output) }],

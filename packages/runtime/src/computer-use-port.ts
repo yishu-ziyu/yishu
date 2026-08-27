@@ -44,6 +44,13 @@ export interface ComputerActionResult {
   observationId?: string;
   numberedTargets?: Array<{ targetId: string; role?: string; enabled?: boolean }>;
   previousReadback?: string;
+  screenshots?: Array<{
+    label: string;
+    mediaType: "image/jpeg";
+    base64Data: string;
+    screenshotWidthPixels: number;
+    screenshotHeightPixels: number;
+  }>;
 }
 
 export interface ComputerActionFailureDetails {
@@ -216,6 +223,27 @@ export class StdioComputerUsePort implements ComputerUsePort {
       ...(command.payload.receiptId === undefined ? {} : { receiptId: command.payload.receiptId }),
       ...(command.payload.attemptId === undefined ? {} : { attemptId: command.payload.attemptId }),
       ...(command.payload.clockLabel === undefined ? {} : { clockLabel: command.payload.clockLabel }),
+      ...(command.payload.observationId === undefined ? {} : { observationId: command.payload.observationId }),
+      ...(command.payload.numberedTargets === undefined
+        ? {}
+        : {
+            numberedTargets: command.payload.numberedTargets.map((target) => ({
+              targetId: target.id,
+              ...(target.role === undefined || target.role === null ? {} : { role: target.role }),
+              ...(target.enabled === undefined || target.enabled === null ? {} : { enabled: target.enabled }),
+            })),
+          }),
+      ...(command.payload.screenshots === undefined
+        ? {}
+        : {
+            screenshots: command.payload.screenshots.map((screenshot) => ({
+              label: screenshot.label,
+              mediaType: screenshot.mediaType,
+              base64Data: screenshot.base64Data,
+              screenshotWidthPixels: screenshot.screenshotWidthPixels,
+              screenshotHeightPixels: screenshot.screenshotHeightPixels,
+            })),
+          }),
     });
     return true;
   }

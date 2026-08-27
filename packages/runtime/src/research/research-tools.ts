@@ -9,7 +9,7 @@ import type { ToolDefinition } from "../model-loop/types.js";
 import { wrapUntrustedContent } from "../untrusted-content.js";
 import { createAnySearchProvider } from "./anysearch-adapter.js";
 import { buildResearchPlan } from "./research-plan.js";
-import { dedupeSearchHits, type SearchProvider } from "./search-provider.js";
+import { canonicalizeUrl, dedupeSearchHits, type SearchProvider } from "./search-provider.js";
 
 const planParameters = Type.Object({
   question: Type.String({ minLength: 1, maxLength: 500 }),
@@ -56,6 +56,41 @@ const finalizeParameters = Type.Object({
 export interface ResearchToolset {
   ledger: ResearchLedger;
   tools: ToolDefinition[];
+}
+
+function uniqueOpenedPageUrls(ledger: ResearchLedger, claims: readonly ResearchClaim[]): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const claim of claims) {
+    for (const evidenceId of claim.evidenceIds) {
+      const evidence = ledger.getEvidence(evidenceId);
+      const source = evidence === undefined ? undefined : ledger.getSource(evidence.sourceId);
+      if (source?.kind !== "primary_page") continue;
+      if (seen.has(source.url)) continue;
+      seen.add(source.url);
+      urls.push(source.url);
+    }
+  }
+  return urls;
+}
+
+export function recordOpenedPrimaryPage(
+  ledger: ResearchLedger,
+  page: { url: string; title?: string },
+): void {
+  const canonicalUrl = canonicalizeUrl(page.url);
+  if (ledger.listSources().some((source) => (
+    source.kind === "primary_page" && source.canonicalUrl === canonicalUrl
+  ))) return;
+  ledger.addSource({
+    url: page.url,
+    canonicalUrl,
+    retrievedAt: new Date().toISOString(),
+    sourceType: "unknown",
+    trustTier: 2,
+    kind: "primary_page",
+    ...(page.title === undefined ? {} : { title: page.title }),
+  });
 }
 
 export function createResearchToolset(input: {
@@ -169,7 +204,10 @@ export function createResearchToolset(input: {
     label: "Finalize research",
     description: "Bind factual claims to evidence. Factual claims without primary evidence are rejected.",
     promptSnippet: "Finalize only when every factual claim has evidence.",
-    promptGuidelines: ["Do not mark search snippets as primary confirmation."],
+    promptGuidelines: [
+      "Do not mark search snippets as primary confirmation.",
+      "When stating a fact, name the opened page URL returned here.",
+    ],
     parameters: finalizeParameters,
     executionMode: "sequential" as const,
     async execute(_id: string, params: { claims: Array<Omit<ResearchClaim, "claimId"> & { claimId?: string }> }) {
@@ -194,9 +232,13 @@ export function createResearchToolset(input: {
       if (!stored.accepted) {
         throw new Error(`Research claims rejected: ${stored.rejections.map((item) => item.code).join(", ")}`);
       }
+      const openedPages = uniqueOpenedPageUrls(ledger, claims);
+      const cited = openedPages.length === 0
+        ? `Research accepted with ${claims.length} claims.`
+        : `Research accepted with ${claims.length} claims. Opened pages: ${openedPages.join(" ")}`;
       return {
-        content: [{ type: "text" as const, text: `Research accepted with ${claims.length} claims.` }],
-        details: { accepted: true },
+        content: [{ type: "text" as const, text: cited }],
+        details: { accepted: true, openedPages },
       };
     },
   };

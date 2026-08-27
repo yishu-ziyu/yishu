@@ -3364,10 +3364,10 @@ final class CompanionManager: ObservableObject {
                         result: result,
                         sourceCapture: Self.sourceCapture(for: request, in: screenCaptures)
                     )
-                    // A committed/attempted receipt still belongs to the old
-                    // Runtime port even if foreground ownership changed while
-                    // read-back was pending. UI/TTS below remain token-fenced.
-                    try yishuAgentRuntimeClient.completeComputerAction(request, result: result)
+                    // Receipt stays on this port if ownership moved during read-back.
+                    try yishuAgentRuntimeClient.completeComputerAction(
+                        request, result: result,
+                        recapture: await YishuComputerUseRecapture.frame(using: yishuContextFrameCollector))
                     guard stillOwned else { continue }
                 case let .responseDelta(delta, _):
                     updateTurnVisualPhase(for: event)

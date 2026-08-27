@@ -8,7 +8,7 @@ import {
   researchFactualAnswerVerified,
 } from "../src/research/research-completion-gate.js";
 import { canonicalizeUrl, dedupeSearchHits } from "../src/research/search-provider.js";
-import { createResearchToolset } from "../src/research/research-tools.js";
+import { createResearchToolset, recordOpenedPrimaryPage } from "../src/research/research-tools.js";
 import { issueApprovalToken, verifyApprovalToken } from "../src/executor/approval-token.js";
 import { isPrivilegedActionKind } from "../src/executor/privileged-action.js";
 
@@ -84,6 +84,8 @@ test("capture_evidence plus finalize accepts a sourced factual claim", async () 
     }],
   } as never);
   assert.match(done.content[0]?.type === "text" ? done.content[0].text : "", /accepted/);
+  assert.match(done.content[0]?.type === "text" ? done.content[0].text : "", /https:\/\/example.com\/mars/);
+  assert.deepEqual((done.details as { openedPages?: string[] }).openedPages, ["https://example.com/mars"]);
 });
 
 test("web_search then speak without capture or finalize is not a verified completion", () => {
@@ -135,6 +137,24 @@ test("web_search then speak without capture or finalize is not a verified comple
     utterances: [{ text: "Mars is red because of iron oxide.", taskId: "t-search" }],
   });
   assert.ok(findings.some((item) => item.code === "search_without_primary_evidence"));
+});
+
+test("opening a page records primary_page and does not upgrade the search snippet", () => {
+  const ledger = createResearchLedger();
+  const snippet = ledger.addSource({
+    url: "https://example.com/mars",
+    canonicalUrl: "https://example.com/mars",
+    retrievedAt: "2026-08-27T00:00:00.000Z",
+    sourceType: "unknown",
+    trustTier: 3,
+    kind: "search_snippet",
+  });
+  recordOpenedPrimaryPage(ledger, { url: "https://example.com/mars/", title: "Mars" });
+  const kinds = ledger.listSources().map((source) => source.kind).sort();
+  assert.deepEqual(kinds, ["primary_page", "search_snippet"]);
+  assert.equal(ledger.getSource(snippet.sourceId)?.kind, "search_snippet");
+  const primary = ledger.listSources().find((source) => source.kind === "primary_page");
+  assert.equal(primary?.canonicalUrl, "https://example.com/mars");
 });
 
 test("finalize_research rejects factual claims with no evidence", async () => {

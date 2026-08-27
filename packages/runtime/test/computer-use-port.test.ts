@@ -83,6 +83,48 @@ test("computer-use port round-trips a typed action and verification result", asy
   port.dispose();
 });
 
+test("computer-use port forwards recaptured screenshot and numbered targets", async () => {
+  const events: RuntimeEvent[] = [];
+  const port = new StdioComputerUsePort((event) => events.push(event), 1_000);
+  const requestId = randomUUID();
+  const traceId = randomUUID();
+  const pendingResult = port.perform({
+    action: "left_click",
+    targetId: "1",
+  }, { requestId, traceId });
+  const actionId = computerActionRequestedPayloadSchema.parse(events.at(0)?.payload).actionId;
+  const observationId = randomUUID();
+  assert.equal(port.resolve({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "computer.action.result",
+    requestId,
+    traceId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      actionId,
+      succeeded: true,
+      verified: true,
+      message: "clicked",
+      observationId,
+      numberedTargets: [{ id: "2", role: "AXButton", title: "Primary", description: null }],
+      screenshots: [{
+        label: "after",
+        mediaType: "image/jpeg",
+        base64Data: "abc123",
+        displayWidthPoints: 100,
+        displayHeightPoints: 80,
+        screenshotWidthPixels: 200,
+        screenshotHeightPixels: 160,
+      }],
+    },
+  }), true);
+  const result = await pendingResult;
+  assert.equal(result.observationId, observationId);
+  assert.deepEqual(result.numberedTargets, [{ targetId: "2", role: "AXButton" }]);
+  assert.equal(result.screenshots?.[0]?.base64Data, "abc123");
+  port.dispose();
+});
+
 test("computer-use port omits blank click labels so icon buttons stay wire-valid", async () => {
   const events: RuntimeEvent[] = [];
   const port = new StdioComputerUsePort((event) => events.push(event), 1_000);

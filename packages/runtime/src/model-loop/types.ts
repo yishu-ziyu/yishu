@@ -13,6 +13,7 @@ export type ToolParameterSchema = object;
 export interface ToolExecuteResult<TDetails = unknown> {
   content: Array<{ type: "text"; text: string }>;
   details: TDetails;
+  images?: readonly PromptImage[];
 }
 
 /**

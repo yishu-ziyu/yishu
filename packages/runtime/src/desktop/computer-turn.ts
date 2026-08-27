@@ -174,8 +174,10 @@ export function nextDesktopObservation(
   now = new Date(),
 ): DesktopObservation {
   const targetId = action.action === "left_click" ? action.targetId : undefined;
-  const targets = previous?.targets
-    ?? (targetId === undefined ? [] : [{ targetId }]);
+  const recaptured = result.numberedTargets ?? [];
+  const targets = recaptured.length > 0
+    ? recaptured
+    : previous?.targets ?? (targetId === undefined ? [] : [{ targetId }]);
   const readback = result.evidence ?? result.message;
   return {
     observationId: randomUUID(),

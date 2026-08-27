@@ -72,6 +72,16 @@ export function createComputerControlTool(
       return {
         content: [{ type: "text", text }],
         details: result,
+        ...(result.screenshots && result.screenshots.length > 0
+          ? {
+              images: result.screenshots.map((screenshot) => ({
+                type: "image" as const,
+                data: screenshot.base64Data,
+                mimeType: screenshot.mediaType,
+                label: `${screenshot.label} (image dimensions: ${screenshot.screenshotWidthPixels}x${screenshot.screenshotHeightPixels} pixels)`,
+              })),
+            }
+          : {}),
       };
     },
   };
@@ -84,6 +94,9 @@ function formatFreshObservation(result: ComputerActionResult): string {
   if (result.numberedTargets && result.numberedTargets.length > 0) {
     parts.push(`numberedTargets ${result.numberedTargets.map((target) => target.targetId).join(",")}`);
   }
+  if (result.screenshots && result.screenshots.length > 0) {
+    parts.push("fresh screenshot attached");
+  }
   if (parts.length === 0) return "";
-  return ` Fresh observation (do not reuse the turn-start frame): ${parts.join("; ")}.`;
+  return ` Fresh observation (do not reuse the turn-start screenshot): ${parts.join("; ")}.`;
 }
