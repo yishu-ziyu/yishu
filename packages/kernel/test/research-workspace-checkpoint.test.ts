@@ -67,6 +67,69 @@ test("checkpoint idempotency keys do not double-commit", () => {
   assert.throws(() => ledger.resume(ledger.consume(checkpoint.checkpointId).checkpointId), /Consumed/);
 });
 
+test("checkpoint snapshot restores committed steps after a simulated kill", () => {
+  const live = createCheckpointLedger();
+  const checkpoint = live.create({ taskId: "t1", requestId: "r1" });
+  live.recordStep({
+    checkpointId: checkpoint.checkpointId,
+    stepId: "s1",
+    idempotencyKey: "k1",
+    committed: true,
+    receiptId: "rcpt-1",
+  });
+  const restored = createCheckpointLedger(JSON.parse(JSON.stringify(live.snapshot())));
+  restored.resume(checkpoint.checkpointId);
+  const again = restored.recordStep({
+    checkpointId: checkpoint.checkpointId,
+    stepId: "s1-dup",
+    idempotencyKey: "k1",
+    committed: true,
+  });
+  assert.equal(again.steps.length, 1);
+  assert.equal(again.steps[0]?.receiptId, "rcpt-1");
+});
+
+test("research validator keeps unsupported factual claims at zero on a 20-question set", () => {
+  const retrievedAt = "2026-08-27T00:00:00.000Z";
+  const questions = Array.from({ length: 20 }, (_, index) => {
+    const supported = index < 15;
+    return validateResearchClaims({
+      claims: [{
+        claimId: `c${index}`,
+        text: supported ? `Fact ${index} is documented` : `Unsupported fact ${index}`,
+        evidenceIds: supported ? [`e${index}`] : [],
+        confidence: "medium",
+        disputed: false,
+        kind: "factual",
+      }],
+      evidence: supported ? [{
+        evidenceId: `e${index}`,
+        sourceId: `s${index}`,
+        locator: { kind: "paragraph", value: "p1" },
+        text: `Fact ${index} is documented`,
+        capturedAt: retrievedAt,
+      }] : [],
+      sources: supported ? [{
+        sourceId: `s${index}`,
+        url: `https://example.com/${index}`,
+        canonicalUrl: `https://example.com/${index}`,
+        retrievedAt,
+        sourceType: "documentation",
+        trustTier: 2,
+        kind: "primary_page",
+      }] : [],
+    });
+  });
+  const accepted = questions.filter((item) => item.accepted);
+  const rejectedUnsupported = questions.filter((item) => !item.accepted);
+  assert.equal(accepted.length, 15);
+  assert.equal(rejectedUnsupported.length, 5);
+  assert.equal(
+    rejectedUnsupported.every((item) => item.rejections.some((rejection) => rejection.code === "missing_evidence")),
+    true,
+  );
+});
+
 test("project continuity isolates projects and honors corrections", () => {
   const continuity = createProjectContinuity();
   const projectA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

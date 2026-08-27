@@ -20,12 +20,15 @@ pnpm generated:check
 pnpm arch:check
 node script/check-capability-tools.mjs
 pnpm --filter @yishu/kernel check
+pnpm --filter @yishu/kernel build
 pnpm --filter @yishu/runtime check
 pnpm --filter yishu-proxy check
 pnpm --filter yishu-proxy test
 pnpm --filter @yishu/kernel test:coverage
 pnpm --filter @yishu/runtime test:coverage
 swift test
+node script/run-macos-e2e.mjs
+node script/run-capability-eval.mjs --gate
 
 if [[ "$MODE" == "full" ]]; then
   xcodebuild \
