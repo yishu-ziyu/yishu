@@ -1027,6 +1027,21 @@ test("an accepted interruption fences delegate before its effectful execute", as
   await turn;
 });
 
+test("a wikipedia lookup hides desktop and delegate tools for that turn", async (t) => {
+  const harness = createFakePiHarness();
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  await adapter.startTurn(
+    makeCommand("去维基百科查褪黑素，告诉我它什么时候可以人工合成的？"),
+    () => undefined,
+  );
+  const session = harness.sessions[0]!;
+  const active = session.activeToolNameSets[0] ?? session.activeToolNames;
+  assert.ok(active.includes("web_search"));
+  assert.equal(active.includes("computer_control"), false);
+  assert.equal(active.includes("delegate"), false);
+});
+
 test("current-page Notes tool is active only for its turn without hiding mature tools", async (t) => {
   const harness = createFakePiHarness();
   const pageNote = {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createYishuKernel, type ActionReceipt, type BrowserResult } from "@yishu/kernel";
 import { createBrowserTool } from "../src/browser-tool.js";
+import { BROWSER_PAGE_READY_MESSAGE } from "../src/browser-turn-budget.js";
 import { BrowserSessionHub, type BrowserDriver } from "../src/browser-session.js";
 import { ProductKernelRuntime } from "../src/product-kernel-runtime.js";
 import { MockAgentRuntime } from "../src/mock-runtime.js";
@@ -131,6 +132,33 @@ test("product runtime exposes browser next to delegate on main sessions", async 
   ]) {
     assert.ok(names.includes(name), `main session missing ${name}`);
   }
+});
+
+test("a second observe after a contentful page is rejected so the model must speak", async () => {
+  const tool = createBrowserTool(async (request) => {
+    if (request.op === "goto") {
+      return receipt({
+        succeeded: true,
+        verified: true,
+        message: "opened",
+        url: "https://en.wikipedia.org/wiki/Melatonin",
+        title: "Melatonin",
+      });
+    }
+    return receipt({
+      succeeded: true,
+      verified: true,
+      message: "observed",
+      url: "https://en.wikipedia.org/wiki/Melatonin",
+      extracted: "Melatonin was first isolated and synthesized in 1958.",
+    });
+  });
+  await tool.execute("1", { op: "goto", url: "https://en.wikipedia.org/wiki/Melatonin" } as never);
+  await tool.execute("2", { op: "observe" } as never);
+  await assert.rejects(
+    () => tool.execute("3", { op: "observe" } as never),
+    new RegExp(BROWSER_PAGE_READY_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
 });
 
 test("goto records an opened primary page for research evidence", async () => {

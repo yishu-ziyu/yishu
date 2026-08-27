@@ -47,6 +47,7 @@ export {
 } from "./desktop/computer-turn.js";
 import { isCurrentPageActionsNoteUtterance } from "./delegation.js";
 import { DEFAULT_SESSION_TOOL_POLICY, type SessionToolPolicy } from "./session-policy.js";
+import { activeToolNamesForTurn, isLookupOnlyUtterance } from "./turn-tool-profile.js";
 import {
   ComputerActionError,
   UnavailableComputerUsePort,
@@ -737,9 +738,10 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
   private activateToolsForTurn(
     session: ModelSession,
     policy: SessionToolPolicy,
+    utterance: string,
   ): (() => void) | undefined {
     const registered = policy.registeredExtraTools ?? [];
-    if (registered.length === 0) return undefined;
+    if (registered.length === 0 && !isLookupOnlyUtterance(utterance)) return undefined;
     const controllable = session as ModelSession & {
       getActiveToolNames?: () => readonly string[];
       setActiveToolsByName?: (names: readonly string[]) => void;
@@ -751,10 +753,11 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       throw new Error("Pi session does not support per-turn tool activation.");
     }
     const previous = [...controllable.getActiveToolNames()];
-    const desired = previous.filter((name) => name !== "save_current_page_actions_to_note");
-    if (policy.activeExtraToolNames?.includes("save_current_page_actions_to_note")) {
-      desired.push("save_current_page_actions_to_note");
-    }
+    const desired = activeToolNamesForTurn({
+      registeredNames: previous,
+      utterance,
+      enablePageNote: policy.activeExtraToolNames?.includes("save_current_page_actions_to_note") === true,
+    });
     controllable.setActiveToolsByName(desired);
     return () => controllable.setActiveToolsByName!(previous);
   }
@@ -1047,6 +1050,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         restoreTools = this.activateToolsForTurn(
           session,
           this.sessionToolPolicy(command.payload.conversationId ?? command.requestId),
+          command.payload.utterance,
         );
         const currentPageNoteImageOnly = isCurrentPageActionsNoteUtterance(command.payload.utterance)
           && command.payload.contextFrame.screenshots.length === 1
