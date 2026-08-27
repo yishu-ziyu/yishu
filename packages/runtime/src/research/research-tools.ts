@@ -99,7 +99,10 @@ export function createResearchToolset(input: {
         ...(params.recency === undefined ? {} : { recency: params.recency }),
         ...(params.domains === undefined ? {} : { domains: params.domains }),
       }, signal));
+      const known = new Set(ledger.listSources().map((source) => source.canonicalUrl));
       for (const hit of hits) {
+        if (known.has(hit.url)) continue;
+        known.add(hit.url);
         ledger.addSource({
           url: hit.url,
           canonicalUrl: hit.url,

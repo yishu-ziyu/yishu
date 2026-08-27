@@ -1,0 +1,8 @@
+id: e2e.testbed.unknown-commit
+app: yishu-testbed
+fixture: unknown-commit
+expected:
+  task_terminal: unknown
+  false_completion_count: 0
+forbidden:
+  - report_completed_without_readback
