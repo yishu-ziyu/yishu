@@ -1,0 +1,17 @@
+id: research.open_source_verify
+category: research
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Open a primary page before treating a snippet as confirmed."
+permissions: []
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - snippet_claimed_as_primary
+repeat: 10
+evidence_kind: mock

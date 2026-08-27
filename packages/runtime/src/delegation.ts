@@ -57,6 +57,8 @@ import { contextFrameToTrailSource } from "./trail-source.js";
 import { wrapUntrustedContent } from "./untrusted-content.js";
 import { createWebSearchTool } from "./web-search-tool.js";
 import { createBrowserTool } from "./browser-tool.js";
+import { createFileTool } from "./files/file-tool.js";
+import { createResearchToolset } from "./research/research-tools.js";
 
 /** Delivery metadata describing what kind of result this is — never a task status. */
 export type DelegatedResultKind = "succeeded" | "completed" | "unverified" | "failed" | "cancelled";
@@ -391,6 +393,8 @@ export class DelegationCoordinator {
   private readonly mainTurns = new Map<string, MainTurnHandle>();
   /** Runtime-owned child identity: child conversationId -> taskId. */
   private readonly childConversations = new Map<string, string>();
+  private readonly researchTools = createResearchToolset();
+  private readonly fileTools = new Map<string, ToolDefinition>();
   private readonly runningChildren = new Set<Promise<void>>();
   private readonly runningChildrenByTaskId = new Map<string, RunningChild>();
   private presenceSink: ((update: DelegatedTaskPresenceUpdate) => void) | undefined;
@@ -466,25 +470,25 @@ export class DelegationCoordinator {
    * and may delegate only work this turn cannot finish.
    */
   sessionToolPolicyFor(conversationId: string): SessionToolPolicy {
+    const isChild = this.childConversations.has(conversationId);
     const browserTool = this.createBrowserTool(conversationId);
-    const webSearch = createWebSearchTool() as unknown as ToolDefinition;
-    if (this.childConversations.has(conversationId)) {
+    const extraTools: ToolDefinition[] = [
+      createWebSearchTool() as unknown as ToolDefinition,
+      ...(isChild ? [] : [this.createDelegateTool(conversationId)]),
+      ...(browserTool === undefined ? [] : [browserTool]),
+      this.filesTool(conversationId, !isChild),
+      ...this.researchTools.tools,
+    ];
+    if (isChild) {
       return {
         computerControl: false,
-        extraTools: [
-          webSearch,
-          ...(browserTool === undefined ? [] : [browserTool]),
-        ],
+        extraTools,
       };
     }
     const activeMainTurn = this.mainTurns.get(conversationId);
     return {
       computerControl: true,
-      extraTools: [
-        webSearch,
-        this.createDelegateTool(conversationId),
-        ...(browserTool === undefined ? [] : [browserTool]),
-      ],
+      extraTools,
       // Registered in every Main Pi session so an existing conversation can
       // enable it for one turn without a cold start.  It stays inactive unless
       // the current live Main turn owns the narrow request below.
@@ -493,6 +497,30 @@ export class DelegationCoordinator {
         ? ["delegate"]
         : ["delegate", "save_current_page_actions_to_note"],
     };
+  }
+
+  private filesTool(conversationId: string, writeAccess: boolean): ToolDefinition {
+    const cached = this.fileTools.get(conversationId);
+    if (cached !== undefined) return cached;
+    const tool = createFileTool({
+      ledger: this.kernel.workspaces,
+      resolveRoot: (reference) => reference,
+      scope: this.scopeFor(conversationId),
+      writeAccess,
+    });
+    this.fileTools.set(conversationId, tool);
+    return tool;
+  }
+
+  private scopeFor(conversationId: string): SessionScope {
+    const main = this.mainTurns.get(conversationId);
+    if (main !== undefined) return main.sessionScope;
+    const taskId = this.childConversations.get(conversationId);
+    if (taskId !== undefined) {
+      const child = this.runningChildrenByTaskId.get(taskId);
+      if (child !== undefined) return child.input.sessionScope;
+    }
+    return { kind: "personal" };
   }
 
   private createBrowserTool(conversationId: string): ToolDefinition | undefined {

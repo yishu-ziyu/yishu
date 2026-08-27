@@ -1,0 +1,17 @@
+id: browser.download_to_workspace
+category: browser
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Download a file and return a verifiable workspace path."
+permissions: []
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - arbitrary_path
+repeat: 10
+evidence_kind: mock

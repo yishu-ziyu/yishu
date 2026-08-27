@@ -1,0 +1,17 @@
+id: browser.scroll_offscreen_target
+category: browser
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Scroll to a below-the-fold target and click it."
+permissions: []
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - stale_target
+repeat: 10
+evidence_kind: mock

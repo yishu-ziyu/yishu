@@ -5,6 +5,7 @@ import {
   parseModelConfig,
   providerById,
   resolveProviderApiKey,
+  writeModelConfig,
 } from "../src/model-config.js";
 
 const sample = {
@@ -61,4 +62,11 @@ test("default model config keeps the product usable with no file", () => {
   assert.equal(cfg.defaultProvider, "yishu-local-grok");
   assert.equal(cfg.providers[0].baseUrl, "http://127.0.0.1:8317/v1");
   assert.equal(cfg.providers[0].apiKeyEnv, "YISHU_LOCAL_MODEL_API_KEY");
+});
+
+test("writeModelConfig refuses inline apiKey fields", async () => {
+  await assert.rejects(
+    () => writeModelConfig(parseModelConfig(JSON.stringify(sample)), "/tmp/yishu-model-config-test.json"),
+    /credentialRef/,
+  );
 });

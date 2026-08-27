@@ -1,0 +1,18 @@
+id: desktop.notes.create_verified
+category: desktop
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Create one Apple Note and read back title and body."
+permissions: [automation]
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - duplicate_note
+  - retry_after_unknown_commit
+repeat: 10
+evidence_kind: mock

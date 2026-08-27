@@ -1,0 +1,78 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { desktopActionFromLegacy } from "../src/desktop/desktop-action.js";
+import { createDesktopLoopState, runDesktopStep } from "../src/desktop/desktop-loop.js";
+import { desktopStepBudget, evaluateDesktopProposal } from "../src/desktop/desktop-policy.js";
+import type { DesktopObservation } from "../src/desktop/desktop-observation.js";
+
+function observation(overrides: Partial<DesktopObservation> = {}): DesktopObservation {
+  return {
+    observationId: "obs-1",
+    capturedAt: "2026-08-27T00:00:00.000Z",
+    expiresAt: "2026-08-27T00:05:00.000Z",
+    targets: [{ targetId: "1" }],
+    warnings: [],
+    ...overrides,
+  };
+}
+
+test("desktop budget is 8 by default and 12 for authorized combo tasks", () => {
+  assert.equal(desktopStepBudget(), 8);
+  assert.equal(desktopStepBudget({ authorizedCombo: true }), 12);
+});
+
+test("stale or missing observation blocks commit", () => {
+  const state = createDesktopLoopState({ budget: 8 });
+  const decision = evaluateDesktopProposal({
+    proposal: { action: { kind: "press", targetId: "1" }, basisObservationId: "obs-1", requestId: "r1" },
+    observation: observation({ expiresAt: "2026-08-26T00:00:00.000Z" }),
+    state,
+    now: new Date("2026-08-27T00:00:00.000Z"),
+  });
+  assert.equal(decision.decision, "block");
+  if (decision.decision === "block") assert.equal(decision.code, "stale");
+});
+
+test("unknown after commit is not retried", async () => {
+  const state = createDesktopLoopState({ budget: 8 });
+  state.lastObservation = observation();
+  const first = await runDesktopStep({
+    proposal: { action: { kind: "press", targetId: "1" }, basisObservationId: "obs-1", requestId: "r1" },
+    state,
+    now: new Date("2026-08-27T00:00:00.000Z"),
+    commit: async () => ({ status: "unknown", committed: true, verified: false }),
+  });
+  assert.equal(first.status, "unknown");
+  const second = await runDesktopStep({
+    proposal: { action: { kind: "press", targetId: "1" }, basisObservationId: "obs-1", requestId: "r1" },
+    state,
+    now: new Date("2026-08-27T00:00:00.000Z"),
+    commit: async () => {
+      throw new Error("must not commit again");
+    },
+  });
+  assert.equal(second.status, "blocked");
+  assert.equal(second.evidenceCode, "unknown_no_retry");
+});
+
+test("menu selection requires a bound approval token", () => {
+  const state = createDesktopLoopState({ budget: 8 });
+  const decision = evaluateDesktopProposal({
+    proposal: {
+      action: { kind: "select_menu_item", appBundleId: "com.apple.finder", path: ["File", "New"] },
+      basisObservationId: "obs-1",
+      requestId: "r1",
+    },
+    observation: observation(),
+    state,
+    now: new Date("2026-08-27T00:00:00.000Z"),
+  });
+  assert.equal(decision.decision, "approval_required");
+});
+
+test("legacy left_click maps onto press", () => {
+  assert.deepEqual(desktopActionFromLegacy({ action: "left_click", targetId: "3" }), {
+    kind: "press",
+    targetId: "3",
+  });
+});

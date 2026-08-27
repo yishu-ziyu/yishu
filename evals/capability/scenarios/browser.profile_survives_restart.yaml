@@ -1,0 +1,17 @@
+id: browser.profile_survives_restart
+category: browser
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Keep an isolated login profile across a runtime restart."
+permissions: []
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - user_browser_cookies
+repeat: 10
+evidence_kind: mock

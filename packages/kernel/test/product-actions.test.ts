@@ -168,7 +168,7 @@ describe("product actions via createYishuKernel", () => {
   });
 
   it("remember_how extracts skill from trail (the product-shaped capability)", async () => {
-    const { registry, trail } = createYishuKernel();
+    const { registry, trail, store } = createYishuKernel();
     const t0 = Date.parse("2026-08-07T12:40:00.000Z");
     trail.append(
       makeFrame({
@@ -220,10 +220,8 @@ describe("product actions via createYishuKernel", () => {
     assert.ok(result.entryCount >= 3);
     assert.ok(result.candidate.steps.length >= 2);
     assert.ok(result.verifyReport);
-    // Multi-app Chrome→Codex trail should trail-replay promote at 0.55.
-    if (result.skill) {
-      assert.equal(result.skill.status, "verified");
-    }
+    assert.equal(result.skill, null, "autoVerify must not promote a verified skill");
+    assert.equal((await store.listVerifiedSkills()).length, 0);
   });
 
   it("does not persist remember_how when its skill mutation is cancelled", async () => {

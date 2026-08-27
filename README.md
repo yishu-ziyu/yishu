@@ -22,14 +22,13 @@
 
 > 用户继续通过熟悉的奕枢光标按住说话；现有 StepFun ASR 产出文本，奕枢采集鼠标指向的证据上下文，自有 Runtime 生成可流式、可取消的回应，再由现有浮层与 TTS 呈现。
 
-当前组合包含：
+<!-- CAPABILITY_MATRIX:START -->
 
-- 光标轨迹、前台应用/窗口、辅助功能元素与屏幕截图的 `ContextFrame`；
-- 版本化、可追踪、可取消的 Runtime 协议；
-- 带能力档案的 `YishuLoopRuntimeAdapter`；
-- 从 Hanako 预设吸收而来的温暖、判断力、主动性与可成长人格；
-- 由 `apps/clicky` 安装源携带的 Node runtime，以及不产生第二个 App 的共享 Swift contract tests；
-- 无需模型凭据即可验证 UI 的确定性 mock 模式。
+Only `accepted` and above appear here. The full truth table is [docs/capabilities/CAPABILITY_MATRIX.md](docs/capabilities/CAPABILITY_MATRIX.md).
+
+No capability currently meets `accepted`. Implemented protocol paths are listed in the matrix with mock evidence only.
+
+<!-- CAPABILITY_MATRIX:END -->
 
 ## Requirements
 
@@ -63,6 +62,8 @@ pnpm product:build:clicky
 模型提供方身份验证保留在 Runtime 的专用凭据存储中。奕枢不复制或打印凭据。
 
 ## Current boundary
+
+对外能力状态只以生成表为准（见上）。下面是架构接线，不是 `accepted` 宣称。
 
 这条切片已经把人格、证据上下文、执行边界和**产品层**接到 `apps/clicky` 的语音与空间交互里。
 

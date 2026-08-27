@@ -16,8 +16,13 @@ esac
 ./script/check-product-boundaries.sh
 pnpm dep:check
 pnpm size:check
+pnpm generated:check
+pnpm arch:check
+node script/check-capability-tools.mjs
 pnpm --filter @yishu/kernel check
 pnpm --filter @yishu/runtime check
+pnpm --filter yishu-proxy check
+pnpm --filter yishu-proxy test
 pnpm --filter @yishu/kernel test:coverage
 pnpm --filter @yishu/runtime test:coverage
 swift test

@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "node local-server.mjs",
     "dev:wrangler": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "check": "node --check local-server.mjs && node --check stepfun-hotwords.mjs && node --check test/hotwords.test.mjs && node --check test/speech-speed.test.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
     "wrangler": "^3.0.0"

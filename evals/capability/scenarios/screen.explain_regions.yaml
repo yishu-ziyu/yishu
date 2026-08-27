@@ -1,0 +1,17 @@
+id: screen.explain_regions
+category: screen
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Explain the main regions of the current interface."
+permissions: [screen_recording]
+risk: low
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - stale_frame
+repeat: 10
+evidence_kind: mock
