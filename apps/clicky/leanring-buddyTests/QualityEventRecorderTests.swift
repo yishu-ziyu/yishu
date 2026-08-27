@@ -1,5 +1,5 @@
 import XCTest
-@testable import leanring_buddy
+@testable import Clicky
 
 final class QualityEventRecorderTests: XCTestCase {
     func testRejectsTranscriptAttributesByIgnoringTheWrite() {
