@@ -4,6 +4,14 @@ import { desktopActionFromLegacy } from "../src/desktop/desktop-action.js";
 import { createDesktopLoopState, runDesktopStep } from "../src/desktop/desktop-loop.js";
 import { desktopStepBudget, evaluateDesktopProposal } from "../src/desktop/desktop-policy.js";
 import type { DesktopObservation } from "../src/desktop/desktop-observation.js";
+import {
+  desktopActionBudgetForTurn,
+  digestComputerControlAction,
+  isDesktopWorkUtterance,
+  nextDesktopObservation,
+  rememberUnknownCommit,
+  unknownCommitBlocksRetry,
+} from "../src/desktop/computer-turn.js";
 
 function observation(overrides: Partial<DesktopObservation> = {}): DesktopObservation {
   return {
@@ -68,6 +76,49 @@ test("menu selection requires a bound approval token", () => {
     now: new Date("2026-08-27T00:00:00.000Z"),
   });
   assert.equal(decision.decision, "approval_required");
+});
+
+test("multi-step look/click/type/submit utterances are not actionBudget 0", () => {
+  assert.equal(isDesktopWorkUtterance("先点击 A，再点击 B"), true);
+  assert.equal(isDesktopWorkUtterance("look / click / type / submit"), true);
+  assert.equal(isDesktopWorkUtterance("看一下然后点 Primary"), true);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "先点击 A，再点击 B",
+    intentAllowsEffect: true,
+  }), 8);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "输入 hello，然后点发送",
+    intentAllowsEffect: true,
+  }), 12);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "解释这个界面",
+    intentAllowsEffect: true,
+  }), 0);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "先点击 A，再点击 B",
+    intentAllowsEffect: false,
+  }), 0);
+});
+
+test("unknown commits are remembered and not retried", () => {
+  const state = createDesktopLoopState({ budget: 8 });
+  const action = { action: "left_click" as const, targetId: "1" };
+  const digest = digestComputerControlAction(action);
+  rememberUnknownCommit(state, digest, {
+    succeeded: true,
+    verified: false,
+    status: "unverified",
+    message: "AXPress delivery is uncertain.",
+  });
+  assert.equal(unknownCommitBlocksRetry(state, digest), true);
+  const next = nextDesktopObservation(observation(), {
+    succeeded: true,
+    verified: false,
+    evidence: "testbed-effect=idle",
+    message: "unverified",
+  }, action);
+  assert.notEqual(next.observationId, "obs-1");
+  assert.equal(next.previousReadback, "testbed-effect=idle");
 });
 
 test("legacy left_click maps onto press", () => {

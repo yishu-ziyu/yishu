@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 import YishuContext
@@ -47,6 +48,13 @@ enum YishuNumberedAccessibility {
 
     static func isStale(expected: NumberedAccessibilityTarget, live: NumberedAccessibilityTarget) -> Bool {
         fingerprint(expected) != fingerprint(live)
+    }
+
+    static func liveTargets(fallback: [NumberedAccessibilityTarget]) -> [NumberedAccessibilityTarget] {
+        let snapshot = snapshot(
+            processIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier
+        )
+        return snapshot.targets.isEmpty ? fallback : snapshot.targets
     }
 
     static func snapshot(processIdentifier: pid_t?) -> Snapshot {

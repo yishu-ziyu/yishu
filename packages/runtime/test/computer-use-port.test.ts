@@ -667,7 +667,13 @@ async function assertDirectTurnSecondCallIsBlocked(firstResult: {
   const action = { action: "left_click" as const, x: 10, y: 20 };
 
   await internals.activeComputerTurn.run(activeTurn, async () => {
-    assert.deepEqual(await internals.performComputerAction(action), firstResult);
+    const returned = await internals.performComputerAction(action);
+    assert.equal(returned.succeeded, firstResult.succeeded);
+    assert.equal(returned.verified, firstResult.verified);
+    assert.equal(returned.status, firstResult.status);
+    assert.equal(returned.method, firstResult.method);
+    assert.equal(returned.message, firstResult.message);
+    assert.ok(returned.observationId, "the next model step must see a fresh observation id");
     await assert.rejects(
       () => internals.performComputerAction(action),
       (error: unknown) => {
@@ -754,6 +760,96 @@ test("an admitted input-then-click sequence cannot dispatch a third action", asy
 
   assert.equal(requests.length, 2);
   assert.equal(activeTurn.actionCount, 2);
+  await adapter.dispose();
+});
+
+test("unknown computer commits are not retried and the next step gets a fresh observation", async () => {
+  const requests: unknown[] = [];
+  const port: ComputerUsePort = {
+    async perform(action) {
+      requests.push(action);
+      return {
+        succeeded: true,
+        verified: false,
+        status: "unverified",
+        code: "ax_press_failed",
+        method: "ax_press",
+        message: "AXPress delivery is uncertain; the action was not repeated.",
+        evidence: "method=ax_press;code=ax_press_failed;testbed-effect=idle",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), port);
+  const internals = adapter as any;
+  const action = { action: "left_click" as const, targetId: "1" };
+  const activeTurn: any = {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    intentId: randomUUID(),
+    basisFrameId: randomUUID(),
+    directComputerAction: false,
+    actionBudget: 8,
+    emit: () => {},
+    actionCount: 0,
+    allActionsVerified: true,
+  };
+  await internals.activeComputerTurn.run(activeTurn, async () => {
+    const first = await internals.performComputerAction(action);
+    assert.equal(first.verified, false);
+    assert.ok(first.observationId);
+    assert.match(first.evidence ?? "", /testbed-effect=idle/);
+    await assert.rejects(
+      () => internals.performComputerAction(action),
+      /will not be retried/i,
+    );
+  });
+  assert.equal(requests.length, 1, "unknown commits must not be dispatched again");
+  assert.equal(activeTurn.actionCount, 1);
+  await adapter.dispose();
+});
+
+test("a verified click replaces the turn-start observation before the next step", async () => {
+  const port: ComputerUsePort = {
+    async perform() {
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: "ax_press",
+        message: "The requested control changed visible state.",
+        evidence: "method=accessibility;code=verified_accessibility_change;testbed-effect=effect-1",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), port);
+  const internals = adapter as any;
+  const frameId = randomUUID();
+  const activeTurn: any = {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    intentId: randomUUID(),
+    basisFrameId: frameId,
+    directComputerAction: false,
+    actionBudget: 8,
+    emit: () => {},
+    actionCount: 0,
+    allActionsVerified: true,
+  };
+  await internals.activeComputerTurn.run(activeTurn, async () => {
+    const first = await internals.performComputerAction({ action: "left_click", targetId: "1" });
+    assert.notEqual(first.observationId, frameId);
+    assert.equal(activeTurn.desktop.lastObservation.observationId, first.observationId);
+    assert.match(first.previousReadback ?? "", /effect-1/);
+    const second = await internals.performComputerAction({ action: "left_click", targetId: "1" });
+    assert.notEqual(second.observationId, first.observationId);
+  });
   await adapter.dispose();
 });
 

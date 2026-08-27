@@ -21,7 +21,30 @@ import {
   createComputerControlTool,
   type ComputerControlToolAction,
 } from "./computer-control-tool.js";
+import { createDesktopLoopState, type DesktopLoopState } from "./desktop/desktop-loop.js";
+import {
+  authorizedTextForUtterance,
+  computerActionCompletionText,
+  desktopActionBudgetForTurn,
+  digestComputerControlAction,
+  nextDesktopObservation,
+  observationFromContextFrame,
+  rememberUnknownCommit,
+  shouldRunCompatibilityComputerAction,
+  unknownCommitBlocksRetry,
+  withFreshObservation,
+} from "./desktop/computer-turn.js";
 import { desktopStepBudget } from "./desktop/desktop-policy.js";
+
+export {
+  authorizedTextForUtterance,
+  computerActionCompletionText,
+  computerActionLimitForUtterance,
+  desktopActionBudgetForTurn,
+  isDesktopWorkUtterance,
+  isExplicitTextInputUtterance,
+  shouldRunCompatibilityComputerAction,
+} from "./desktop/computer-turn.js";
 import { isCurrentPageActionsNoteUtterance } from "./delegation.js";
 import { DEFAULT_SESSION_TOOL_POLICY, type SessionToolPolicy } from "./session-policy.js";
 import {
@@ -127,6 +150,7 @@ interface ActiveComputerTurn {
   allActionsVerified: boolean;
   lastResult?: ComputerActionResult;
   generationState?: PiTurnGenerationState;
+  desktop: DesktopLoopState;
 }
 
 interface AssistantMessageIdentity {
@@ -532,85 +556,6 @@ class DuplicateRequestError extends Error {
   }
 }
 
-/**
- * Keep the user-facing completion gate on the legacy `verified` bit.  A
- * delivered or unverified receipt must never be promoted to “点好了” merely
- * because a platform accepted an input event.
- */
-export function computerActionCompletionText(result: ComputerActionResult | undefined): string {
-  if (result?.verified) return "点好了。";
-  if (result?.succeeded || result?.status === "delivered" || result?.status === "unverified") {
-    return "已经点击，但界面结果还没确认。";
-  }
-  return "这次没点成功。";
-}
-
-/** Compatibility POINT replay is a single fallback, never a second dispatch. */
-export function shouldRunCompatibilityComputerAction(
-  directComputerAction: boolean,
-  actionCount: number,
-  hasCompatibilityAction: boolean,
-): boolean {
-  return directComputerAction && actionCount === 0 && hasCompatibilityAction;
-}
-
-const deniedTextInputPattern = /^(?:(?:请|麻烦|帮我|请帮我)\s*)?(?:不要|别(?:再)?|无需|不(?:要|用|必)|禁止|别把|do\s+not|don't|dont|never)\s*(?:输入|填写|填入|键入|写入|type|fill|set)/iu;
-const textInputQuestionPattern = /(?:为什么|怎么|如何|是什么|什么意思|what\b|why\b|how\b|\?\s*$|？\s*$)/iu;
-const quotedTextPattern = /["“「『']([^"”」』']+)["”」』']/u;
-
-/**
- * Extract the one exact string the user authorized. This deliberately accepts
- * only imperative utterances; negation, questions, reported speech and an
- * empty/ambiguous tail fail closed before Pi receives write authority.
- */
-export function authorizedTextForUtterance(utterance: string): string | undefined {
-  const normalized = utterance.trim();
-  if (normalized.length === 0
-    || deniedTextInputPattern.test(normalized)) return undefined;
-
-  const chinese = normalized.match(
-    /^(?:(?:请|麻烦|帮我|请帮我)\s*)?(?:在(?:这里|当前(?:输入框|文本框|位置))\s*)?(?:输入|填写|填入|键入|写入)\s*[:：]?\s*(.+)$/u,
-  );
-  const english = normalized.match(
-    /^(?:please\s+)?(?:type(?:\s+in)?|fill(?:\s+in)?|set\s+(?:the\s+)?text)\s*[:：]?\s+(.+)$/iu,
-  );
-  const tail = (chinese?.[1] ?? english?.[1])?.trim();
-  if (!tail) return undefined;
-
-  const quotedMatch = tail.match(quotedTextPattern);
-  const quoted = quotedMatch?.[1]?.trim();
-  if (quoted && quotedMatch?.index !== undefined) {
-    const suffix = tail.slice(quotedMatch.index + quotedMatch[0].length).trim();
-    const authorizedFollowup = /^(?:，|,)?\s*(?:然后|再|接着|之后|随后|and\s+then|then|after(?:wards)?)\s*(?:(?:点击|点(?:击)?|按下|按)[\p{Script=Han}A-Za-z0-9]|(?:click|press)\b)/iu;
-    // A question or reported-speech suffix outside the quotes is not write
-    // authority. Only an empty suffix or one explicit follow-up click is
-    // accepted; punctuation inside the quoted text remains literal input.
-    if (suffix.length > 0
-      && (textInputQuestionPattern.test(suffix) || !authorizedFollowup.test(suffix))) return undefined;
-    return quoted.length <= 10_000 ? quoted : undefined;
-  }
-  if (textInputQuestionPattern.test(normalized)) return undefined;
-  const beforeNextAction = tail.split(
-    /(?:，|,)?\s*(?:然后|再|接着|之后|随后|and\s+then|then|after(?:wards)?)\s*(?=(?:点击|点(?:击)?|按下|按|click|press))/iu,
-    1,
-  )[0]?.trim();
-  const text = beforeNextAction;
-  if (!text || text.length > 10_000) return undefined;
-  return text.replace(/[。.]$/u, "").trim() || undefined;
-}
-
-/** set_text is admitted only when the utterance itself authorizes text input. */
-export function isExplicitTextInputUtterance(utterance: string): boolean {
-  return authorizedTextForUtterance(utterance) !== undefined;
-}
-
-/** Step budget for this utterance. Regex no longer caps a turn at one or two actions. */
-export function computerActionLimitForUtterance(utterance: string): number {
-  return desktopStepBudget({
-    authorizedCombo: isExplicitTextInputUtterance(utterance),
-  });
-}
-
 // This is deliberately not an API credential. The Clicky-owned loopback
 // gateway terminates auth and forwards the request to the existing proxy.
 // Supplying a stable non-secret value only satisfies pi-ai's OpenAI client
@@ -993,9 +938,10 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       ? authorizedTextForUtterance(command.payload.utterance)
       : undefined;
     const allowedActionSequence: Array<"set_text" | "left_click"> = [];
-    const actionBudget = (directComputerAction || authorizedText !== undefined)
-      ? computerActionLimitForUtterance(command.payload.utterance)
-      : 0;
+    const actionBudget = desktopActionBudgetForTurn({
+      utterance: command.payload.utterance,
+      intentAllowsEffect,
+    });
     const generationState = new PiTurnGenerationState(
       directComputerAction,
       true,
@@ -1087,6 +1033,9 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       actionCount: 0,
       allActionsVerified: true,
       generationState,
+      desktop: Object.assign(createDesktopLoopState({ budget: actionBudget }), {
+        lastObservation: observationFromContextFrame(command.payload.contextFrame),
+      }),
     };
     let completedSuccessfully = false;
     let restoreTools: (() => void) | undefined;
@@ -1401,6 +1350,9 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     const allowedActionSequence = activeTurn.allowedActionSequence ?? [];
     const actionBudget = activeTurn.actionBudget
       ?? (allowedActionSequence.length > 0 ? allowedActionSequence.length : desktopStepBudget());
+    const desktop = activeTurn.desktop ?? createDesktopLoopState({ budget: actionBudget });
+    activeTurn.desktop = desktop;
+    const actionDigest = digestComputerControlAction(action);
     if (activeTurn.actionCount >= actionBudget) {
       const directLimit = activeTurn.directComputerAction && actionBudget <= 1;
       const refusal: ComputerActionResult = {
@@ -1413,6 +1365,23 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         message: directLimit
           ? "This direct-click turn already attempted one computer action; a second dispatch was blocked."
           : "This turn reached its authorized desktop action limit; another dispatch was blocked.",
+      };
+      throw new ComputerActionError(refusal.message, {
+        status: refusal.status!,
+        code: refusal.code!,
+        method: refusal.method!,
+        attemptId,
+      }, refusal);
+    }
+    if (unknownCommitBlocksRetry(desktop, actionDigest)) {
+      const refusal: ComputerActionResult = {
+        succeeded: false,
+        verified: false,
+        status: "blocked",
+        code: "runtime_error",
+        method: "unknown",
+        attemptId,
+        message: "An earlier commit for this action returned unknown; it will not be retried.",
       };
       throw new ComputerActionError(refusal.message, {
         status: refusal.status!,
@@ -1515,9 +1484,13 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         effectClass: "write",
         ...(effectGeneration === undefined ? {} : { generation: effectGeneration }),
       }, signal);
-      activeTurn.lastResult = result;
-      activeTurn.allActionsVerified &&= result.verified === true;
-      return result;
+      rememberUnknownCommit(desktop, actionDigest, result);
+      const observation = nextDesktopObservation(desktop.lastObservation, result, action);
+      desktop.lastObservation = observation;
+      const fresh = withFreshObservation(result, observation);
+      activeTurn.lastResult = fresh;
+      activeTurn.allActionsVerified &&= fresh.verified === true;
+      return fresh;
     } catch (error) {
       const actionError = error instanceof ComputerActionError ? error : undefined;
       activeTurn.lastResult = {

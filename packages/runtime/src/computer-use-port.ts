@@ -40,6 +40,10 @@ export interface ComputerActionResult {
   receiptId?: string;
   attemptId?: string;
   clockLabel?: string;
+  /** Fresh observation after this action; never the turn-start frame. */
+  observationId?: string;
+  numberedTargets?: Array<{ targetId: string; role?: string; enabled?: boolean }>;
+  previousReadback?: string;
 }
 
 export interface ComputerActionFailureDetails {

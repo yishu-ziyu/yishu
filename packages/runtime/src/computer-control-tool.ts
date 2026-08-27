@@ -48,6 +48,7 @@ export function createComputerControlTool(
       "For 'input ... then click ...', execute each step sequentially and rely on each returned read-back.",
       "After a verified direct click, reply with only a brief natural confirmation such as 点好了。",
       "When any result is unverified, say that the requested effect was delivered but not confirmed.",
+      "After every action, use the fresh observation in the tool result. Do not reuse turn-start numberedTargets.",
     ],
     parameters: computerControlParameters,
     executionMode: "sequential",
@@ -64,13 +65,25 @@ export function createComputerControlTool(
       }
 
       const actionLabel = params.action === "set_text" ? "Text input" : "Click";
+      const observation = formatFreshObservation(result);
       const text = result.verified
-        ? `${actionLabel} succeeded and read-back was verified. ${result.evidence ?? result.message}`
-        : `${actionLabel} was delivered but the outcome is unverified. Do not claim completion. ${result.evidence ?? result.message}`;
+        ? `${actionLabel} succeeded and read-back was verified. ${result.evidence ?? result.message}${observation}`
+        : `${actionLabel} was delivered but the outcome is unverified. Do not claim completion. ${result.evidence ?? result.message}${observation}`;
       return {
         content: [{ type: "text", text }],
         details: result,
       };
     },
   };
+}
+
+function formatFreshObservation(result: ComputerActionResult): string {
+  const parts: string[] = [];
+  if (result.observationId) parts.push(`observation ${result.observationId}`);
+  if (result.previousReadback) parts.push(`readback ${result.previousReadback}`);
+  if (result.numberedTargets && result.numberedTargets.length > 0) {
+    parts.push(`numberedTargets ${result.numberedTargets.map((target) => target.targetId).join(",")}`);
+  }
+  if (parts.length === 0) return "";
+  return ` Fresh observation (do not reuse the turn-start frame): ${parts.join("; ")}.`;
 }
