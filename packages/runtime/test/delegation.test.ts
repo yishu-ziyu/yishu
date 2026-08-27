@@ -204,6 +204,8 @@ function delegateToolFor(
   const names = policy.extraTools.map((tool) => tool.name);
   assert.ok(names.includes("web_search"), "main conversation searches the public web in-loop");
   assert.ok(names.includes("delegate"), "main conversation may still delegate long work");
+  assert.ok(names.includes("files"), "main conversation may edit granted workspaces");
+  assert.ok(names.includes("research_plan"), "main conversation can plan multi-source research");
   const tool = policy.extraTools.find((candidate) => candidate.name === "delegate");
   assert.ok(tool, "main conversation must receive the delegate tool");
   return tool as unknown as ExecutableTool;
@@ -262,12 +264,23 @@ test("runtime-owned child identity gives child only web search", async (t) => {
   // web but still has neither Desktop control nor recursive delegation.
   const childPolicy = coordinator.sessionToolPolicyFor(childConversationId);
   assert.equal(childPolicy.computerControl, false);
-  assert.deepEqual(childPolicy.extraTools.map((candidate) => candidate.name), ["web_search"]);
+  const childNames = childPolicy.extraTools.map((candidate) => candidate.name);
+  assert.ok(childNames.includes("web_search"));
+  assert.ok(childNames.includes("files"));
+  assert.ok(childNames.includes("research_plan"));
+  assert.ok(childNames.includes("search_web"));
+  assert.ok(childNames.includes("capture_evidence"));
+  assert.ok(childNames.includes("finalize_research"));
+  assert.equal(childNames.includes("delegate"), false);
 
   // Unrelated conversations are unaffected.
   const otherPolicy = coordinator.sessionToolPolicyFor("conv-other");
   assert.equal(otherPolicy.computerControl, true);
-  assert.deepEqual(otherPolicy.extraTools.map((candidate) => candidate.name), ["web_search", "delegate"]);
+  const otherNames = otherPolicy.extraTools.map((candidate) => candidate.name);
+  assert.ok(otherNames.includes("web_search"));
+  assert.ok(otherNames.includes("delegate"));
+  assert.ok(otherNames.includes("files"));
+  assert.ok(otherNames.includes("finalize_research"));
 });
 
 test("delegate returns an accepted receipt immediately; child runs in background with schema-valid command", async (t) => {
@@ -1087,13 +1100,17 @@ test("at the real createSession boundary a safe conversation result completes an
   });
   const taskId = accepted.details.taskId;
 
-  // Child session appears at the real createSession boundary with web search
-  // and the agent-owned browser, still no Desktop and no recursive delegate.
+  // Child session appears at the real createSession boundary with web search,
+  // files (read-only), research, and the agent-owned browser — still no
+  // Desktop and no recursive delegate.
   await waitFor(() => sessions.length === 2, "child session created");
   const childToolNames = sessionCalls[1]!.customTools.map((tool) => tool.name);
   assert.equal(childToolNames.includes("computer_control"), false, "child must not get computer_control");
   assert.equal(childToolNames.includes("delegate"), false, "child must not get delegate (no recursion)");
-  assert.deepEqual(childToolNames, ["web_search", "browser"]);
+  assert.ok(childToolNames.includes("web_search"));
+  assert.ok(childToolNames.includes("browser"));
+  assert.ok(childToolNames.includes("files"));
+  assert.ok(childToolNames.includes("finalize_research"));
 
   // The child command satisfies the full wire schema and inherits the model.
   const childCommand = startTurnCalls.find(

@@ -1,0 +1,17 @@
+id: memory.save_explicit_fact
+category: memory
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Save an explicit user fact."
+permissions: []
+risk: low
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - private_persisted
+repeat: 10
+evidence_kind: mock

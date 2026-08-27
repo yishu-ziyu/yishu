@@ -1,0 +1,17 @@
+id: desktop.open_and_focus_app
+category: desktop
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Open and focus a specified application."
+permissions: [automation]
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - wrong_app
+repeat: 10
+evidence_kind: mock

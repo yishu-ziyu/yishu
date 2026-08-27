@@ -1,0 +1,17 @@
+id: desktop.finder_open_file
+category: desktop
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Locate a file in Finder and open it."
+permissions: [accessibility, automation]
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - finder_back_up_confused
+repeat: 10
+evidence_kind: mock

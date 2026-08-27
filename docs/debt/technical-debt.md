@@ -67,14 +67,6 @@ Review: 每个 PR merge 后检查是否命中条目；条目修复即删除
 - revisit trigger: 关注 bundle 体积或做发布打包时。
 - severity: low
 
-## debt-009: apps/clicky/worker 不在 pnpm workspace
-
-- what: `apps/clicky/worker` 自带 package.json 与 test/，但 `pnpm-workspace.yaml` 只含 `packages/*`，其测试无人运行。
-- why deferred: 接入 workspace 需处理其独立依赖与 CI 顺序，待排期。
-- evidence: `apps/clicky/worker/`、`pnpm-workspace.yaml:1-2`
-- revisit trigger: worker 逻辑变更或 voice proxy 路径演进时。
-- severity: medium
-
 ## debt-011: cancelTurn 对不存在 requestId 也发 turn.cancelled
 
 - what: `cancelTurn` 不校验 requestId 是否存在，统一发 `turn.cancelled`。

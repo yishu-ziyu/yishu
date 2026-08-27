@@ -11,12 +11,17 @@ import Foundation
 enum ClickyAnalytics {
 
     static func configure() {
-        // no-op: do not send events to PostHog
+        QualityEventRecorder.record(name: "app.ready", sessionId: "app")
     }
 
-    static func trackAppOpened() {}
+    static func trackAppOpened() {
+        QualityEventRecorder.record(name: "app.launched", sessionId: "app")
+    }
 
-    static func trackOnboardingStarted() {}
+    static func trackOnboardingStarted() {
+        QualityEventRecorder.record(name: "onboarding.started", sessionId: "onboarding")
+        YishuOnboardingStore.record(.introSeen)
+    }
 
     static func trackOnboardingReplayed() {}
 
@@ -24,21 +29,42 @@ enum ClickyAnalytics {
 
     static func trackOnboardingDemoTriggered() {}
 
-    static func trackAllPermissionsGranted() {}
+    static func trackAllPermissionsGranted() {
+        QualityEventRecorder.record(name: "permission.granted", sessionId: "app", attributes: ["permission": "all"])
+    }
 
-    static func trackPermissionGranted(permission: String) {}
+    static func trackPermissionGranted(permission: String) {
+        QualityEventRecorder.record(name: "permission.granted", sessionId: "app", attributes: ["permission": permission])
+    }
 
-    static func trackPushToTalkStarted() {}
+    static func trackPushToTalkStarted() {
+        QualityEventRecorder.record(name: "ptt.key_down", sessionId: "voice")
+    }
 
-    static func trackPushToTalkReleased() {}
+    static func trackPushToTalkReleased() {
+        QualityEventRecorder.record(name: "ptt.key_up", sessionId: "voice")
+    }
 
-    static func trackUserMessageSent(transcript: String) {}
+    static func trackUserMessageSent(transcript: String) {
+        _ = transcript
+        QualityEventRecorder.record(name: "asr.completed", sessionId: "voice")
+    }
 
-    static func trackAIResponseReceived(response: String) {}
+    static func trackAIResponseReceived(response: String) {
+        _ = response
+        QualityEventRecorder.record(name: "model.completed", sessionId: "voice")
+    }
 
-    static func trackElementPointed(elementLabel: String?) {}
+    static func trackElementPointed(elementLabel: String?) {
+        _ = elementLabel
+        QualityEventRecorder.record(name: "context.capture_completed", sessionId: "voice", attributes: ["actionKind": "point"])
+    }
 
-    static func trackResponseError(error: String) {}
+    static func trackResponseError(error: String) {
+        QualityEventRecorder.record(name: "model.completed", sessionId: "voice", status: "failed", attributes: ["errorCode": String(error.hashValue)])
+    }
 
-    static func trackTTSError(error: String) {}
+    static func trackTTSError(error: String) {
+        QualityEventRecorder.record(name: "tts.requested", sessionId: "voice", status: "failed", attributes: ["errorCode": String(error.hashValue)])
+    }
 }

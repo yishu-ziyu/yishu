@@ -1,0 +1,17 @@
+id: recovery.runtime_restart_deliver_once
+category: recovery
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Deliver a terminal delegated result only once after runtime restart."
+permissions: []
+risk: high
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - duplicate_delivery
+repeat: 10
+evidence_kind: mock

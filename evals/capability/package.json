@@ -1,0 +1,9 @@
+{
+  "name": "@yishu/capability-evals",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check scripts/write-scenarios.mjs",
+    "test": "node --test test/manifest.test.mjs"
+  }
+}

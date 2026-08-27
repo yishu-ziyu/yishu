@@ -30,7 +30,8 @@ test("browser rejects file and credential URLs before the executor runs", async 
   assert.equal(receipt.status, "failed");
   assert.equal((receipt.output as BrowserResult).message, "Only http and https URLs are allowed.");
   assert.equal(isAllowedBrowserUrl("https://example.com/path"), true);
-  assert.equal(isAllowedBrowserUrl("http://127.0.0.1:8080"), true);
+  assert.equal(isAllowedBrowserUrl("http://127.0.0.1:8080"), false);
+  assert.equal(isAllowedBrowserUrl("http://127.0.0.1:8080", { allowPrivateNetwork: true }), true);
   assert.equal(isAllowedBrowserUrl("javascript:alert(1)"), false);
   assert.equal(isAllowedBrowserUrl("https://user:pass@example.com"), false);
 });

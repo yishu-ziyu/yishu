@@ -17,7 +17,8 @@ const rememberHowInputSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   triggerPhrase: z.string().trim().min(1).max(200).optional(),
   /**
-   * When true, attempt trail-replay verification and promote only if it passes.
+   * When true, run trail-replay verification against the same window and
+   * attach the report to the candidate. Never promotes to a verified skill.
    * Default true for voice "记住刚才…" routes.
    */
   autoVerify: z.boolean().default(true),
@@ -54,7 +55,8 @@ function trailEntriesForExtract(entries: ContextTrailEntry[]) {
  * Product action for: "奕枢，记住我刚才是怎么做的。"
  *
  * Extracts a procedural skill candidate from ContextTrail (not mouse-coordinate
- * replay). autoVerify runs trail-replay against the same window before promote.
+ * replay). autoVerify runs trail-replay against the same window and never
+ * promotes.
  */
 export function createRememberHowAction(deps: {
   store: YishuStorePort;
@@ -136,15 +138,10 @@ export function createRememberHowAction(deps: {
           threshold: ctx.input.verifyThreshold,
         });
         throwIfAborted(ctx.signal);
-        if (verifyReport.verified) {
-          const promoteOptions = {
-            confidence: verifyReport.confidence,
-            verifierNote: `trail_replay_v1 conf=${verifyReport.confidence} ordered=${verifyReport.ordered}`,
-            ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
-          };
-          skill = await store.promoteSkill(candidate.id, promoteOptions);
-          throwIfAborted(ctx.signal);
-        }
+        // Capability Alpha #18: autoVerify may only produce a candidate plus a
+        // trail-replay report. Promotion requires a later dry-run on a live
+        // target and an explicit user-reviewed verify path.
+        skill = null;
       }
 
       return {

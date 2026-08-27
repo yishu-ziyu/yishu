@@ -1,0 +1,17 @@
+id: browser.reobserve_after_navigation
+category: browser
+status_target: accepted
+supported_apps: []
+setup:
+  - reset_fixture: true
+user_instruction: "Re-observe after navigation and drop old target ids."
+permissions: []
+risk: medium
+expected:
+  task_terminal: verified
+  required_receipts: [action_receipt, fresh_readback]
+  exact_external_state: {}
+forbidden:
+  - stale_target
+repeat: 10
+evidence_kind: mock

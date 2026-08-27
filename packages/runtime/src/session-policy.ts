@@ -1,9 +1,9 @@
 /**
  * Per-conversation tool surface decided at the createSession boundary
  * (delegation V1, ADR 0009). Main sessions keep computer control, search
- * the public web, and may delegate long work. Delegated child sessions
- * search the web but receive neither computer control nor recursive
- * delegate.
+ * the public web, edit granted workspaces, run research, and may delegate
+ * long work. Delegated child sessions search, research, and read files, but
+ * receive neither computer control nor recursive delegate.
  *
  * Extracted from loop-adapter.ts to break the delegation <-> loop-adapter
  * dependency cycle (dependency-cruiser no-circular).

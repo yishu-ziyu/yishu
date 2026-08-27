@@ -21,6 +21,7 @@ import {
   createComputerControlTool,
   type ComputerControlToolAction,
 } from "./computer-control-tool.js";
+import { desktopStepBudget } from "./desktop/desktop-policy.js";
 import { isCurrentPageActionsNoteUtterance } from "./delegation.js";
 import { DEFAULT_SESSION_TOOL_POLICY, type SessionToolPolicy } from "./session-policy.js";
 import {
@@ -115,6 +116,7 @@ interface ActiveComputerTurn {
   directComputerAction: boolean;
   authorizedText?: string;
   allowedActionSequence: Array<"set_text" | "left_click">;
+  actionBudget: number;
   frontmostTarget?: {
     targetBundleId: string;
     targetPid: number;
@@ -554,8 +556,6 @@ export function shouldRunCompatibilityComputerAction(
 
 const deniedTextInputPattern = /^(?:(?:请|麻烦|帮我|请帮我)\s*)?(?:不要|别(?:再)?|无需|不(?:要|用|必)|禁止|别把|do\s+not|don't|dont|never)\s*(?:输入|填写|填入|键入|写入|type|fill|set)/iu;
 const textInputQuestionPattern = /(?:为什么|怎么|如何|是什么|什么意思|what\b|why\b|how\b|\?\s*$|？\s*$)/iu;
-const actionSequencePattern = /(?:然后|再|接着|之后|随后|and\s+then|then|after(?:wards)?)/iu;
-const clickOrPressPattern = /(?:点击|点(?:击)?|按下|按|click|press)/iu;
 const quotedTextPattern = /["“「『']([^"”」』']+)["”」』']/u;
 
 /**
@@ -604,12 +604,11 @@ export function isExplicitTextInputUtterance(utterance: string): boolean {
   return authorizedTextForUtterance(utterance) !== undefined;
 }
 
-/** Only the exact input, optionally followed by one click, is authorized. */
+/** Step budget for this utterance. Regex no longer caps a turn at one or two actions. */
 export function computerActionLimitForUtterance(utterance: string): number {
-  const explicitInputSequence = isExplicitTextInputUtterance(utterance)
-    && actionSequencePattern.test(utterance)
-    && clickOrPressPattern.test(utterance);
-  return explicitInputSequence ? 2 : 1;
+  return desktopStepBudget({
+    authorizedCombo: isExplicitTextInputUtterance(utterance),
+  });
 }
 
 // This is deliberately not an API credential. The Clicky-owned loopback
@@ -815,11 +814,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
   }
 
   private fenceEffectfulExtraTool(tool: ToolDefinition, sessionKey: string): ToolDefinition {
-    if (
-      tool.name !== "delegate"
-      && tool.name !== "save_current_page_actions_to_note"
-      && tool.name !== "browser"
-    ) return tool;
+    if (!["delegate", "save_current_page_actions_to_note", "browser", "files"].includes(tool.name)) return tool;
     const execute = tool.execute.bind(tool);
     return {
       ...tool,
@@ -997,12 +992,10 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     const authorizedText = intentAllowsEffect
       ? authorizedTextForUtterance(command.payload.utterance)
       : undefined;
-    const allowsFollowupClick = authorizedText !== undefined
-      && actionSequencePattern.test(command.payload.utterance)
-      && clickOrPressPattern.test(command.payload.utterance);
-    const allowedActionSequence: Array<"set_text" | "left_click"> = authorizedText !== undefined
-      ? ["set_text", ...(allowsFollowupClick ? ["left_click" as const] : [])]
-      : directComputerAction ? ["left_click"] : [];
+    const allowedActionSequence: Array<"set_text" | "left_click"> = [];
+    const actionBudget = (directComputerAction || authorizedText !== undefined)
+      ? computerActionLimitForUtterance(command.payload.utterance)
+      : 0;
     const generationState = new PiTurnGenerationState(
       directComputerAction,
       true,
@@ -1078,6 +1071,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       directComputerAction,
       ...(authorizedText !== undefined ? { authorizedText } : {}),
       allowedActionSequence,
+      actionBudget,
       ...(observedFrontmost?.bundleIdentifier && observedFrontmost.processIdentifier > 0
         ? {
             frontmostTarget: {
@@ -1405,9 +1399,10 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       }
     }
     const allowedActionSequence = activeTurn.allowedActionSequence ?? [];
-    const expectedAction = allowedActionSequence[activeTurn.actionCount];
-    if (expectedAction === undefined) {
-      const directLimit = activeTurn.directComputerAction;
+    const actionBudget = activeTurn.actionBudget
+      ?? (allowedActionSequence.length > 0 ? allowedActionSequence.length : desktopStepBudget());
+    if (activeTurn.actionCount >= actionBudget) {
+      const directLimit = activeTurn.directComputerAction && actionBudget <= 1;
       const refusal: ComputerActionResult = {
         succeeded: false,
         verified: false,
@@ -1427,7 +1422,8 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       }, refusal);
     }
 
-    if (action.action !== expectedAction) {
+    const expectedAction = allowedActionSequence[activeTurn.actionCount];
+    if (expectedAction !== undefined && action.action !== expectedAction) {
       const refusal: ComputerActionResult = {
         succeeded: false,
         verified: false,
