@@ -3364,10 +3364,8 @@ final class CompanionManager: ObservableObject {
                         result: result,
                         sourceCapture: Self.sourceCapture(for: request, in: screenCaptures)
                     )
-                    // Receipt stays on this port if ownership moved during read-back.
-                    try yishuAgentRuntimeClient.completeComputerAction(
-                        request, result: result,
-                        recapture: YishuComputerUseRecapture.frame(using: yishuContextFrameCollector))
+                    // Receipt first. Recapture JPEG/AX on this actor blocked the port.
+                    try yishuAgentRuntimeClient.completeComputerAction(request, result: result)
                     guard stillOwned else { continue }
                 case let .responseDelta(delta, _):
                     updateTurnVisualPhase(for: event)

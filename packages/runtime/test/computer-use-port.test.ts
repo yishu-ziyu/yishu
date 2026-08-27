@@ -83,6 +83,43 @@ test("computer-use port round-trips a typed action and verification result", asy
   port.dispose();
 });
 
+test("computer-use port accepts uppercase UUID receipts from Swift JSONEncoder", async () => {
+  const events: RuntimeEvent[] = [];
+  const port = new StdioComputerUsePort((event) => events.push(event), 1_000);
+  const requestId = randomUUID();
+  const traceId = randomUUID();
+  const pendingResult = port.perform({
+    action: "left_click",
+    targetId: "1",
+  }, { requestId, traceId });
+  const payload = computerActionRequestedPayloadSchema.parse(events.at(0)?.payload);
+
+  assert.equal(port.resolve({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "computer.action.result",
+    requestId: requestId.toUpperCase(),
+    traceId: traceId.toUpperCase(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      actionId: payload.actionId.toUpperCase(),
+      succeeded: true,
+      verified: true,
+      message: "The requested control changed visible state.",
+      evidence: "method=accessibility;code=verified_accessibility_change;testbed-effect=effect-1",
+      status: "verified",
+      code: "verified_accessibility",
+      method: "ax_press",
+      receiptId: "receipt-1",
+      attemptId: payload.attemptId?.toUpperCase(),
+    },
+  }), true);
+
+  const result = await pendingResult;
+  assert.equal(result.succeeded, true);
+  assert.equal(result.verified, true);
+  port.dispose();
+});
+
 test("computer-use port forwards recaptured screenshot and numbered targets", async () => {
   const events: RuntimeEvent[] = [];
   const port = new StdioComputerUsePort((event) => events.push(event), 1_000);

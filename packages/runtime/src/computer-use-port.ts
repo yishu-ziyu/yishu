@@ -106,6 +106,11 @@ interface PendingAction {
   removeAbortListener?: () => void;
 }
 
+/** Swift JSONEncoder emits UUID.uuidString in uppercase; Node randomUUID is lowercase. */
+function wireUuid(value: string): string {
+  return value.toLowerCase();
+}
+
 export class StdioComputerUsePort implements ComputerUsePort {
   private readonly pending = new Map<string, PendingAction>();
   private readonly resourceLease = processResourceLease;
@@ -173,7 +178,7 @@ export class StdioComputerUsePort implements ComputerUsePort {
         signal.addEventListener("abort", abort, { once: true });
         pendingAction.removeAbortListener = () => signal.removeEventListener("abort", abort);
       }
-      this.pending.set(actionId, pendingAction);
+      this.pending.set(wireUuid(actionId), pendingAction);
 
       if (signal?.aborted) {
         this.finish(actionId, new ComputerActionError(
@@ -201,16 +206,17 @@ export class StdioComputerUsePort implements ComputerUsePort {
   }
 
   resolve(command: ComputerActionResultCommand): boolean {
-    const pendingAction = this.pending.get(command.payload.actionId);
+    const actionId = wireUuid(command.payload.actionId);
+    const pendingAction = this.pending.get(actionId);
     if (!pendingAction
-      || pendingAction.requestId !== command.requestId
-      || pendingAction.traceId !== command.traceId) return false;
+      || wireUuid(pendingAction.requestId) !== wireUuid(command.requestId)
+      || wireUuid(pendingAction.traceId) !== wireUuid(command.traceId)) return false;
     // A late result from a prior attempt must not settle a newer attempt. Old
     // clients omit attemptId and remain fully compatible with this check.
     if (command.payload.attemptId !== undefined
-      && command.payload.attemptId !== pendingAction.attemptId) return false;
+      && wireUuid(command.payload.attemptId) !== wireUuid(pendingAction.attemptId)) return false;
 
-    const settledAction = this.takePending(command.payload.actionId);
+    const settledAction = this.takePending(actionId);
     if (!settledAction) return false;
     settledAction.resolve({
       succeeded: command.payload.succeeded,
@@ -251,8 +257,9 @@ export class StdioComputerUsePort implements ComputerUsePort {
   }
 
   cancelRequest(requestId: string, reason = "Computer action was cancelled."): void {
+    const wanted = wireUuid(requestId);
     for (const [actionId, pendingAction] of this.pending) {
-      if (pendingAction.requestId === requestId) {
+      if (wireUuid(pendingAction.requestId) === wanted) {
         this.finish(actionId, new ComputerActionError(reason, {
           status: "cancelled",
           code: "cancelled",
@@ -282,9 +289,10 @@ export class StdioComputerUsePort implements ComputerUsePort {
   }
 
   private takePending(actionId: string): PendingAction | undefined {
-    const pendingAction = this.pending.get(actionId);
+    const key = wireUuid(actionId);
+    const pendingAction = this.pending.get(key);
     if (!pendingAction) return undefined;
-    this.pending.delete(actionId);
+    this.pending.delete(key);
     clearTimeout(pendingAction.timeout);
     pendingAction.removeAbortListener?.();
     this.resourceLease.release(

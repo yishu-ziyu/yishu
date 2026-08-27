@@ -151,7 +151,7 @@ enum YishuComputerUseActuator {
     /// that the control still exists and still belongs to that app.
     static func performFrontmostLabeledControl(
         matching labels: [String],
-        screenCaptures: [CompanionScreenCapture]
+        screenCaptures _: [CompanionScreenCapture]
     ) async -> YishuComputerActionResult {
         let receiptId = UUID().uuidString
         let attemptId = UUID().uuidString
@@ -166,7 +166,6 @@ enum YishuComputerUseActuator {
         let system = AXUIElementCreateSystemWide()
         let focusedElementBefore = elementAttribute(kAXFocusedUIElementAttribute as String, from: system)
         let windowSignatureBefore = frontmostWindowSignature()
-        let beforeCapture = screenCaptures.first(where: \.isCursorScreen) ?? screenCaptures.first
         let chromeKind = chromeNavigationKind(forLabels: labels)
         let isFinderChrome = chromeKind != nil
 
@@ -303,24 +302,22 @@ enum YishuComputerUseActuator {
                     attemptId: attemptId
                 )
             }
-            if let beforeCapture {
-                let verification = await readBack(
-                    before: beforeCapture,
-                    system: system,
-                    focusedElementBefore: focusedElementBefore,
-                    windowSignatureBefore: windowSignatureBefore,
-                    candidate: liveElement,
-                    candidateSnapshotBefore: before
+            let verification = await readBack(
+                processIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                focusedElementBefore: focusedElementBefore,
+                windowSignatureBefore: windowSignatureBefore,
+                candidate: liveElement,
+                candidateSnapshotBefore: before
+            )
+            if let verification {
+                return verifiedResult(
+                    verification,
+                    method: .axPress,
+                    receiptId: receiptId,
+                    attemptId: attemptId
                 )
-                if let verification {
-                    return verifiedResult(
-                        verification,
-                        method: .axPress,
-                        receiptId: receiptId,
-                        attemptId: attemptId
-                    )
-                }
-            } else if windowSignatureBefore != frontmostWindowSignature() {
+            }
+            if windowSignatureBefore != frontmostWindowSignature() {
                 return verifiedResult(
                     VerificationEvidence(
                         code: .verifiedAccessibilityChange,
@@ -944,8 +941,7 @@ enum YishuComputerUseActuator {
                     )
                 }
                 let verification = await readBack(
-                    before: screenCapture,
-                    system: system,
+                    processIdentifier: frontmostProcessIdentifierBefore,
                     focusedElementBefore: focusedElementBefore,
                     windowSignatureBefore: windowSignatureBefore,
                     candidate: currentCandidate,
@@ -1563,7 +1559,7 @@ enum YishuComputerUseActuator {
     private static func performNumberedTargetClick(
         targetId: String,
         expected: [NumberedAccessibilityTarget],
-        screenCaptures: [CompanionScreenCapture],
+        screenCaptures _: [CompanionScreenCapture],
         receiptId: String,
         attemptId: String,
         authorizationFence: @escaping AuthorizationFence
@@ -1622,7 +1618,6 @@ enum YishuComputerUseActuator {
             let system = AXUIElementCreateSystemWide()
             let focusedElementBefore = elementAttribute(kAXFocusedUIElementAttribute as String, from: system)
             let windowSignatureBefore = frontmostWindowSignature()
-            let beforeCapture = screenCaptures.first(where: \.isCursorScreen) ?? screenCaptures.first
             let before = snapshot(of: element)
             switch performPress(element, authorizationFence: authorizationFence) {
             case .blocked:
@@ -1644,15 +1639,13 @@ enum YishuComputerUseActuator {
                         attemptId: attemptId
                     )
                 }
-                if let beforeCapture,
-                   let verification = await readBack(
-                    before: beforeCapture,
-                    system: system,
+                if let verification = await readBack(
+                    processIdentifier: processIdentifier,
                     focusedElementBefore: focusedElementBefore,
                     windowSignatureBefore: windowSignatureBefore,
                     candidate: element,
                     candidateSnapshotBefore: before
-                   ) {
+                ) {
                     return verifiedResult(
                         verification,
                         method: .axPress,
@@ -1685,24 +1678,22 @@ enum YishuComputerUseActuator {
                         attemptId: attemptId
                     )
                 }
-                if let beforeCapture {
-                    let verification = await readBack(
-                        before: beforeCapture,
-                        system: system,
-                        focusedElementBefore: focusedElementBefore,
-                        windowSignatureBefore: windowSignatureBefore,
-                        candidate: element,
-                        candidateSnapshotBefore: before
+                let verification = await readBack(
+                    processIdentifier: processIdentifier,
+                    focusedElementBefore: focusedElementBefore,
+                    windowSignatureBefore: windowSignatureBefore,
+                    candidate: element,
+                    candidateSnapshotBefore: before
+                )
+                if let verification {
+                    return verifiedResult(
+                        verification,
+                        method: .axPress,
+                        receiptId: receiptId,
+                        attemptId: attemptId
                     )
-                    if let verification {
-                        return verifiedResult(
-                            verification,
-                            method: .axPress,
-                            receiptId: receiptId,
-                            attemptId: attemptId
-                        )
-                    }
-                } else if windowSignatureBefore != frontmostWindowSignature() {
+                }
+                if windowSignatureBefore != frontmostWindowSignature() {
                     return verifiedResult(
                         VerificationEvidence(
                             code: .verifiedAccessibilityChange,
@@ -2014,8 +2005,7 @@ enum YishuComputerUseActuator {
         }
 
         let verification = await readBack(
-            before: screenCapture,
-            system: AXUIElementCreateSystemWide(),
+            processIdentifier: expectedFrontmostProcessIdentifier,
             focusedElementBefore: focusedElementBefore,
             windowSignatureBefore: windowSignatureBefore,
             candidate: nil,
@@ -2240,51 +2230,6 @@ enum YishuComputerUseActuator {
         return "\(processIdentifier):\(windowNumber):\(windowName)"
     }
 
-    private static func didScreenContentChange(
-        before: CompanionScreenCapture,
-        matching displayFrame: CGRect
-    ) async -> Bool {
-        guard let afterCaptures = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG(),
-              let after = afterCaptures.first(where: {
-                  approximatelyEqual($0.globalTopLeftDisplayFrame, displayFrame)
-              }),
-              let beforeFingerprint = grayscaleFingerprint(from: before.imageData),
-              let afterFingerprint = grayscaleFingerprint(from: after.imageData),
-              beforeFingerprint.count == afterFingerprint.count else {
-            return false
-        }
-
-        let totalDifference = zip(beforeFingerprint, afterFingerprint).reduce(0.0) { partial, pair in
-            partial + abs(Double(pair.0) - Double(pair.1)) / 255.0
-        }
-        return totalDifference / Double(beforeFingerprint.count) >= 0.018
-    }
-
-    private static func grayscaleFingerprint(from imageData: Data) -> [UInt8]? {
-        guard let image = NSImage(data: imageData),
-              let sourceImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return nil
-        }
-
-        let width = 64
-        let height = 40
-        var pixels = [UInt8](repeating: 0, count: width * height)
-        guard let context = CGContext(
-            data: &pixels,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width,
-            space: CGColorSpaceCreateDeviceGray(),
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else {
-            return nil
-        }
-        context.interpolationQuality = .low
-        context.draw(sourceImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return pixels
-    }
-
     private static func approximatelyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
         abs(lhs.origin.x - rhs.origin.x) < 1
             && abs(lhs.origin.y - rhs.origin.y) < 1
@@ -2298,27 +2243,20 @@ enum YishuComputerUseActuator {
     }
 
     private static func readBack(
-        before screenCapture: CompanionScreenCapture,
-        system _: AXUIElement,
+        processIdentifier: pid_t?,
         focusedElementBefore: AXUIElement?,
         windowSignatureBefore: String?,
         candidate: AXUIElement?,
         candidateSnapshotBefore: AccessibilitySnapshot?
     ) async -> VerificationEvidence? {
         guard let evidence = await YishuComputerUseReadBack.wait(
-            processIdentifier: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            processIdentifier: processIdentifier,
             focusedElementBefore: focusedElementBefore,
             windowSignatureBefore: windowSignatureBefore,
             candidate: candidate,
             candidateBefore: candidateSnapshotBefore.map {
                 YishuComputerUseReadBack.ElementSnapshot(
                     selected: $0.selected, focused: $0.focused, value: $0.value
-                )
-            },
-            screenChanged: {
-                await didScreenContentChange(
-                    before: screenCapture,
-                    matching: screenCapture.globalTopLeftDisplayFrame
                 )
             }
         ) else { return nil }

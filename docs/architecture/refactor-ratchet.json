@@ -2,9 +2,9 @@
   "updatedAt": "2026-08-27",
   "circularEdges": 0,
   "files": {
-    "apps/clicky/leanring-buddy/CompanionManager.swift": 4609,
+    "apps/clicky/leanring-buddy/CompanionManager.swift": 4607,
     "apps/clicky/leanring-buddy/YishuAgentRuntimeClient.swift": 3561,
-    "apps/clicky/leanring-buddy/YishuComputerUseActuator.swift": 2376,
+    "apps/clicky/leanring-buddy/YishuComputerUseActuator.swift": 2314,
     "packages/runtime/src/product-kernel-runtime.ts": 3566,
     "packages/kernel/src/store/yishu-store.ts": 3163,
     "packages/runtime/src/loop-adapter.ts": 1697
