@@ -100,13 +100,14 @@ enum YishuComputerUseReadBack {
         let value: String?
     }
 
+    /// AX-only. A ScreenCaptureKit fallback here blocked `computer.action.result`
+    /// on the MainActor, so the click landed and the mouth still said it failed.
     static func wait(
         processIdentifier: pid_t?,
         focusedElementBefore: AXUIElement?,
         windowSignatureBefore: String?,
         candidate: AXUIElement?,
-        candidateBefore: ElementSnapshot?,
-        screenChanged: () async -> Bool
+        candidateBefore: ElementSnapshot?
     ) async -> Evidence? {
         let labeled = await pollLabeledEffect(processIdentifier: processIdentifier)
         if let effect = labeled.terminalEffect {
@@ -143,11 +144,7 @@ enum YishuComputerUseReadBack {
                 evidence: "method=accessibility;code=verified_accessibility_change\(labeled.evidenceSuffix)"
             )
         }
-        guard await screenChanged() else { return nil }
-        return Evidence(
-            code: .verifiedScreenChange,
-            evidence: "method=screen_readback;code=verified_screen_change\(labeled.evidenceSuffix)"
-        )
+        return nil
     }
 
     static func focusEditable(

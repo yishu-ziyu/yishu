@@ -1430,6 +1430,11 @@ final class YishuAgentRuntimeClient {
         result: YishuComputerActionResult,
         recapture: YishuContextFrame? = nil
     ) throws {
+        QualityEventRecorder.record(
+            name: "computer.result.sending",
+            sessionId: "desktop",
+            attributes: ["receiptStatus": result.status.rawValue]
+        )
         try send(YishuComputerActionResultCommand(
             schemaVersion: yishuRuntimeProtocolVersion,
             type: "computer.action.result",
@@ -1455,6 +1460,11 @@ final class YishuAgentRuntimeClient {
                 screenshots: recapture.map { Array($0.screenshots.prefix(1)) }
             )
         ))
+        QualityEventRecorder.record(
+            name: "computer.result.sent",
+            sessionId: "desktop",
+            attributes: ["receiptStatus": result.status.rawValue]
+        )
     }
 
     func stop() {
