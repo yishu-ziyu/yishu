@@ -112,9 +112,9 @@ export class StdioComputerUsePort implements ComputerUsePort {
 
   constructor(
     private readonly emit: RuntimeEventSink,
-    // Click + AX read-back + recapture JPEG on stdio. Live 奕枢 still timed
-    // out at 25s after the Testbed already showed effect-1.
-    private readonly timeoutMilliseconds = 60_000,
+    // Click + AX read-back + one-window recapture. Recapture used to wait on
+    // every connected display and never returned inside this budget.
+    private readonly timeoutMilliseconds = 15_000,
   ) {}
 
   perform(
