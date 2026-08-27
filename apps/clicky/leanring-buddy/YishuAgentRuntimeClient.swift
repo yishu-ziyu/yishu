@@ -336,7 +336,9 @@ final class YishuAgentRuntimeClient {
     private var turnProjectionReducers: [UUID: YishuTurnProjectionReducer] = [:]
     private var seenTurnEventIds: [UUID: Set<UUID>] = [:]
     private var turnWatchdogTasks: [UUID: Task<Void, Never>] = [:]
-    private let foregroundTurnTimeoutNanoseconds: UInt64 = 60_000_000_000
+    /// Browser research (goto + observe + cite) and recapture after a click
+    /// both overrun a 60s hang fence. Keep a bound; do not wait forever.
+    private let foregroundTurnTimeoutNanoseconds: UInt64 = 180_000_000_000
 
     private struct PendingTurnInterrupt {
         let traceId: UUID
