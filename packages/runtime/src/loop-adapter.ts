@@ -86,6 +86,7 @@ import {
   type TaskExecutionContract,
 } from "@yishu/kernel";
 import { markTrustedExternalReceipt } from "./trusted-task-receipt.js";
+import { emptyResearchCompletionTrace, noteResearchTool, researchCompletionFields } from "./research/research-completion-gate.js";
 
 type RuntimeModel = ResolvedModel;
 const SESSION_ABORT_TIMEOUT_MS = 2_000;
@@ -957,6 +958,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         generation,
       }));
     };
+    const researchTrace = emptyResearchCompletionTrace();
     const unsubscribe = session.subscribe((event) => {
       if (this.isRequestCancelled(command.requestId)) return;
       if (event.type === "message_start") {
@@ -989,6 +991,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       }
 
       if (event.type === "tool_execution_end") {
+        noteResearchTool(researchTrace, event.toolName, event.isError);
         const generation = generationState.generationForToolEnd(event.toolCallId);
         if (!generationState.accepts(generation)) return;
         emit(runtimeEvent("tool.completed", command.requestId, command.traceId, {
@@ -1144,10 +1147,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         const completion = runtimeEvent("response.completed", command.requestId, command.traceId, {
           text: authoritativeText,
           generation,
-          verified: computerTurn.actionCount > 0 && computerTurn.allActionsVerified,
-          verifier: computerTurn.actionCount > 0
-            ? "macos-accessibility-result"
-            : "conversation-response-only",
+          ...researchCompletionFields(researchTrace, computerTurn.actionCount, computerTurn.allActionsVerified),
         });
         emit(computerTurn.actionCount > 0
           ? markTrustedExternalReceipt(completion, computerTurn.allActionsVerified)

@@ -373,16 +373,34 @@ test("oracle:research.single_fact_query", async () => {
   const finalize = toolset.tools.find((tool) => tool.name === "finalize_research");
   assert.ok(search && capture && finalize);
   await search.execute("1", { query: "mars color" } as never);
-  const sourceId = ledger.listSources()[0]?.sourceId;
-  assert.ok(sourceId);
-  const captured = await capture.execute("2", {
-    sourceId,
+  const snippetId = ledger.listSources()[0]?.sourceId;
+  assert.ok(snippetId);
+  await assert.rejects(
+    () => capture.execute("2", {
+      sourceId: snippetId,
+      locatorKind: "paragraph",
+      locatorValue: "p1",
+      text: "Mars appears red because of iron oxide.",
+    } as never),
+    /snippet_claimed_as_primary/,
+  );
+  const primary = ledger.addSource({
+    url: "https://example.com/mars",
+    canonicalUrl: "https://example.com/mars",
+    title: "Mars",
+    retrievedAt: now.toISOString(),
+    sourceType: "documentation",
+    trustTier: 2,
+    kind: "primary_page",
+  });
+  const captured = await capture.execute("3", {
+    sourceId: primary.sourceId,
     locatorKind: "paragraph",
     locatorValue: "p1",
     text: "Mars appears red because of iron oxide.",
   } as never);
   const evidenceId = (captured.details as { evidenceId: string }).evidenceId;
-  const done = await finalize.execute("3", {
+  const done = await finalize.execute("4", {
     claims: [{
       text: "Mars appears red because of iron oxide.",
       evidenceIds: [evidenceId],

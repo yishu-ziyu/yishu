@@ -55,7 +55,7 @@ export function validateResearchClaims(input: {
       linkedSources.push(source);
     }
     if (unknown) continue;
-    if (linkedSources.every((source) => source.kind === "search_snippet")) {
+    if (!linkedSources.some((source) => source.kind === "primary_page")) {
       rejections.push({ claimId: claim.claimId, code: "snippet_claimed_as_primary" });
     }
     if (staleCutoff !== undefined && linkedSources.every((source) => {

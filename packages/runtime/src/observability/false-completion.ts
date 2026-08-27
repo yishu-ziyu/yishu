@@ -11,6 +11,8 @@ export interface FalseCompletionTask {
   delegated?: boolean;
   hasDeliverable?: boolean;
   externalStateMatches?: boolean;
+  searchUsed?: boolean;
+  researchFinalized?: boolean;
 }
 
 export interface FalseCompletionUtterance {
@@ -25,7 +27,8 @@ export interface FalseCompletionFinding {
     | "unverified_receipt_reported_complete"
     | "external_state_mismatch"
     | "cancelled_overwritten"
-    | "delegated_without_deliverable";
+    | "delegated_without_deliverable"
+    | "search_without_primary_evidence";
   taskId?: string;
 }
 
@@ -73,6 +76,13 @@ export function detectFalseCompletions(input: {
     }
     if (task.delegated === true && task.hasDeliverable !== true && (task.status === "done" || task.status === "completed" || task.status === "verified")) {
       findings.push({ code: "delegated_without_deliverable", taskId: task.taskId });
+    }
+    if (
+      task.searchUsed === true
+      && task.researchFinalized !== true
+      && (claimsVerified || task.status === "done" || task.status === "completed")
+    ) {
+      findings.push({ code: "search_without_primary_evidence", taskId: task.taskId });
     }
   }
 

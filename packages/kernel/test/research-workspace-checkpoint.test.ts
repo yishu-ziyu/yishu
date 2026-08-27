@@ -184,6 +184,45 @@ test("factual claims without primary evidence are rejected", () => {
   assert.ok(result.rejections.some((item) => item.code === "snippet_claimed_as_primary"));
 });
 
+test("a sibling primary_page does not launder snippet evidence", () => {
+  const ledger = createResearchLedger();
+  const snippet = ledger.addSource({
+    url: "https://example.com",
+    canonicalUrl: "https://example.com",
+    retrievedAt: "2026-08-27T00:00:00.000Z",
+    sourceType: "news",
+    trustTier: 3,
+    kind: "search_snippet",
+  });
+  ledger.addSource({
+    url: "https://example.com",
+    canonicalUrl: "https://example.com",
+    retrievedAt: "2026-08-27T00:00:00.000Z",
+    sourceType: "news",
+    trustTier: 2,
+    kind: "primary_page",
+  });
+  const evidence = ledger.addEvidence({
+    sourceId: snippet.sourceId,
+    locator: { kind: "paragraph", value: "1" },
+    text: "Example snippet",
+  });
+  const result = validateResearchClaims({
+    claims: [{
+      claimId: "c1",
+      text: "The sky is green",
+      evidenceIds: [evidence.evidenceId],
+      confidence: "high",
+      disputed: false,
+      kind: "factual",
+    }],
+    evidence: [evidence],
+    sources: ledger.listSources(),
+  });
+  assert.equal(result.accepted, false);
+  assert.ok(result.rejections.some((item) => item.code === "snippet_claimed_as_primary"));
+});
+
 test("workspace grants do not leak across projects", () => {
   const ledger = createWorkspaceLedger();
   const project = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

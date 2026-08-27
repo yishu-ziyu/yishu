@@ -149,26 +149,17 @@ export function createResearchToolset(input: {
       if (source === undefined) {
         throw new Error("Unknown research source.");
       }
-      const primary = source.kind === "primary_page"
-        ? source
-        : ledger.addSource({
-            url: source.url,
-            canonicalUrl: source.canonicalUrl,
-            retrievedAt: new Date().toISOString(),
-            sourceType: source.sourceType,
-            trustTier: 2,
-            kind: "primary_page",
-            ...(source.title === undefined ? {} : { title: source.title }),
-            ...(source.publishedAt === undefined ? {} : { publishedAt: source.publishedAt }),
-          });
+      if (source.kind !== "primary_page") {
+        throw new Error("Research claims rejected: snippet_claimed_as_primary");
+      }
       const evidence = ledger.addEvidence({
-        sourceId: primary.sourceId,
+        sourceId: source.sourceId,
         locator: { kind: params.locatorKind, value: params.locatorValue },
         text: params.text,
       });
       return {
         content: [{ type: "text" as const, text: `Captured evidence ${evidence.evidenceId}.` }],
-        details: { evidenceId: evidence.evidenceId, sourceId: primary.sourceId },
+        details: { evidenceId: evidence.evidenceId, sourceId: source.sourceId },
       };
     },
   };
