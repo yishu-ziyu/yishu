@@ -2,6 +2,14 @@ import type { SessionScope } from "../session-scope.js";
 
 export type WorkspaceCapability = "read" | "create" | "edit" | "move" | "trash";
 
+export const PERSONAL_WORKSPACE_CAPABILITIES: readonly WorkspaceCapability[] = [
+  "read",
+  "create",
+  "edit",
+  "move",
+  "trash",
+];
+
 export interface WorkspaceGrant {
   id: string;
   displayName: string;
@@ -13,7 +21,7 @@ export interface WorkspaceGrant {
   revokedAt?: string;
 }
 
-export function grantIsActive(grant: WorkspaceGrant, now: Date): boolean {
+export function grantIsActive(grant: WorkspaceGrant, now: Date = new Date()): boolean {
   if (grant.revokedAt !== undefined) return false;
   if (grant.expiresAt !== undefined && Date.parse(grant.expiresAt) <= now.getTime()) return false;
   return true;

@@ -204,6 +204,9 @@ enum YishuAgentRuntimeClientError: LocalizedError {
     case taskCancelFailed(String)
     case taskCancelTimedOut
     case invalidTaskCancelEvent
+    case workspaceFailed(String)
+    case workspaceTimedOut
+    case invalidWorkspaceEvent
 
     var errorDescription: String? {
         switch self {
@@ -236,6 +239,9 @@ enum YishuAgentRuntimeClientError: LocalizedError {
         case let .taskCancelFailed(message): return message
         case .taskCancelTimedOut: return "停止后台任务超时。"
         case .invalidTaskCancelEvent: return "停止后台任务的运行时回执无效。"
+        case let .workspaceFailed(message): return message
+        case .workspaceTimedOut: return "文件夹工作区操作超时。"
+        case .invalidWorkspaceEvent: return "文件夹工作区协议无效。"
         }
     }
 }
@@ -278,6 +284,24 @@ struct YishuMemoryForgetResult: Equatable {
 struct YishuMemoryRememberResult: Equatable {
     let item: YishuMemoryListItem
     let confirmed: Bool
+}
+
+struct YishuWorkspaceGrantItem: Identifiable, Equatable {
+    let id: UUID
+    let displayName: String
+    let capabilities: [String]
+    let createdAt: Date
+    let trashApproved: Bool
+}
+
+struct YishuWorkspaceRevokeResult: Equatable {
+    let workspaceId: UUID
+    let alreadyGone: Bool
+}
+
+struct YishuWorkspaceApproveResult: Equatable {
+    let workspaceId: UUID
+    let allowed: Bool
 }
 
 struct YishuHistoryVisibleTurn: Equatable {
@@ -398,6 +422,10 @@ final class YishuAgentRuntimeClient {
         case memoryForget
         case memoryRemember
         case speechExcerpt
+        case workspaceGrant
+        case workspaceRevoke
+        case workspaceList
+        case workspaceApprove
     }
 
     private struct PendingHistoryRequest {
@@ -753,6 +781,140 @@ final class YishuAgentRuntimeClient {
             throw YishuAgentRuntimeClientError.invalidMemoryEvent
         }
         return remembered
+    }
+
+    func grantWorkspace(
+        id: UUID,
+        displayName: String,
+        rootPath: String,
+        scope: YishuSessionScope = .personal
+    ) async throws -> YishuWorkspaceGrantItem {
+        let result = try await awaitPanelResult(
+            kind: .workspaceGrant,
+            timeout: .workspaceTimedOut
+        ) { requestId in
+            try send(YishuWorkspaceGrantCommand(
+                schemaVersion: yishuRuntimeProtocolVersion,
+                type: "workspace.grant",
+                requestId: requestId,
+                traceId: UUID(),
+                sentAt: Date(),
+                payload: YishuWorkspaceGrantPayload(
+                    workspaceId: id,
+                    displayName: displayName,
+                    rootPath: rootPath,
+                    sessionScope: scope
+                )
+            ))
+        }
+        guard let item = result as? YishuWorkspaceGrantItem else {
+            throw YishuAgentRuntimeClientError.invalidWorkspaceEvent
+        }
+        return item
+    }
+
+    func revokeWorkspace(
+        id: UUID,
+        scope: YishuSessionScope = .personal
+    ) async throws -> YishuWorkspaceRevokeResult {
+        let result = try await awaitPanelResult(
+            kind: .workspaceRevoke,
+            timeout: .workspaceTimedOut
+        ) { requestId in
+            try send(YishuWorkspaceRevokeCommand(
+                schemaVersion: yishuRuntimeProtocolVersion,
+                type: "workspace.revoke",
+                requestId: requestId,
+                traceId: UUID(),
+                sentAt: Date(),
+                payload: YishuWorkspaceRevokePayload(
+                    workspaceId: id,
+                    sessionScope: scope
+                )
+            ))
+        }
+        guard let revoked = result as? YishuWorkspaceRevokeResult else {
+            throw YishuAgentRuntimeClientError.invalidWorkspaceEvent
+        }
+        return revoked
+    }
+
+    func listWorkspaces(
+        scope: YishuSessionScope = .personal
+    ) async throws -> [YishuWorkspaceGrantItem] {
+        let result = try await awaitPanelResult(
+            kind: .workspaceList,
+            timeout: .workspaceTimedOut
+        ) { requestId in
+            try send(YishuWorkspaceListCommand(
+                schemaVersion: yishuRuntimeProtocolVersion,
+                type: "workspace.list",
+                requestId: requestId,
+                traceId: UUID(),
+                sentAt: Date(),
+                payload: YishuWorkspaceListPayload(sessionScope: scope)
+            ))
+        }
+        guard let items = result as? [YishuWorkspaceGrantItem] else {
+            throw YishuAgentRuntimeClientError.invalidWorkspaceEvent
+        }
+        return items
+    }
+
+    func approveWorkspaceTrash(
+        id: UUID,
+        allowed: Bool,
+        scope: YishuSessionScope = .personal
+    ) async throws -> YishuWorkspaceApproveResult {
+        let result = try await awaitPanelResult(
+            kind: .workspaceApprove,
+            timeout: .workspaceTimedOut
+        ) { requestId in
+            try send(YishuWorkspaceApproveCommand(
+                schemaVersion: yishuRuntimeProtocolVersion,
+                type: "workspace.approve",
+                requestId: requestId,
+                traceId: UUID(),
+                sentAt: Date(),
+                payload: YishuWorkspaceApprovePayload(
+                    workspaceId: id,
+                    op: "trash",
+                    allowed: allowed,
+                    sessionScope: scope
+                )
+            ))
+        }
+        guard let approved = result as? YishuWorkspaceApproveResult else {
+            throw YishuAgentRuntimeClientError.invalidWorkspaceEvent
+        }
+        return approved
+    }
+
+    private func awaitPanelResult(
+        kind: PendingHistoryKind,
+        timeout: YishuAgentRuntimeClientError,
+        sendCommand: (UUID) throws -> Void
+    ) async throws -> Any {
+        let requestId = UUID()
+        return try await withCheckedThrowingContinuation { continuation in
+            historyContinuations[requestId] = PendingHistoryRequest(
+                kind: kind,
+                continuation: continuation,
+                timeoutTask: nil
+            )
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                await MainActor.run {
+                    self?.failHistoryRequest(requestId, error: timeout)
+                }
+            }
+            historyContinuations[requestId]?.timeoutTask = timeoutTask
+            do {
+                try sendCommand(requestId)
+            } catch {
+                failHistoryRequest(requestId, error: error)
+            }
+        }
     }
 
     /// Ask Runtime for at most two spoken sentences from a scrubbed visible reply.
@@ -1789,6 +1951,9 @@ final class YishuAgentRuntimeClient {
 
         if type == "runtime.ready" {
             onLifecycleEvent?(.ready(mode: payload["mode"] as? String ?? "unknown"))
+            Task { @MainActor in
+                await WorkspaceGrantSync.pushActiveGrants(using: self)
+            }
             return
         }
 
@@ -1999,12 +2164,20 @@ final class YishuAgentRuntimeClient {
             || type == "memory.remembered"
             || type == "memory.failed"
         let isSpeechExcerptEvent = type == "speech.excerpted" || type == "speech.failed"
-        if type.hasPrefix("history.") || isMemoryPanelEvent || isSpeechExcerptEvent {
+        let isWorkspacePanelEvent =
+            type == "workspace.granted"
+            || type == "workspace.revoked"
+            || type == "workspace.listed"
+            || type == "workspace.approved"
+            || type == "workspace.failed"
+        if type.hasPrefix("history.") || isMemoryPanelEvent || isSpeechExcerptEvent || isWorkspacePanelEvent {
             guard let requestId, historyContinuations[requestId] != nil else { return }
             if isSpeechExcerptEvent {
                 dispatchSpeechExcerptEvent(type: type, requestId: requestId, payload: payload)
             } else if isMemoryPanelEvent {
                 dispatchMemoryEvent(type: type, requestId: requestId, payload: payload)
+            } else if isWorkspacePanelEvent {
+                dispatchWorkspaceEvent(type: type, requestId: requestId, payload: payload)
             } else {
                 dispatchHistoryEvent(type: type, requestId: requestId, payload: payload)
             }
@@ -2018,6 +2191,10 @@ final class YishuAgentRuntimeClient {
             let isMemory = pending?.kind == .memoryList
                 || pending?.kind == .memoryForget
                 || pending?.kind == .memoryRemember
+            let isWorkspace = pending?.kind == .workspaceGrant
+                || pending?.kind == .workspaceRevoke
+                || pending?.kind == .workspaceList
+                || pending?.kind == .workspaceApprove
             if pending?.kind == .speechExcerpt {
                 failHistoryRequest(
                     requestId,
@@ -2030,6 +2207,13 @@ final class YishuAgentRuntimeClient {
                     requestId,
                     error: YishuAgentRuntimeClientError.memoryFailed(
                         (message?.isEmpty == false) ? message! : YishuPersonalNotesCopy.notSaved
+                    )
+                )
+            } else if isWorkspace {
+                failHistoryRequest(
+                    requestId,
+                    error: YishuAgentRuntimeClientError.workspaceFailed(
+                        (message?.isEmpty == false) ? message! : WorkspaceSettingsCopy.failed
                     )
                 )
             } else {
@@ -2446,6 +2630,111 @@ final class YishuAgentRuntimeClient {
         default:
             break
         }
+    }
+
+    private func dispatchWorkspaceEvent(type: String, requestId: UUID, payload: [String: Any]) {
+        guard let pending = historyContinuations[requestId] else { return }
+        switch type {
+        case "workspace.granted":
+            guard pending.kind == .workspaceGrant else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidWorkspaceEvent)
+                return
+            }
+            guard let item = Self.decodeWorkspaceItem(payload, idKey: "workspaceId") else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidWorkspaceEvent)
+                return
+            }
+            finishHistoryRequest(requestId, value: item)
+        case "workspace.listed":
+            guard pending.kind == .workspaceList else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidWorkspaceEvent)
+                return
+            }
+            guard let rawItems = payload["items"] as? [[String: Any]] else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidWorkspaceEvent)
+                return
+            }
+            var items: [YishuWorkspaceGrantItem] = []
+            items.reserveCapacity(rawItems.count)
+            for raw in rawItems {
+                guard let item = Self.decodeWorkspaceItem(raw, idKey: "id") else {
+                    failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidWorkspaceEvent)
+                    return
+                }
+                items.append(item)
+            }
+            finishHistoryRequest(requestId, value: items)
+        case "workspace.revoked":
+            guard pending.kind == .workspaceRevoke else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidWorkspaceEvent)
+                return
+            }
+            guard
+                let idString = payload["workspaceId"] as? String,
+                let workspaceId = UUID(uuidString: idString)
+            else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidWorkspaceEvent)
+                return
+            }
+            finishHistoryRequest(
+                requestId,
+                value: YishuWorkspaceRevokeResult(
+                    workspaceId: workspaceId,
+                    alreadyGone: (payload["alreadyGone"] as? Bool) ?? false
+                )
+            )
+        case "workspace.approved":
+            guard pending.kind == .workspaceApprove else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidWorkspaceEvent)
+                return
+            }
+            guard
+                let idString = payload["workspaceId"] as? String,
+                let workspaceId = UUID(uuidString: idString)
+            else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidWorkspaceEvent)
+                return
+            }
+            finishHistoryRequest(
+                requestId,
+                value: YishuWorkspaceApproveResult(
+                    workspaceId: workspaceId,
+                    allowed: (payload["allowed"] as? Bool) ?? true
+                )
+            )
+        case "workspace.failed":
+            let message = (payload["message"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            failHistoryRequest(
+                requestId,
+                error: YishuAgentRuntimeClientError.workspaceFailed(
+                    (message?.isEmpty == false) ? message! : WorkspaceSettingsCopy.failed
+                )
+            )
+        default:
+            break
+        }
+    }
+
+    private static func decodeWorkspaceItem(
+        _ payload: [String: Any],
+        idKey: String
+    ) -> YishuWorkspaceGrantItem? {
+        guard
+            let idString = payload[idKey] as? String,
+            let id = UUID(uuidString: idString),
+            let displayName = payload["displayName"] as? String
+        else {
+            return nil
+        }
+        let capabilities = (payload["capabilities"] as? [String]) ?? []
+        return YishuWorkspaceGrantItem(
+            id: id,
+            displayName: String(displayName.prefix(80)),
+            capabilities: capabilities,
+            createdAt: parseISO8601(payload["createdAt"] as? String) ?? Date(),
+            trashApproved: (payload["trashApproved"] as? Bool) ?? false
+        )
     }
 
     private func dispatchSpeechExcerptEvent(type: String, requestId: UUID, payload: [String: Any]) {
@@ -3469,6 +3758,65 @@ private struct YishuSpeechExcerptCommand: Encodable {
 private struct YishuSpeechExcerptPayload: Encodable {
     let visibleText: String
     let modelPreference: YishuModelPreference
+}
+
+private struct YishuWorkspaceGrantCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuWorkspaceGrantPayload
+}
+
+private struct YishuWorkspaceGrantPayload: Encodable {
+    let workspaceId: UUID
+    let displayName: String
+    let rootPath: String
+    let sessionScope: YishuSessionScope
+}
+
+private struct YishuWorkspaceRevokeCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuWorkspaceRevokePayload
+}
+
+private struct YishuWorkspaceRevokePayload: Encodable {
+    let workspaceId: UUID
+    let sessionScope: YishuSessionScope
+}
+
+private struct YishuWorkspaceListCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuWorkspaceListPayload
+}
+
+private struct YishuWorkspaceListPayload: Encodable {
+    let sessionScope: YishuSessionScope
+}
+
+private struct YishuWorkspaceApproveCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuWorkspaceApprovePayload
+}
+
+private struct YishuWorkspaceApprovePayload: Encodable {
+    let workspaceId: UUID
+    let op: String
+    let allowed: Bool
+    let sessionScope: YishuSessionScope
 }
 
 private struct YishuAuthStatusCommand: Encodable {

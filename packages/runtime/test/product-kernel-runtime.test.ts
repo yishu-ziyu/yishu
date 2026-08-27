@@ -4,9 +4,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { createYishuKernel } from "@yishu/kernel";
+import { createYishuKernel, grantIsActive } from "@yishu/kernel";
 import { MockAgentRuntime } from "../src/mock-runtime.js";
 import { ProductKernelRuntime } from "../src/product-kernel-runtime.js";
+import { createFileTool } from "../src/files/file-tool.js";
+import { resolveWorkspaceRoot } from "../src/files/path-guard.js";
 import { ComputerActionError, type ComputerUsePort } from "../src/computer-use-port.js";
 import {
   PROTOCOL_VERSION,
@@ -3431,6 +3433,78 @@ test("memory.remember writes personal notes through the same store; empty and un
   } finally {
     kernel.store.searchMemory = originalSearch;
   }
+});
+
+test("workspace.grant populates the file-tool ledger; revoke stops writes", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const root = await mkdtemp(path.join(tmpdir(), "yishu-pkr-ws-"));
+  const workspaceId = randomUUID();
+  const grantEvents: RuntimeEvent[] = [];
+  await runtime.grantWorkspace({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "workspace.grant",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {
+      workspaceId,
+      displayName: "验收",
+      rootPath: root,
+      sessionScope: { kind: "personal" },
+    },
+  }, (event) => grantEvents.push(event));
+  const granted = grantEvents.find((event) => event.type === "workspace.granted");
+  assert.ok(granted);
+  assert.equal((granted?.payload as { workspaceId?: string }).workspaceId, workspaceId);
+  assert.equal((granted?.payload as { rootPath?: string }).rootPath, undefined);
+  const stored = kernel.workspaces.get(workspaceId);
+  assert.ok(stored);
+  assert.equal(grantIsActive(stored), true);
+
+  const tool = createFileTool({
+    ledger: kernel.workspaces,
+    resolveRoot: resolveWorkspaceRoot,
+    scope: { kind: "personal" },
+  });
+  await tool.execute("1", {
+    op: "create_text",
+    workspaceId,
+    path: "note.txt",
+    content: "alpha\n",
+  } as never);
+  const read = await tool.execute("2", { op: "read_text", workspaceId, path: "note.txt" } as never);
+  assert.match(read.content[0]?.type === "text" ? read.content[0].text : "", /^alpha/);
+
+  const listed: RuntimeEvent[] = [];
+  await runtime.listWorkspaces({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "workspace.list",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { sessionScope: { kind: "personal" } },
+  }, (event) => listed.push(event));
+  const items = (listed.find((event) => event.type === "workspace.listed")?.payload as {
+    items?: Array<{ id: string; rootPath?: string }>;
+  })?.items ?? [];
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.id, workspaceId);
+  assert.equal(items[0]?.rootPath, undefined);
+
+  await runtime.revokeWorkspace({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "workspace.revoke",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { workspaceId, sessionScope: { kind: "personal" } },
+  }, () => undefined);
+  assert.equal(grantIsActive(kernel.workspaces.get(workspaceId)!), false);
+  await assert.rejects(
+    () => tool.execute("3", { op: "create_text", workspaceId, path: "later.txt", content: "no" } as never),
+    /not active/,
+  );
 });
 
 class CapturingRuntime implements AgentRuntime {

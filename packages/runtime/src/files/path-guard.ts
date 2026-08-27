@@ -14,6 +14,15 @@ function normalizeRoot(rootPath: string): string {
   return path.resolve(rootPath);
 }
 
+/** Map a ledger rootPathReference to a local folder. Absolute paths only. */
+export function resolveWorkspaceRoot(reference: string): string {
+  const trimmed = reference.trim();
+  if (trimmed.length === 0 || !path.isAbsolute(trimmed)) {
+    throw new WorkspacePathError("Workspace root must be an absolute path.");
+  }
+  return path.resolve(trimmed);
+}
+
 export function joinWorkspacePath(rootPath: string, relativePath: string): string {
   if (path.isAbsolute(relativePath)) {
     throw new WorkspacePathError("Workspace paths must be relative to the granted root.");

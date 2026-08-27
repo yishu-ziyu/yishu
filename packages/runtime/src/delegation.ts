@@ -58,6 +58,7 @@ import { wrapUntrustedContent } from "./untrusted-content.js";
 import { createWebSearchTool } from "./web-search-tool.js";
 import { createBrowserTool } from "./browser-tool.js";
 import { createFileTool } from "./files/file-tool.js";
+import { resolveWorkspaceRoot } from "./files/path-guard.js";
 import { createResearchToolset } from "./research/research-tools.js";
 
 /** Delivery metadata describing what kind of result this is — never a task status. */
@@ -395,6 +396,7 @@ export class DelegationCoordinator {
   private readonly childConversations = new Map<string, string>();
   private readonly researchTools = createResearchToolset();
   private readonly fileTools = new Map<string, ToolDefinition>();
+  private readonly trashApprovals = new Set<string>();
   private readonly runningChildren = new Set<Promise<void>>();
   private readonly runningChildrenByTaskId = new Map<string, RunningChild>();
   private presenceSink: ((update: DelegatedTaskPresenceUpdate) => void) | undefined;
@@ -413,6 +415,22 @@ export class DelegationCoordinator {
 
   setPresenceSink(sink?: (update: DelegatedTaskPresenceUpdate) => void): void {
     this.presenceSink = sink;
+  }
+
+  isTrashApproved(workspaceId: string): boolean {
+    return this.trashApprovals.has(workspaceId);
+  }
+
+  approveTrash(workspaceId: string, allowed: boolean): boolean {
+    const grant = this.kernel.workspaces.get(workspaceId);
+    if (grant === undefined) return false;
+    if (allowed) this.trashApprovals.add(workspaceId);
+    else this.trashApprovals.delete(workspaceId);
+    return true;
+  }
+
+  clearTrashApproval(workspaceId: string): void {
+    this.trashApprovals.delete(workspaceId);
   }
 
   /** Register the active Main turn so the delegate tool can link parentage. */
@@ -504,9 +522,10 @@ export class DelegationCoordinator {
     if (cached !== undefined) return cached;
     const tool = createFileTool({
       ledger: this.kernel.workspaces,
-      resolveRoot: (reference) => reference,
+      resolveRoot: resolveWorkspaceRoot,
       scope: this.scopeFor(conversationId),
       writeAccess,
+      approved: (op, workspaceId) => op === "trash" && this.trashApprovals.has(workspaceId),
     });
     this.fileTools.set(conversationId, tool);
     return tool;

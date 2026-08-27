@@ -6,8 +6,16 @@ export {
   createWorkspaceLedger,
   requireActiveGrant,
 } from "./workspace/workspace-ledger.js";
-export type { WorkspaceLedger, CreateWorkspaceGrantInput } from "./workspace/workspace-ledger.js";
-export { grantIsActive, assertGrantMatchesScope } from "./workspace/workspace-grant.js";
+export type {
+  WorkspaceLedger,
+  CreateWorkspaceGrantInput,
+  IngestWorkspaceGrantInput,
+} from "./workspace/workspace-ledger.js";
+export {
+  grantIsActive,
+  assertGrantMatchesScope,
+  PERSONAL_WORKSPACE_CAPABILITIES,
+} from "./workspace/workspace-grant.js";
 export type { WorkspaceGrant, WorkspaceCapability } from "./workspace/workspace-grant.js";
 export { createResearchLedger } from "./research/research-ledger.js";
 export type { ResearchLedger } from "./research/research-ledger.js";
