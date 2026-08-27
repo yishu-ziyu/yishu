@@ -38,11 +38,12 @@ final class YishuContextFrameCollector {
                 // either available as its own image or omitted altogether.
                 warnings.append("active-window-capture-unavailable")
             }
-        }
-        do {
-            screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-        } catch {
-            warnings.append("screen-capture-unavailable:\(compactError(error))")
+        } else {
+            do {
+                screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+            } catch {
+                warnings.append("screen-capture-unavailable:\(compactError(error))")
+            }
         }
 
         let screenshots: [YishuScreenshotContext]
