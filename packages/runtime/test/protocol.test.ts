@@ -675,6 +675,14 @@ test("grounded prompt includes evidence but never screenshot bytes", () => {
   assert.doesNotMatch(prompt, /c2NyZWVu/);
 });
 
+test("grounded prompt includes the local clock as evidence, not an answer script", () => {
+  const prompt = buildGroundedPrompt(makeTurnStartCommand());
+  assert.match(prompt, /本机当前时间：/);
+  assert.match(prompt, /星期/);
+  assert.doesNotMatch(prompt, /问今天、现在、星期几/);
+  assert.doesNotMatch(prompt, /不要说没有实时日期/);
+});
+
 test("grounded prompt wraps hostile English context as untrusted data", () => {
   const command = makeTurnStartCommand();
   command.payload.contextFrame.activeWindow!.value.title =
@@ -791,6 +799,7 @@ test("Yishu persona keeps agency without leaking private reflection", () => {
   assert.match(YISHU_SYSTEM_PROMPT, /搜索摘要不是答案/);
   assert.match(YISHU_SYSTEM_PROMPT, /光球/);
   assert.match(YISHU_SYSTEM_PROMPT, /\[POINT:x,y:标签\]/);
+  assert.match(YISHU_SYSTEM_PROMPT, /口播正文必须有字/);
   assert.match(YISHU_SYSTEM_PROMPT, /image dimensions/);
   assert.match(YISHU_SYSTEM_PROMPT, /numberedTargets/);
   assert.match(YISHU_SYSTEM_PROMPT, /targetId/);

@@ -124,6 +124,39 @@ test("a silent model stream fails instead of hanging past the first-byte deadlin
   assert.equal(session.agent.state.errorMessage, "Model stream timed out waiting for the first byte.");
 });
 
+test("MiniMax content on the finish chunk is spoken", async (t) => {
+  const fetchStub = installFetchStub(() => okStream(sseBody([
+    `data: ${JSON.stringify({
+      choices: [{ delta: { role: "assistant", content: "", reasoning_content: "hidden" } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      choices: [{ delta: { content: "今天是星期五。" }, finish_reason: "stop" }],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ])));
+  t.after(fetchStub.restore);
+
+  const { session } = await createYishuAgentSession({
+    model: MODEL,
+    providerRuntime,
+    systemPrompt: "PERSONA",
+    customTools: [],
+  });
+  t.after(() => session.dispose());
+
+  let spoken = "";
+  const unsubscribe = session.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      spoken += event.assistantMessageEvent.delta;
+    }
+  });
+  t.after(unsubscribe);
+
+  await session.prompt("今天星期几？");
+  assert.equal(spoken, "今天是星期五。");
+  assert.equal(session.agent.state.errorMessage, null);
+});
+
 test("first-byte timeout does not abort a stream that already started speaking", async (t) => {
   const fetchStub = installFetchStub(() => okStream(delayedRestBody(
     [`data: ${JSON.stringify({ choices: [{ delta: { content: "先" } }] })}\n\n`],

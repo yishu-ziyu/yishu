@@ -113,8 +113,6 @@ final class StepFunStreamingTranscriptionProvider: BuddyTranscriptionProvider {
         configuration.isAvailable ? "阶跃 StepFun Streaming" : fallbackProvider.displayName
     }
 
-    let requiresSpeechRecognitionPermission = false
-
     /// The provider is always usable because the buffered provider is the
     /// transparent fallback. This flag therefore describes the provider as a
     /// whole, not whether the optional stream transport is enabled.

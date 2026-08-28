@@ -2007,8 +2007,6 @@ final class CompanionManager: ObservableObject {
                     updateDraftText: { [weak self] partialText in
                         guard let self else { return }
                         guard self.voiceState == .listening else { return }
-                        // Apple Speech shadow partials are display/prewarm input
-                        // only; they never submit, actuate, or enter Pi/TTS.
                         self.livePartialTranscript = partialText
                         self.recordShadowPartial(traceID: voiceTurnTraceID)
                         self.startDirectClickPrewarmIfEligible(
@@ -2615,7 +2613,7 @@ final class CompanionManager: ObservableObject {
             phase: "asr_partial",
             deltaMS: 0,
             totalMS: totalMS,
-            reason: "shadow_partial_count_\(partialTranscriptCount)"
+            reason: "asr_partial_count_\(partialTranscriptCount)"
         )
     }
 

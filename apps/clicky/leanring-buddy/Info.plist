@@ -12,8 +12,6 @@
 	<string>奕枢需要自动化访问「备忘录」，以便在你明确要求时新建备忘录。</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>奕枢需要录屏权限，以便在你按快捷键时截取当前屏幕并据此回答。</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>奕枢需要语音识别权限，以便把你说的话转成文字（本地回退时使用）。</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

@@ -11,7 +11,6 @@ import AppKit
 import AVFoundation
 import Combine
 import Foundation
-import Speech
 
 enum BuddyPushToTalkShortcut {
     enum ShortcutOption {
@@ -201,7 +200,6 @@ enum BuddyPushToTalkShortcut {
 
 enum BuddyDictationPermissionProblem {
     case microphoneAccessDenied
-    case speechRecognitionDenied
 }
 
 private enum BuddyDictationStartSource {
@@ -233,7 +231,6 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     )
     @Published private(set) var microphoneButtonRecordingStartedAt: Date?
     @Published private(set) var transcriptionProviderDisplayName = ""
-    @Published private(set) var lastTranscriptSource: BuddyHybridTranscriptionSource?
     @Published var lastErrorMessage: String?
     @Published private(set) var currentPermissionProblem: BuddyDictationPermissionProblem?
 
@@ -255,32 +252,17 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     }
 
     var needsInitialPermissionPrompt: Bool {
-        if transcriptionProvider.requiresSpeechRecognitionPermission {
-            return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
-                || SFSpeechRecognizer.authorizationStatus() == .notDetermined
-        }
-
-        return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+        AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
     }
 
     private let transcriptionProvider: any BuddyTranscriptionProvider
     private let audioEngine = AVAudioEngine()
     private var activeTranscriptionSession: (any BuddyStreamingTranscriptionSession)?
-    private var activeHybridTranscriptionSession: (any BuddyHybridTranscriptionSession)?
     private var activeTranscriptionToken: BuddyTranscriptionSessionToken?
     private var nextTranscriptionTokenValue: UInt64 = 0
-    private var nextTranscriptionSequenceValue: UInt64 = 0
-    private var hybridStateMachine = BuddyHybridTranscriptionStateMachine()
-    private var activeSessionUsesHybridProvider = false
     private var activeStartSource: BuddyDictationStartSource?
     private var draftCallbacks: BuddyDictationDraftCallbacks?
     private var draftTextBeforeCurrentDictation = ""
-    /// Shadow partials are display/prewarm input only. Keep them separate from
-    /// text that is allowed to complete a turn or reach Pi/TTS/actuation.
-    private var latestShadowPartialText = ""
-    /// A final from StepFun or the explicitly allowed Apple fallback. This is
-    /// the only transcript that may be handed to the completion path.
-    private var latestAuthoritativeTranscriptText = ""
     private var latestRecognizedText = ""
     private var shouldAutomaticallySubmitFinalDraft = false
     private var hasFinishedCurrentDictationSession = false
@@ -292,16 +274,6 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     /// Timestamp of the last completed permission request, used to debounce
     /// rapid follow-up requests that arrive before macOS updates its cache.
     private var lastPermissionRequestCompletedAt: Date?
-
-    /// Selects only a final/buffered transcript for the hybrid timeout path.
-    /// The shadow argument is intentionally ignored: a partial is never a
-    /// fallback transcript and must not cross the submit boundary.
-    static func authoritativeHybridFallbackText(
-        authoritativeText: String,
-        shadowPartialText _: String
-    ) -> String {
-        authoritativeText.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     /// Product submit text for a finished dictation turn.
     /// Non-empty transcript is accepted only when the capture had audible power
@@ -331,27 +303,17 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         self.contextualKeyterms = contextualKeyterms
     }
 
-    private func startHybridTurn() -> BuddyTranscriptionSessionToken {
+    private func startTranscriptionTurn() -> BuddyTranscriptionSessionToken {
         nextTranscriptionTokenValue &+= 1
         if nextTranscriptionTokenValue == 0 {
             nextTranscriptionTokenValue = 1
         }
-        nextTranscriptionSequenceValue = 0
         let token = BuddyTranscriptionSessionToken(
             token: nextTranscriptionTokenValue,
             generation: nextTranscriptionTokenValue
         )
-        _ = hybridStateMachine.start(token: token)
         activeTranscriptionToken = token
         return token
-    }
-
-    private func nextTranscriptionSequence() -> UInt64 {
-        nextTranscriptionSequenceValue &+= 1
-        if nextTranscriptionSequenceValue == 0 {
-            nextTranscriptionSequenceValue = 1
-        }
-        return nextTranscriptionSequenceValue
     }
 
     func startPersistentDictationFromMicrophoneButton(
@@ -407,13 +369,6 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
-        if activeSessionUsesHybridProvider,
-           let token = activeTranscriptionToken {
-            let effects = hybridStateMachine.reduce(
-                .cancel(token: token, sequence: nextTranscriptionSequence())
-            )
-            applyHybridEffects(effects)
-        }
         activeTranscriptionSession?.cancel()
 
         resetSessionState()
@@ -436,7 +391,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             // the app forward, we can safely continue into the permission check.
         }
 
-        let hasPermissions = await requestMicrophoneAndSpeechPermissionsWithoutDuplicatePrompts()
+        let hasPermissions = await requestDictationPermissionsWithoutDuplicatePrompts()
         isPreparingToRecord = false
 
         if hasPermissions {
@@ -476,7 +431,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let startRequestIdentifier = UUID()
         pendingStartRequestIdentifier = startRequestIdentifier
 
-        guard await requestMicrophoneAndSpeechPermissionsWithoutDuplicatePrompts() else {
+        guard await requestDictationPermissionsWithoutDuplicatePrompts() else {
             print("🎙️ BuddyDictationManager: permissions missing or denied")
             isPreparingToRecord = false
             return
@@ -492,14 +447,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             return
         }
 
-        let transcriptionToken = startHybridTurn()
-        activeSessionUsesHybridProvider = transcriptionProvider is any BuddyHybridTranscriptionProvider
+        let transcriptionToken = startTranscriptionTurn()
 
         draftTextBeforeCurrentDictation = currentDraftText
-        latestShadowPartialText = ""
-        latestAuthoritativeTranscriptText = ""
         latestRecognizedText = ""
-        lastTranscriptSource = nil
         draftCallbacks = BuddyDictationDraftCallbacks(
             updateDraftText: updateDraftText,
             submitDraftText: submitDraftText
@@ -573,14 +524,6 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
 
-        let isHybridTurn = activeSessionUsesHybridProvider
-        let hybridToken = activeTranscriptionToken
-        if isHybridTurn, let hybridToken {
-            let effects = hybridStateMachine.reduce(
-                .release(token: hybridToken, sequence: nextTranscriptionSequence())
-            )
-            applyHybridEffects(effects)
-        }
         activeTranscriptionSession?.requestFinalTranscript()
 
         finalizeFallbackWorkItem?.cancel()
@@ -590,16 +533,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 guard let self,
                       let expectedToken,
                       self.activeTranscriptionToken == expectedToken else { return }
-                if isHybridTurn, let hybridToken {
-                    self.applyHybridEffects(self.hybridStateMachine.reduce(
-                        .timeout(token: hybridToken, sequence: self.nextTranscriptionSequence())
-                    ))
-                } else {
-                    self.finishCurrentDictationSessionIfNeeded(
-                        shouldSubmitFinalDraft: shouldSubmitFinalDraftWhenFallbackTriggers,
-                        expectedToken: expectedToken
-                    )
-                }
+                self.finishCurrentDictationSessionIfNeeded(
+                    shouldSubmitFinalDraft: shouldSubmitFinalDraftWhenFallbackTriggers,
+                    expectedToken: expectedToken
+                )
             }
         }
         finalizeFallbackWorkItem = fallbackWorkItem
@@ -612,93 +549,37 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private func startRecognitionSession(token: BuddyTranscriptionSessionToken) async throws {
         activeTranscriptionSession?.cancel()
         activeTranscriptionSession = nil
-        activeHybridTranscriptionSession = nil
 
         print("🎙️ BuddyDictationManager: opening transcription provider \(transcriptionProvider.displayName)")
 
-        let activeTranscriptionSession: any BuddyStreamingTranscriptionSession
-        if let hybridProvider = transcriptionProvider as? any BuddyHybridTranscriptionProvider {
-            activeSessionUsesHybridProvider = true
-            let hybridSession = try await hybridProvider.startHybridStreamingSession(
-                keyterms: buildTranscriptionKeyterms(),
-                onApplePartial: { [weak self] transcriptText in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.activeTranscriptionToken == token else { return }
-                        self.applyHybridEffects(self.hybridStateMachine.reduce(
-                            .partial(
-                                token: token,
-                                sequence: self.nextTranscriptionSequence(),
-                                text: transcriptText
-                            )
-                        ))
-                    }
-                },
-                onStepFunFinal: { [weak self] transcriptText in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.activeTranscriptionToken == token else { return }
-                        self.applyHybridEffects(self.hybridStateMachine.reduce(
-                            .final(
-                                token: token,
-                                sequence: self.nextTranscriptionSequence(),
-                                source: .stepFunAuthoritative,
-                                text: transcriptText
-                            )
-                        ))
-                    }
-                },
-                onAppleFinal: { [weak self] transcriptText in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.activeTranscriptionToken == token else { return }
-                        self.applyHybridEffects(self.hybridStateMachine.reduce(
-                            .final(
-                                token: token,
-                                sequence: self.nextTranscriptionSequence(),
-                                source: .appleSpeechShadow,
-                                text: transcriptText
-                            )
-                        ))
-                    }
-                },
-                onSourceError: { [weak self] source, error in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.activeTranscriptionToken == token else { return }
-                        self.handleHybridSourceError(source, error: error, token: token)
-                    }
+        let activeTranscriptionSession = try await transcriptionProvider.startStreamingSession(
+            keyterms: buildTranscriptionKeyterms(),
+            onTranscriptUpdate: { [weak self] transcriptText in
+                Task { @MainActor in
+                    guard let self, self.activeTranscriptionToken == token else { return }
+                    self.latestRecognizedText = transcriptText
                 }
-            )
-            activeHybridTranscriptionSession = hybridSession as? any BuddyHybridTranscriptionSession
-            activeTranscriptionSession = hybridSession
-        } else {
-            activeSessionUsesHybridProvider = false
-            activeTranscriptionSession = try await transcriptionProvider.startStreamingSession(
-                keyterms: buildTranscriptionKeyterms(),
-                onTranscriptUpdate: { [weak self] transcriptText in
-                    Task { @MainActor in
-                        guard let self, self.activeTranscriptionToken == token else { return }
-                        self.latestRecognizedText = transcriptText
-                    }
-                },
-                onFinalTranscriptReady: { [weak self] transcriptText in
-                    Task { @MainActor in
-                        guard let self, self.activeTranscriptionToken == token else { return }
-                        self.latestRecognizedText = transcriptText
+            },
+            onFinalTranscriptReady: { [weak self] transcriptText in
+                Task { @MainActor in
+                    guard let self, self.activeTranscriptionToken == token else { return }
+                    self.latestRecognizedText = transcriptText
 
-                        if self.isFinalizingTranscript {
-                            self.finishCurrentDictationSessionIfNeeded(
-                                shouldSubmitFinalDraft: self.shouldAutomaticallySubmitFinalDraft,
-                                expectedToken: token
-                            )
-                        }
-                    }
-                },
-                onError: { [weak self] error in
-                    Task { @MainActor in
-                        guard let self, self.activeTranscriptionToken == token else { return }
-                        self.handleRecognitionError(error, token: token)
+                    if self.isFinalizingTranscript {
+                        self.finishCurrentDictationSessionIfNeeded(
+                            shouldSubmitFinalDraft: self.shouldAutomaticallySubmitFinalDraft,
+                            expectedToken: token
+                        )
                     }
                 }
-            )
-        }
+            },
+            onError: { [weak self] error in
+                Task { @MainActor in
+                    guard let self, self.activeTranscriptionToken == token else { return }
+                    self.handleRecognitionError(error, token: token)
+                }
+            }
+        )
 
         self.activeTranscriptionSession = activeTranscriptionSession
         print("🎙️ BuddyDictationManager: provider ready, starting audio engine")
@@ -746,88 +627,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         }
     }
 
-    private func handleHybridSourceError(
-        _ source: BuddyHybridTranscriptionSource,
-        error: Error,
-        token: BuddyTranscriptionSessionToken
-    ) {
-        guard activeSessionUsesHybridProvider,
-              activeTranscriptionToken == token else {
-            return
-        }
-
-        let sequence = nextTranscriptionSequence()
-        let effects = hybridStateMachine.reduce(
-            .failure(token: token, sequence: sequence, source: source)
-        )
-        applyHybridEffects(effects)
-
-        // Apple is a shadow/fallback source; its failure should not interrupt
-        // a still-healthy StepFun turn. Surface only a total/authoritative
-        // failure through the normal manager error path.
-        if source == .stepFunAuthoritative,
-           hybridStateMachine.snapshot.stepFunFailed,
-           hybridStateMachine.snapshot.appleSpeechFailed,
-           !isFinalizingTranscript {
-            print("❌ Hybrid dictation sources failed: \(error.localizedDescription)")
-            lastErrorMessage = userFacingErrorMessage(
-                from: error,
-                fallback: "couldn't transcribe that. try again."
-            )
-        }
-    }
-
-    private func applyHybridEffects(_ effects: [BuddyHybridTranscriptionEffect]) {
-        for effect in effects {
-            switch effect {
-            case let .updatePartial(_, _, text):
-                // Apple Speech partials are a shadow stream. They may update
-                // the visible draft/overlay and prewarm OCR, but must never
-                // become the buffered final used by timeout fallback.
-                latestShadowPartialText = text
-                draftCallbacks?.updateDraftText(composeDraftText(withTranscribedText: text))
-            case let .submitFinal(_, _, source, text):
-                latestAuthoritativeTranscriptText = text
-                latestRecognizedText = text
-                lastTranscriptSource = source
-                finishCurrentDictationSessionIfNeeded(
-                    shouldSubmitFinalDraft: shouldAutomaticallySubmitFinalDraft,
-                    finalTranscriptOverride: text,
-                    finalSource: source,
-                    expectedToken: activeTranscriptionToken
-                )
-            case .armFinalTimeout:
-                break
-            case .cancelStepFun:
-                activeHybridTranscriptionSession?.cancelStepFun()
-            case .cancelAppleSpeech:
-                activeHybridTranscriptionSession?.cancelAppleSpeech()
-            case .cancelAll:
-                activeTranscriptionSession?.cancel()
-            case .startLegacyBufferedFallback:
-                // There is no safe transcript to submit when both providers
-                // produced only partials. Finish the UI lifecycle with an
-                // empty authoritative value; the empty guard below prevents
-                // Pi/TTS/actuation. Never reuse latestShadowPartialText here.
-                finishCurrentDictationSessionIfNeeded(
-                    shouldSubmitFinalDraft: shouldAutomaticallySubmitFinalDraft,
-                    finalTranscriptOverride: Self.authoritativeHybridFallbackText(
-                        authoritativeText: latestAuthoritativeTranscriptText,
-                        shadowPartialText: latestShadowPartialText
-                    ),
-                    finalSource: .legacyBuffered,
-                    expectedToken: activeTranscriptionToken
-                )
-            case .drop:
-                break
-            }
-        }
-    }
-
     private func finishCurrentDictationSessionIfNeeded(
         shouldSubmitFinalDraft: Bool,
         finalTranscriptOverride: String? = nil,
-        finalSource: BuddyHybridTranscriptionSource? = nil,
         expectedToken: BuddyTranscriptionSessionToken?
     ) {
         guard let expectedToken,
@@ -843,7 +645,6 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let finalDraftText = composeDraftText(withTranscribedText: transcriptText)
         let finalTranscriptText = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
         let currentDraftCallbacks = draftCallbacks
-        lastTranscriptSource = finalSource
 
         if !shouldSubmitFinalDraft && !finalDraftText.isEmpty {
             currentDraftCallbacks?.updateDraftText(finalDraftText)
@@ -895,14 +696,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private func resetSessionState() {
         pendingStartRequestIdentifier = UUID()
         activeTranscriptionSession = nil
-        activeHybridTranscriptionSession = nil
         activeTranscriptionToken = nil
-        activeSessionUsesHybridProvider = false
         draftCallbacks = nil
         activeStartSource = nil
         draftTextBeforeCurrentDictation = ""
-        latestShadowPartialText = ""
-        latestAuthoritativeTranscriptText = ""
         latestRecognizedText = ""
         shouldAutomaticallySubmitFinalDraft = false
         hasFinishedCurrentDictationSession = false
@@ -1009,42 +806,24 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         recordedAudioPowerHistory = updatedRecordedAudioPowerHistory
     }
 
-    private func requestMicrophoneAndSpeechPermissionsIfNeeded() async -> Bool {
+    private func requestDictationPermissionsIfNeeded() async -> Bool {
         let hasMicrophonePermission = await requestMicrophonePermissionIfNeeded()
         guard hasMicrophonePermission else {
             lastErrorMessage = "microphone permission is required for push to talk."
             return false
         }
 
-        guard transcriptionProvider.requiresSpeechRecognitionPermission else {
-            return true
-        }
-
-        let hasSpeechRecognitionPermission = await requestSpeechRecognitionPermissionIfNeeded()
-        guard hasSpeechRecognitionPermission else {
-            if transcriptionProvider is any BuddyHybridTranscriptionProvider {
-                // Apple Speech is only a shadow/fallback source. A denied or
-                // restricted Speech permission must not block the existing
-                // StepFun Token Plan final path.
-                currentPermissionProblem = nil
-                lastErrorMessage = nil
-                return true
-            }
-            lastErrorMessage = "speech recognition permission is required for push to talk."
-            return false
-        }
-
         return true
     }
 
-    /// macOS can show the microphone/speech sheet again if we accidentally fan out
+    /// macOS can show the microphone sheet again if we accidentally fan out
     /// multiple permission requests before the first one finishes. We keep exactly
     /// one in-flight request task so rapid repeat presses all await the same result.
     ///
     /// After the task completes, we skip re-requesting for a short cooldown period
     /// so macOS has time to update its authorization cache. This prevents the
     /// permission dialog from popping up again on rapid follow-up presses.
-    private func requestMicrophoneAndSpeechPermissionsWithoutDuplicatePrompts() async -> Bool {
+    private func requestDictationPermissionsWithoutDuplicatePrompts() async -> Bool {
         // If a permission request is already in-flight, reuse it.
         if let activePermissionRequestTask {
             return await activePermissionRequestTask.value
@@ -1060,7 +839,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         }
 
         let permissionRequestTask = Task { @MainActor in
-            await self.requestMicrophoneAndSpeechPermissionsIfNeeded()
+            await self.requestDictationPermissionsIfNeeded()
         }
 
         activePermissionRequestTask = permissionRequestTask
@@ -1093,36 +872,12 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         }
     }
 
-    private func requestSpeechRecognitionPermissionIfNeeded() async -> Bool {
-        switch SFSpeechRecognizer.authorizationStatus() {
-        case .authorized:
-            currentPermissionProblem = nil
-            return true
-        case .notDetermined:
-            let isGranted = await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { authorizationStatus in
-                    continuation.resume(returning: authorizationStatus == .authorized)
-                }
-            }
-            currentPermissionProblem = isGranted ? nil : .speechRecognitionDenied
-            return isGranted
-        case .denied, .restricted:
-            currentPermissionProblem = .speechRecognitionDenied
-            return false
-        @unknown default:
-            currentPermissionProblem = .speechRecognitionDenied
-            return false
-        }
-    }
-
     func openRelevantPrivacySettings() {
         let settingsURLString: String
 
         switch currentPermissionProblem {
         case .microphoneAccessDenied:
             settingsURLString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
-        case .speechRecognitionDenied:
-            settingsURLString = "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
         case nil:
             settingsURLString = "x-apple.systempreferences:com.apple.preference.security"
         }

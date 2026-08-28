@@ -36,6 +36,7 @@ const namedParameterBlockPattern = /<\s*parameter\b(?=[^>]*\bname\s*=)[^>]*>[\s\
 const orphanToolTagPattern = /<\/?\s*(?:computer[ _-]?control|computer[ _-]?action|tool[ _-]?call|function[ _-]?call|tool|function)(?:\s*=|\b)[^>]*>/gi;
 const bracketToolDirectivePattern = /\[\s*(?:tool[ _-]?call|computer[ _-]?control|function[ _-]?call)\b[^\]]*\][\s\S]*$/gi;
 const fencedBlockPattern = /```[^\n]*\n?[\s\S]*?```/g;
+const thinkBlockPattern = /<\s*think\b[^>]*>[\s\S]*?<\/\s*think\s*>/gi;
 const POINT_TAG_SOURCE = String.raw`\[POINT:\s*(?:none|(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]`;
 
 function pointTagPattern(): RegExp {
@@ -119,7 +120,7 @@ export function attachObservationalPointDirective(
 }
 
 function cleanVisibleText(rawText: string): string {
-  const withoutFences = rawText.replace(fencedBlockPattern, "");
+  const withoutFences = rawText.replace(fencedBlockPattern, "").replace(thinkBlockPattern, "");
   const withoutComputerControl = withoutFences
     .replace(functionComputerControlBlockPattern, "")
     .replace(functionBlockPattern, "")
@@ -199,6 +200,7 @@ function incompleteHiddenBlockStart(rawText: string): number | undefined {
     /<\s*parameter\b(?=[^>]*\bname\s*=)[^>]*>/g,
     /<\/\s*parameter\s*>/g,
   );
+  openToolBlock(/<\s*think\b/g, /<\/\s*think\s*>/g);
 
   let trailingBackticks = 0;
   for (let index = rawText.length - 1; index >= 0 && rawText[index] === "`"; index -= 1) {

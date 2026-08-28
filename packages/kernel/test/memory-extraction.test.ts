@@ -1,5 +1,5 @@
 /**
- * Write-side memory P1 smokes (ADR 0016, docs/runbooks/memory-p1.md).
+ * Write-side memory P1 smokes.
  * Covers: episode idempotence, candidate→sensitivity→active gating, greeting
  * prefilter, confirm-bump dedupe, deterministic-id crash replay, and the
  * private-scope/queue boundary types.

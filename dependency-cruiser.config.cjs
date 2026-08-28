@@ -1,16 +1,9 @@
 /**
- * Machine-executable architecture contract for the Yishu monorepo (docs/architecture.md).
- *
- * Encodes the dependency direction rules from docs/architecture.md and docs/decisions:
- * - The Yishu-owned product stack is one-way: Kernel <- Runtime <- Clicky.
- * - Kernel must never depend on Runtime (the execution harness) or AgentCore.
- * - AgentCore is a standalone laboratory and must not be imported by Kernel,
- *   Runtime, or the Clicky app.
- * - No circular dependencies anywhere in product source.
- *
- * This replaces the fragile token-grep portion of script/check-product-boundaries.sh
- * with a real dependency-graph contract that catches renamed imports, transitive
- * edges, and cycles that regex cannot see.
+ * Dependency direction for product source:
+ * Kernel <- Runtime <- Clicky.
+ * Kernel never imports Runtime or AgentCore.
+ * AgentCore is a laboratory: Kernel, Runtime, and Clicky must not import it.
+ * No circular dependencies in product source.
  */
 
 /** @type {import('dependency-cruiser').IConfiguration} */

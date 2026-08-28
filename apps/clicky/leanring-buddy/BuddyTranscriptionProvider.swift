@@ -15,14 +15,8 @@ protocol BuddyStreamingTranscriptionSession: AnyObject {
     func cancel()
 }
 
-protocol BuddyHybridTranscriptionSession: BuddyStreamingTranscriptionSession {
-    func cancelStepFun()
-    func cancelAppleSpeech()
-}
-
 protocol BuddyTranscriptionProvider {
     var displayName: String { get }
-    var requiresSpeechRecognitionPermission: Bool { get }
     var isConfigured: Bool { get }
     var unavailableExplanation: String? { get }
 
@@ -34,25 +28,11 @@ protocol BuddyTranscriptionProvider {
     ) async throws -> any BuddyStreamingTranscriptionSession
 }
 
-/// Source-aware contract used by the hybrid voice path. Apple Speech is a
-/// local shadow stream for partials/fallback; StepFun remains authoritative
-/// for the normal final transcript.
-protocol BuddyHybridTranscriptionProvider: BuddyTranscriptionProvider {
-    func startHybridStreamingSession(
-        keyterms: [String],
-        onApplePartial: @escaping (String) -> Void,
-        onStepFunFinal: @escaping (String) -> Void,
-        onAppleFinal: @escaping (String) -> Void,
-        onSourceError: @escaping (BuddyHybridTranscriptionSource, Error) -> Void
-    ) async throws -> any BuddyStreamingTranscriptionSession
-}
-
 enum BuddyTranscriptionProviderFactory {
     private enum PreferredProvider: String {
         case stepfun = "stepfun"
         case assemblyAI = "assemblyai"
         case openAI = "openai"
-        case appleSpeech = "apple"
     }
 
     static func makeDefaultProvider() -> any BuddyTranscriptionProvider {
@@ -68,15 +48,13 @@ enum BuddyTranscriptionProviderFactory {
         let preferredProvider = preferredProviderRawValue.flatMap(PreferredProvider.init(rawValue:))
             ?? .stepfun
 
-        let stepFunProvider = HybridSpeechStepFunTranscriptionProvider()
+        let stepFunProvider = StepFunTranscriptionProvider()
         let assemblyAIProvider = AssemblyAIStreamingTranscriptionProvider()
         let openAIProvider = OpenAIAudioTranscriptionProvider()
 
         switch preferredProvider {
         case .stepfun:
             return stepFunProvider
-        case .appleSpeech:
-            return AppleSpeechTranscriptionProvider()
         case .assemblyAI:
             if assemblyAIProvider.isConfigured {
                 return assemblyAIProvider

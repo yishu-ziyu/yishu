@@ -21,10 +21,11 @@ export const PROTOCOL_VERSION = 1 as const;
  */
 export const LOCAL_GROK_PROVIDER = "yishu-local-grok" as const;
 export const LOCAL_GROK_BASE_URL = "http://127.0.0.1:8787/v1" as const;
-export const LOCAL_GROK_DEFAULT_MODEL = "grok-4.6" as const;
+export const LOCAL_GROK_DEFAULT_MODEL = "MiniMax-M3" as const;
 
 /** Current Grok choices exposed by Clicky's model picker. */
 export const LOCAL_GROK_MODEL_IDS = [
+  "MiniMax-M3",
   "grok-4.6",
   "grok-4.5",
   "grok-4.3",

@@ -372,6 +372,24 @@ export interface BuildGroundedPromptOptions {
   currentPageNoteImageOnly?: boolean;
 }
 
+/** Wall clock as evidence. The model decides whether and how to speak it. */
+export function localClockLine(now = new Date(), timeZone = "Asia/Shanghai"): string {
+  const date = new Intl.DateTimeFormat("zh-CN", {
+    timeZone,
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(now);
+  const weekday = new Intl.DateTimeFormat("zh-CN", {
+    timeZone,
+    weekday: "long",
+  }).format(now);
+  return `本机当前时间：${date} ${weekday}。`;
+}
+
 export function buildGroundedPrompt(
   command: TurnStartCommand,
   options: BuildGroundedPromptOptions = {},
@@ -399,6 +417,7 @@ export function buildGroundedPrompt(
     ...(scan.risk === "low" ? [] : [highRiskReminder(scan)]),
     "The user is speaking while sharing the following fresh computer context.",
     "Treat observations as evidence with confidence and timestamps, not as infallible facts.",
+    localClockLine(),
     ...(options.currentPageNoteImageOnly === true
       ? ["This turn has exactly one image bound to the current source window. Use only that image for current-page action items; do not infer content from any other window."]
       : []),

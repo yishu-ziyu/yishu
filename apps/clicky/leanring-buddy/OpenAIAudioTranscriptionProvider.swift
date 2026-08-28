@@ -22,7 +22,6 @@ final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
         ?? "gpt-4o-transcribe"
 
     let displayName = "OpenAI"
-    let requiresSpeechRecognitionPermission = false
 
     var isConfigured: Bool {
         apiKey != nil

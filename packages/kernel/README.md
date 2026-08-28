@@ -1,11 +1,6 @@
 # @yishu/kernel
 
-Type: architecture
-Status: current
-Verified: dd5a362 2026-08-23
-Review: kernel 公开能力或验收标准变化时
-
-Product kernel for Yishu: typed `YishuAction` registry, `ContextTrail`, evidence store (`YishuStore`), and `ContextCapsule` handoff.
+Typed `YishuAction` registry, `ContextTrail`, evidence store (`YishuStore`), and `ContextCapsule` handoff.
 
 ## What this is
 
@@ -17,7 +12,7 @@ Product kernel for Yishu: typed `YishuAction` registry, `ContextTrail`, evidence
 - Backends: `memory` | `json` | **`sqlite`** (`node:sqlite`, default for product hosts)
 - Trail-replay skill verification (ordered app/window evidence, not mouse coords)
 - Utterance router for short voice commands
-- Short-lived `ContextCapsule` for multi-agent handoff (Yishu loop / Codex / Claude / Cua)
+- Short-lived `ContextCapsule` for multi-agent handoff
 
 ## What this is not
 
@@ -119,5 +114,3 @@ pnpm --filter @yishu/kernel test
 pnpm --filter @yishu/kernel check
 pnpm --filter @yishu/kernel build
 ```
-
-Acceptance: [docs/acceptance/v0-product-kernel.md](../../docs/acceptance/v0-product-kernel.md).
