@@ -294,13 +294,6 @@ Clicky ──▶ @yishu/kernel ──▶ @yishu/runtime / Pi
 AgentCore 不是 `AgentRuntime` 模式，`@yishu/runtime` 也不依赖本包。成熟实验能力只能按
 独立算法或产品端口迁入 Kernel/Runtime，并通过正式产品验收，不能把整套循环接回产品。
 
-能力对照与验收：
-
-- `docs/agent-book/CAPABILITY_MAP.md`
-- `docs/agent-book/TRY_ME.md`
-- `docs/agent-book/research/EVOLUTION_LOOP.md`
-- `docs/acceptance/v0-agent-book-harness.md`
-
 ## 明确未做
 
 - Ch7 模型后训练

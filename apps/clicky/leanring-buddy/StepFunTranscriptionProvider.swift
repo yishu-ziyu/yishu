@@ -97,7 +97,6 @@ final class StepFunTranscriptionProvider: BuddyTranscriptionProvider {
     private let proxyURL: URL
 
     let displayName = "阶跃 StepFun"
-    let requiresSpeechRecognitionPermission = false
 
     var isConfigured: Bool {
         // Reflect real local proxy readiness. Never pretend configured when

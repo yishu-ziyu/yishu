@@ -58,6 +58,7 @@ const MINIMAX_VOICE_DEFAULT = "shangqiuzi_v3_20260717";
 const MINIMAX_TTS_MODEL_DEFAULT = "speech-2.8-hd";
 const CHAT_MODEL_DEFAULT = "grok-4.6";
 const YISHU_RUNTIME_MODELS = new Set([
+  "MiniMax-M3",
   "grok-4.6",
   "grok-4.5",
   "grok-4.3",

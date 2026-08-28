@@ -1,5 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import os from "node:os";
+import { join } from "node:path";
 import {
   createYishuAgentSession,
   createYishuProviderRuntime,
@@ -1142,7 +1145,17 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
           ? spokenText
           : attachObservationalPointDirective(spokenText, completedOutput.pointing);
         if (authoritativeText.trim().length === 0) {
-          throw new Error("Pi completed the turn without a user-visible response.");
+          const error = new Error("Pi completed the turn without a user-visible response.");
+          Object.assign(error, {
+            yishuTurnDump: {
+              rawChars: completedOutput.rawText.length,
+              rawPreview: completedOutput.rawText.slice(0, 400),
+              visibleChars: completedOutput.visibleText.length,
+              spokenChars: spokenText.length,
+              hadPointing: completedOutput.pointing !== undefined,
+            },
+          });
+          throw error;
         }
         if (!generationState.finish()) {
           throw new Error("Pi response generation was interrupted before completion.");
@@ -1160,6 +1173,20 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       });
     } catch (error) {
       if (this.isRequestCancelled(command.requestId)) return;
+      try {
+        writeFileSync(
+          join(os.homedir(), "Library", "Application Support", "Yishu", "Diagnostics", "last-turn-error.json"),
+          `${JSON.stringify({
+            at: new Date().toISOString(),
+            message: error instanceof Error ? error.message : String(error),
+            ...((error instanceof Error && "yishuTurnDump" in error)
+              ? { dump: (error as Error & { yishuTurnDump?: unknown }).yishuTurnDump }
+              : {}),
+          })}\n`,
+        );
+      } catch {
+        // diagnostics must never take down the turn
+      }
       if (preference.provider !== LOCAL_GROK_PROVIDER) reloginProvider = preference.provider;
       emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
         code: error instanceof SteerReplacementFailedBeforeStartError

@@ -216,3 +216,26 @@ test("a you-click-it POINT sentence stays observational pointing, not a computer
   assert.deepEqual(projection.computerActions, []);
   assert.equal(projection.visibleText, "我已经指向左上角的新对话了，你自己点一下吧。");
 });
+
+test("MiniMax think blocks stay off the spoken overlay", () => {
+  const projection = projectAssistantOutput(
+    "<think>The user asked the weekday.</think>\n\n今天是星期五。",
+  );
+  assert.equal(projection.visibleText, "今天是星期五。");
+
+  const stream = new AssistantOutputStreamProjector();
+  assert.equal(stream.push("<think>hidden"), "");
+  assert.equal(stream.push("</think>\n今天是星期五。"), "今天是星期五。");
+});
+
+test("MiniMax weekday plus POINT:none keeps the spoken sentence", () => {
+  const projection = projectAssistantOutput("你好，今天是星期五。\n\n[POINT:none]");
+  assert.equal(projection.visibleText, "你好，今天是星期五。");
+  assert.equal(projection.pointing, undefined);
+});
+
+test("a POINT-only MiniMax reply has no spoken overlay", () => {
+  const projection = projectAssistantOutput("[POINT:none]");
+  assert.equal(projection.visibleText, "");
+  assert.equal(projection.pointing, undefined);
+});

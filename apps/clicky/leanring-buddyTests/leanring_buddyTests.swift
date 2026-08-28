@@ -55,17 +55,17 @@ struct leanring_buddyTests {
         #expect(sections.map(\.title) == ["本机 Grok", "ChatGPT"])
         #expect(YishuConversationModelCatalog.localModels.allSatisfy { $0.sourceLabel == "本机 Grok" })
         #expect(!YishuConversationModelCatalog.localModels.contains { $0.sourceLabel == "当前连接" })
-        #expect(YishuConversationModelCatalog.defaultModel == "grok-4.6")
-        #expect(YishuConversationModelCatalog.localModels.first?.model == "grok-4.6")
+        #expect(YishuConversationModelCatalog.defaultModel == "MiniMax-M3")
+        #expect(YishuConversationModelCatalog.localModels.first?.model == "MiniMax-M3")
         #expect(YishuAgentRuntimeClient.supportsModel(
             provider: YishuConversationModelCatalog.localProvider,
-            model: "grok-4.6"
+            model: "MiniMax-M3"
         ))
         #expect(
             YishuConversationModelCatalog.resolvedSelection(
-                storedModel: "grok-4.5",
+                storedModel: "grok-4.6",
                 storedProvider: YishuConversationModelCatalog.localProvider
-            ) == (YishuConversationModelCatalog.localProvider, "grok-4.6")
+            ) == (YishuConversationModelCatalog.localProvider, "MiniMax-M3")
         )
         #expect(
             YishuConversationModelCatalog.resolvedSelection(
@@ -1859,117 +1859,6 @@ struct leanring_buddyTests {
         #expect(transport.cancelCount == 1)
     }
 
-    @Test func hybridReducerKeepsApplePartialAndFinalOutOfNormalSubmit() {
-        var reducer = BuddyHybridTranscriptionStateMachine()
-        let token = BuddyTranscriptionSessionToken(token: 20, generation: 8)
-        _ = reducer.start(token: token)
-
-        #expect(reducer.reduce(.partial(
-            token: token,
-            sequence: 1,
-            text: "点击左上"
-        )) == [.updatePartial(token: token, sequence: 1, text: "点击左上")])
-        #expect(reducer.reduce(.final(
-            token: token,
-            sequence: 2,
-            source: .appleSpeechShadow,
-            text: "点击左上角新对话"
-        )).isEmpty)
-        #expect(reducer.snapshot.pendingAppleFinalText == "点击左上角新对话")
-    }
-
-    @Test func hybridReducerUsesStepFunFinalBeforeAppleFallback() {
-        var reducer = BuddyHybridTranscriptionStateMachine()
-        let token = BuddyTranscriptionSessionToken(token: 21, generation: 9)
-        _ = reducer.start(token: token)
-        _ = reducer.reduce(.final(
-            token: token,
-            sequence: 1,
-            source: .appleSpeechShadow,
-            text: "shadow"
-        ))
-        _ = reducer.reduce(.release(token: token, sequence: 2))
-
-        #expect(reducer.reduce(.final(
-            token: token,
-            sequence: 3,
-            source: .stepFunAuthoritative,
-            text: "authoritative"
-        )) == [
-            .submitFinal(
-                token: token,
-                sequence: 3,
-                source: .stepFunAuthoritative,
-                text: "authoritative"
-            )
-        ])
-        #expect(reducer.reduce(.final(
-            token: token,
-            sequence: 4,
-            source: .appleSpeechShadow,
-            text: "late shadow"
-        )) == [
-            .drop(token: token, sequence: 4, reason: .terminal)
-        ])
-    }
-
-    @Test func hybridReducerSubmitsAppleFinalOnlyAfterStepFunFailure() {
-        var reducer = BuddyHybridTranscriptionStateMachine()
-        let token = BuddyTranscriptionSessionToken(token: 22, generation: 10)
-        _ = reducer.start(token: token)
-        _ = reducer.reduce(.final(
-            token: token,
-            sequence: 1,
-            source: .appleSpeechShadow,
-            text: "apple fallback"
-        ))
-        _ = reducer.reduce(.failure(
-            token: token,
-            sequence: 2,
-            source: .stepFunAuthoritative
-        ))
-
-        #expect(reducer.reduce(.release(token: token, sequence: 3)) == [
-            .submitFinal(
-                token: token,
-                sequence: 3,
-                source: .appleSpeechFallback,
-                text: "apple fallback"
-            )
-        ])
-        #expect(reducer.snapshot.submissionEmitted)
-    }
-
-    @Test func hybridReducerTimeoutUsesAppleFallbackOrLegacyPath() {
-        var withApple = BuddyHybridTranscriptionStateMachine()
-        let appleToken = BuddyTranscriptionSessionToken(token: 23, generation: 11)
-        _ = withApple.start(token: appleToken)
-        _ = withApple.reduce(.release(token: appleToken, sequence: 1))
-        _ = withApple.reduce(.final(
-            token: appleToken,
-            sequence: 2,
-            source: .appleSpeechShadow,
-            text: "apple after release"
-        ))
-        #expect(withApple.reduce(.timeout(token: appleToken, sequence: 3)) == [
-            .submitFinal(
-                token: appleToken,
-                sequence: 3,
-                source: .appleSpeechFallback,
-                text: "apple after release"
-            )
-        ])
-
-        var withoutApple = BuddyHybridTranscriptionStateMachine()
-        let legacyToken = BuddyTranscriptionSessionToken(token: 24, generation: 12)
-        _ = withoutApple.start(token: legacyToken)
-        _ = withoutApple.reduce(.release(token: legacyToken, sequence: 1))
-        #expect(withoutApple.reduce(.timeout(token: legacyToken, sequence: 2)) == [
-            .cancelStepFun(token: legacyToken),
-            .startLegacyBufferedFallback(token: legacyToken)
-        ])
-    }
-
     @Test func dictationSubmitKeepsNonEmptyTranscriptWhenAudiblePowerPresent() {
         let audibleHistory: [CGFloat] = Array(repeating: 0.02, count: 40) + [0.12, 0.18, 0.09, 0.03]
         #expect(
@@ -2028,67 +1917,10 @@ struct leanring_buddyTests {
         #expect(first == second)
     }
 
-    @Test func hybridPartialOnlyNeverBecomesLegacyFallbackTranscript() {
-        #expect(
-            BuddyDictationManager.authoritativeHybridFallbackText(
-                authoritativeText: "",
-                shadowPartialText: "点击左上角新对话"
-            ).isEmpty
-        )
-        #expect(
-            BuddyDictationManager.authoritativeHybridFallbackText(
-                authoritativeText: "  StepFun final  ",
-                shadowPartialText: "partial-only text"
-            ) == "StepFun final"
-        )
-
-        var reducer = BuddyHybridTranscriptionStateMachine()
-        let token = BuddyTranscriptionSessionToken(token: 25, generation: 13)
-        _ = reducer.start(token: token)
-        _ = reducer.reduce(.partial(
-            token: token,
-            sequence: 1,
-            text: "点击左上角新对话"
-        ))
-        _ = reducer.reduce(.release(token: token, sequence: 2))
-
-        let effects = reducer.reduce(.timeout(token: token, sequence: 3))
-        #expect(!effects.contains {
-            if case .submitFinal = $0 { return true }
-            return false
-        })
-        #expect(reducer.snapshot.pendingAppleFinalText == nil)
-        #expect(reducer.snapshot.pendingStepFunFinalText == nil)
-    }
-
-    @Test func hybridProviderRoutesInjectedFakeSourcesWithoutNetwork() async throws {
-        let apple = FakeBuddyTranscriptionProvider()
-        let stepFun = FakeBuddyTranscriptionProvider()
-        let provider = HybridSpeechStepFunTranscriptionProvider(
-            appleSpeechProvider: apple,
-            stepFunProvider: stepFun
-        )
-        var partials: [String] = []
-        var stepFunFinals: [String] = []
-        var appleFinals: [String] = []
-
-        _ = try await provider.startHybridStreamingSession(
-            keyterms: [],
-            onApplePartial: { partials.append($0) },
-            onStepFunFinal: { stepFunFinals.append($0) },
-            onAppleFinal: { appleFinals.append($0) },
-            onSourceError: { _, _ in }
-        )
-
-        apple.emitPartial("shadow partial")
-        stepFun.emitFinal("stepfun final")
-        apple.emitFinal("apple final")
-
-        #expect(apple.startCount == 1)
-        #expect(stepFun.startCount == 1)
-        #expect(partials == ["shadow partial"])
-        #expect(stepFunFinals == ["stepfun final"])
-        #expect(appleFinals == ["apple final"])
+    @Test func defaultTranscriptionProviderIsStepFunOnly() {
+        let provider = BuddyTranscriptionProviderFactory.makeDefaultProvider()
+        #expect(provider.displayName == "阶跃 StepFun")
+        #expect(provider is StepFunTranscriptionProvider)
     }
 
     @Test func directClickResolutionKeyIncludesTargetAndROI() {
@@ -2235,7 +2067,6 @@ private final class FakeStepFunStreamingTransport: StepFunStreamingTransport {
 
 private final class FakeBuddyTranscriptionProvider: BuddyTranscriptionProvider {
     let displayName = "fake"
-    let requiresSpeechRecognitionPermission = false
     let isConfigured = true
     let unavailableExplanation: String? = nil
     private(set) var startCount = 0

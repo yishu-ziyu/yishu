@@ -22,7 +22,6 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
     private static let tokenProxyURL = "https://your-worker-name.your-subdomain.workers.dev/transcribe-token"
 
     let displayName = "AssemblyAI"
-    let requiresSpeechRecognitionPermission = false
 
     var isConfigured: Bool { true }
     var unavailableExplanation: String? { nil }

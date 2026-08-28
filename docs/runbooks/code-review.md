@@ -32,9 +32,8 @@ Do not review the whole dirty tree because it is dirty. Name the slice that belo
 
 1. Issue / ADR / ticket id in the commit messages.
 2. Path the human passed.
-3. Matching file under `docs/decisions/`, `docs/acceptance/`, `docs/runbooks/`, or the Goal / Hard bar written for this implement.
-4. `AGENTS.md` `## Lessons` that this change exists to keep.
-5. If none: ask. If they say there is no spec, skip the Spec agent and report `no spec available`.
+3. Goal / Hard bar written for this implement, or `AGENTS.md` `## Lessons`.
+4. If none: ask. If they say there is no spec, skip the Spec agent and report `no spec available`.
 
 Do not invent a spec from the diff.
 
@@ -42,10 +41,8 @@ Do not invent a spec from the diff.
 
 Always load, in this order (later files do not erase earlier ones; repo text wins over the smell baseline):
 
-- Root `AGENTS.md` (invariants, lessons, verification)
+- Root `AGENTS.md` (invariants, lessons, commands)
 - Nearest nested `AGENTS.md` (`apps/clicky/AGENTS.md` when Clicky is in the slice)
-- ADRs cited by the slice
-- `docs/runbooks/verification.md` and `docs/runbooks/product-development.md`
 - User coding standards: `llm-coding-behavior`, `quality-bar`, `small-coherent-diffs`
 - Fowler smell baseline from the Matt skill (judgement calls only; skip what tooling already enforces)
 

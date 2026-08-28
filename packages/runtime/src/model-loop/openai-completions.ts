@@ -14,6 +14,7 @@ export interface CompletionsRequestBody {
   tools?: Array<Record<string, unknown>>;
   stream: boolean;
   max_tokens: number;
+  reasoning_split?: boolean;
 }
 
 export interface WireToolCall {
@@ -24,7 +25,13 @@ export interface WireToolCall {
 
 export type CompletionsStreamPiece =
   | { type: "text_delta"; delta: string }
-  | { type: "message_done"; finishReason: string | null; toolCalls: readonly WireToolCall[] };
+  | {
+    type: "message_done";
+    finishReason: string | null;
+    toolCalls: readonly WireToolCall[];
+    /** Spoken text that arrived on the same SSE chunk as `finish_reason`. */
+    trailingText?: string;
+  };
 
 export type CompletionsMessageDone = Extract<CompletionsStreamPiece, { type: "message_done" }>;
 
@@ -98,6 +105,7 @@ export function buildCompletionsBody(
     messages,
     stream: true,
     max_tokens: model.maxTokens,
+    ...(model.id.startsWith("MiniMax-") ? { reasoning_split: true } : {}),
   };
   if (activeTools.length > 0) {
     body.tools = activeTools.map((tool) => ({
@@ -132,11 +140,15 @@ export class CompletionsStreamParser {
     let chunk: {
       choices?: Array<{
         finish_reason?: string | null;
-        delta?: { content?: string | null; tool_calls?: Array<{
-          index?: number;
-          id?: string;
-          function?: { name?: string; arguments?: string };
-        }> };
+        delta?: {
+          content?: string | null;
+          reasoning_content?: string | null;
+          tool_calls?: Array<{
+            index?: number;
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
+        };
       }>;
     };
     try {
@@ -146,11 +158,14 @@ export class CompletionsStreamParser {
     }
     const choice = chunk.choices?.[0];
     if (!choice) return undefined;
-    if (typeof choice.finish_reason === "string") this.finishReason = choice.finish_reason;
+    // MiniMax puts chain-of-thought on `reasoning_content`. Spoken overlay
+    // only reads `content`. Empty-string content is a heartbeat, not a reply.
     const delta = choice.delta?.content;
+    let trailingText: string | undefined;
     let piece: CompletionsStreamPiece | undefined;
     if (typeof delta === "string" && delta.length > 0) {
       this.text += delta;
+      trailingText = delta;
       piece = { type: "text_delta", delta };
     }
     for (const call of choice.delta?.tool_calls ?? []) {
@@ -164,15 +179,26 @@ export class CompletionsStreamParser {
       if (call.function?.name) accumulated.name = call.function.name;
       if (call.function?.arguments) accumulated.argumentBuffer += call.function.arguments;
     }
-    if (choice.finish_reason !== null && choice.finish_reason !== undefined) {
+    const finishReason = typeof choice.finish_reason === "string" && choice.finish_reason.length > 0
+      ? choice.finish_reason
+      : undefined;
+    if (finishReason !== undefined) {
+      this.finishReason = finishReason;
       this.done = true;
-      return { type: "message_done", finishReason: this.finishReason, toolCalls: this.snapshot() };
+      return {
+        type: "message_done",
+        finishReason: this.finishReason,
+        toolCalls: this.snapshot(),
+        ...(trailingText === undefined ? {} : { trailingText }),
+      };
     }
     return piece;
   }
 
   finish(): CompletionsMessageDone {
-    if (this.done) return { type: "message_done", finishReason: this.finishReason, toolCalls: [] };
+    if (this.done) {
+      return { type: "message_done", finishReason: this.finishReason, toolCalls: this.snapshot() };
+    }
     this.done = true;
     return { type: "message_done", finishReason: this.finishReason, toolCalls: this.snapshot() };
   }

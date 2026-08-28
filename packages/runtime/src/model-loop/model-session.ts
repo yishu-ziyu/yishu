@@ -320,6 +320,14 @@ export class YishuModelSession implements ModelSession {
               assistantMessageEvent: { type: "text_delta", delta: piece.delta },
             });
           } else if (piece?.type === "message_done") {
+            if (piece.trailingText) {
+              text += piece.trailingText;
+              this.emit({
+                type: "message_update",
+                message: this.envelope("assistant", text),
+                assistantMessageEvent: { type: "text_delta", delta: piece.trailingText },
+              });
+            }
             toolCalls = piece.toolCalls;
             streamDone = true;
             break;

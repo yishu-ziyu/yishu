@@ -61,11 +61,12 @@ struct YishuConversationModelOption: Identifiable, Equatable {
 enum YishuConversationModelCatalog {
     static let localProvider = "yishu-local-grok"
     static let localSourceLabel = YishuAccountSurfaceCopy.localGrokSource
-    static let defaultModel = "grok-4.6"
+    static let defaultModel = "MiniMax-M3"
 
     static let localModels: [YishuConversationModelOption] = [
-        .init(provider: localProvider, model: "grok-4.6", label: "Grok 4.6", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "MiniMax-M3", label: "MiniMax M3", sourceLabel: localSourceLabel),
         .init(provider: localProvider, model: "grok-4.5", label: "Grok 4.5", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "grok-4.6", label: "Grok 4.6", sourceLabel: localSourceLabel),
         .init(provider: localProvider, model: "grok-4.3", label: "Grok 4.3", sourceLabel: localSourceLabel),
         .init(provider: localProvider, model: "grok-4.20-0309-reasoning", label: "Grok 4.20 Reasoning", sourceLabel: localSourceLabel),
         .init(provider: localProvider, model: "grok-4.20-0309-non-reasoning", label: "Grok 4.20 Fast", sourceLabel: localSourceLabel),
@@ -156,7 +157,7 @@ enum YishuConversationModelCatalog {
         let candidate = storedModel?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let model = (candidate?.isEmpty == false) ? candidate! : defaultModel
-        if provider == localProvider, model == "grok-4.5" || model == "step-3.7-flash" {
+        if provider == localProvider, model == "grok-4.6" || model == "grok-4.5" {
             return (localProvider, defaultModel)
         }
         return (provider, model)

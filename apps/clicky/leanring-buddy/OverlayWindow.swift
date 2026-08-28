@@ -336,8 +336,8 @@ struct YishuPresenceView: View {
                     value: cursorPosition
                 )
 
-            // Apple Speech shadow text is a tiny listening-only hint. It is
-            // never reused as a final response, TTS input, or computer action.
+            // Live listening caption only. It is never reused as a final
+            // response, TTS input, or computer action.
             if companionManager.voiceState == .listening,
                !companionManager.livePartialTranscript.isEmpty {
                 Text(companionManager.livePartialTranscript)

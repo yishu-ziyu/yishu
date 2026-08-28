@@ -57,8 +57,8 @@ export function defaultLocalModelConfig(): LocalModelConfig {
         name: "本地模型 (BYOK)",
         baseUrl: "http://127.0.0.1:8317/v1",
         apiKeyEnv: "YISHU_LOCAL_MODEL_API_KEY",
-        models: ["grok-4.6", "grok-4.5", "grok-4.3"],
-        defaultModel: "grok-4.6",
+        models: ["MiniMax-M3", "grok-4.5", "grok-4.6", "grok-4.3"],
+        defaultModel: "MiniMax-M3",
       },
     ],
   };
