@@ -1,9 +1,17 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import {
+  aggregateDeviceTrials,
+  DEVICE_GOLDEN_SCENARIOS,
+  resolveCommittedDeviceExecution,
+  validateDeviceProvenance,
+  validateDeviceTrialEnvironment,
+  verifyDeviceObservation,
+  verifyFormalAppInstallation,
+} from "./create-device-eval-provenance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EVAL_ROOT = path.join(ROOT, "evals/capability");
@@ -17,21 +25,6 @@ function optionValue(flag, envName) {
   const index = args.indexOf(flag);
   if (index >= 0) return args[index + 1];
   return process.env[envName];
-}
-
-function sha256File(filePath) {
-  return createHash("sha256").update(readFileSync(filePath)).digest("hex");
-}
-
-function currentCommit() {
-  const result = spawnSync("git", ["rev-parse", "HEAD"], {
-    cwd: ROOT,
-    encoding: "utf8",
-  });
-  if (result.status !== 0 || !result.stdout.trim()) {
-    blockedDevice("could not resolve the current git HEAD for provenance verification");
-  }
-  return result.stdout.trim();
 }
 
 function blockedDevice(message) {
@@ -61,71 +54,102 @@ function loadDeviceConfig(selected) {
     );
   }
 
-  let runnerPath;
+  let execution;
   try {
-    const stat = statSync(runnerInput);
-    if (!stat.isFile() || (stat.mode & 0o111) === 0) throw new Error("runner is not an executable file");
-    runnerPath = realpathSync(runnerInput);
+    execution = resolveCommittedDeviceExecution(runnerInput, ROOT);
   } catch (error) {
     blockedDevice(`runner is not a readable executable: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const {
+    runnerPath,
+    runnerSha256,
+    executionDependencies,
+    executionSetSha256,
+  } = execution;
 
   let provenance;
   try {
     provenance = JSON.parse(readFileSync(provenanceInput, "utf8"));
-  } catch (error) {
-    blockedDevice(`provenance is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  } catch {
+    blockedDevice("provenance is not readable JSON");
   }
 
-  if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) {
-    blockedDevice("provenance must be a JSON object");
-  }
-  const runnerSha256 = sha256File(runnerPath);
   let provenancePath;
   try {
     provenancePath = realpathSync(provenanceInput);
+  } catch {
+    blockedDevice("provenance path is not readable");
+  }
+  let installation;
+  try {
+    installation = verifyFormalAppInstallation(ROOT);
   } catch (error) {
-    blockedDevice(`provenance path is not readable: ${error instanceof Error ? error.message : String(error)}`);
+    blockedDevice(error instanceof Error ? error.message : "formal_app_verification_failed");
   }
-  if (provenance.evidenceKind !== "device") {
-    blockedDevice("provenance.evidenceKind must be 'device'");
-  }
-  if (provenance.runnerPath !== runnerPath) {
-    blockedDevice("provenance.runnerPath does not match the requested runner");
-  }
-  if (provenance.runnerSha256 !== runnerSha256) {
-    blockedDevice("provenance.runnerSha256 does not match the runner bytes");
-  }
-  for (const field of ["generatedAt", "commit", "appBundleHash", "deviceId", "osVersion"]) {
-    if (typeof provenance[field] !== "string" || provenance[field].length === 0) {
-      blockedDevice(`provenance.${field} is required`);
-    }
-  }
-  if (!Number.isFinite(Date.parse(provenance.generatedAt))) {
-    blockedDevice("provenance.generatedAt is not an ISO timestamp");
-  }
-  if (provenance.commit !== currentCommit()) {
-    blockedDevice("provenance.commit does not match the current git HEAD");
-  }
+  const expectedCommit = installation.buildManifest.commit;
+  const validated = validateDeviceProvenance(provenance, {
+    runnerPath,
+    runnerSha256,
+    executionDependencies,
+    executionSetSha256,
+    currentCommit: expectedCommit,
+    installation,
+  });
+  if (!validated.ok) blockedDevice(validated.reason);
 
   return {
     runnerPath,
     provenancePath,
     runnerSha256,
+    executionDependencies,
+    executionSetSha256,
     provenance: {
       evidenceKind: provenance.evidenceKind,
       runnerPath: provenance.runnerPath,
       runnerSha256: provenance.runnerSha256,
+      executionDependencies: provenance.executionDependencies,
+      executionSetSha256: provenance.executionSetSha256,
       generatedAt: provenance.generatedAt,
       commit: provenance.commit,
       appBundleHash: provenance.appBundleHash,
+      bundleIdentityAlgorithm: provenance.bundleIdentityAlgorithm,
+      appPath: provenance.appPath,
+      bundleIdentifier: provenance.bundleIdentifier,
       deviceId: provenance.deviceId,
       osVersion: provenance.osVersion,
     },
+    installation,
   };
 }
 
+function verifyCurrentDeviceTrialEnvironment(deviceConfig) {
+  let currentExecution;
+  try {
+    currentExecution = resolveCommittedDeviceExecution(deviceConfig.runnerPath, ROOT);
+  } catch {
+    blockedDevice("device runner or execution dependency changed or is no longer committed");
+  }
+  if (currentExecution.runnerSha256 !== deviceConfig.runnerSha256
+    || currentExecution.executionSetSha256 !== deviceConfig.executionSetSha256) {
+    blockedDevice("device execution set changed after provenance verification");
+  }
+
+  let installation;
+  try {
+    installation = verifyFormalAppInstallation(ROOT);
+  } catch (error) {
+    blockedDevice(error instanceof Error ? error.message : "formal_app_verification_failed");
+  }
+  const validated = validateDeviceTrialEnvironment(deviceConfig.provenance, {
+    execution: currentExecution,
+    installation,
+  });
+  if (!validated.ok) blockedDevice(validated.reason);
+  return { currentExecution, installation };
+}
+
 function runDeviceTrial(scenario, deviceConfig, trial) {
+  verifyCurrentDeviceTrialEnvironment(deviceConfig);
   const runner = spawnSync(deviceConfig.runnerPath, [
     "--scenario",
     scenario.id,
@@ -138,36 +162,20 @@ function runDeviceTrial(scenario, deviceConfig, trial) {
     encoding: "utf8",
     env: { ...process.env, YISHU_E2E_DEVICE: "1" },
   });
+  verifyCurrentDeviceTrialEnvironment(deviceConfig);
   const payload = parseRunnerJson(`${runner.stdout}\n${runner.stderr}`, scenario.id);
-  if (!payload || typeof payload !== "object") {
-    blockedDevice(`runner result for ${scenario.id} must be an object`);
-  }
-  if (payload.id !== scenario.id || payload.evidenceKind !== "device") {
-    blockedDevice(`runner result for ${scenario.id} has mismatched id/evidenceKind`);
-  }
-  if (!Number.isInteger(payload.trial) || payload.trial !== trial) {
-    blockedDevice(`runner result for ${scenario.id} must match trial ${trial}`);
-  }
-  if (typeof payload.passed !== "boolean") {
-    blockedDevice(`runner result for ${scenario.id} must include boolean passed`);
-  }
-  if (!Number.isInteger(payload.falseCompletionCount) || payload.falseCompletionCount < 0) {
-    blockedDevice(`runner result for ${scenario.id} must include a non-negative falseCompletionCount`);
-  }
-  if (payload.taskTerminal !== "verified") {
-    blockedDevice(`runner result for ${scenario.id} must prove taskTerminal=verified`);
-  }
-  if (!Array.isArray(payload.receipts)
-    || !payload.receipts.includes("action_receipt")
-    || !payload.receipts.includes("fresh_readback")) {
-    blockedDevice(`runner result for ${scenario.id} must include action_receipt and fresh_readback`);
-  }
-  if (runner.status !== 0 && payload.passed) {
-    blockedDevice(`runner exited ${runner.status} while reporting passed for ${scenario.id}`);
+  const verification = verifyDeviceObservation(payload, {
+    scenarioId: scenario.id,
+    expectedContract: scenario.deviceContract,
+    trial,
+  });
+  if (!verification.ok) blockedDevice(verification.reason);
+  if (runner.status !== 0 && verification.trialStatus === "pass") {
+    blockedDevice(`runner exited ${runner.status} while reporting a verified observation for ${scenario.id}`);
   }
   return {
-    passed: payload.passed && payload.falseCompletionCount === 0,
-    falseCompletionCount: payload.falseCompletionCount,
+    trialStatus: verification.trialStatus,
+    falseCompletionCount: verification.falseCompletionCount,
     runnerExitStatus: runner.status,
   };
 }
@@ -180,21 +188,7 @@ function runDeviceScenario(scenario, deviceConfig) {
   for (let trial = 1; trial <= scenario.repeat; trial += 1) {
     trials.push(runDeviceTrial(scenario, deviceConfig, trial));
   }
-  const passCount = trials.filter((item) => item.passed).length;
-  const falseCompletionCount = trials.reduce((sum, item) => sum + item.falseCompletionCount, 0);
-  const passed = passCount === scenario.repeat && falseCompletionCount === 0;
-  return {
-    id: scenario.id,
-    category: scenario.category,
-    evidenceKind: "device",
-    status: passed ? "accepted" : "failed",
-    passed,
-    trialCount: scenario.repeat,
-    passCount,
-    falseCompletionCount,
-    forbidden: scenario.forbidden ?? [],
-    runnerExitStatus: trials.at(-1)?.runnerExitStatus ?? null,
-  };
+  return aggregateDeviceTrials(scenario, trials);
 }
 
 function parseSimpleYaml(text) {
@@ -237,10 +231,21 @@ if (files.length !== 30) {
 }
 
 const scenarios = files.map((name) => parseSimpleYaml(readFileSync(path.join(EVAL_ROOT, "scenarios", name), "utf8")));
-const selected = only ? scenarios.filter((scenario) => scenario.id === only) : scenarios;
+const goldenScenario = deviceMode && only
+  ? DEVICE_GOLDEN_SCENARIOS.find((scenario) => scenario.id === only)
+  : undefined;
+const selected = goldenScenario
+  ? [goldenScenario]
+  : only
+    ? scenarios.filter((scenario) => scenario.id === only)
+    : scenarios;
 if (selected.length === 0) {
   console.error(`capability eval: scenario ${only} not found`);
   process.exit(1);
+}
+
+if (deviceMode && selected.some((scenario) => !scenario.deviceContract)) {
+  blockedDevice("device mode requires one explicit device-golden scenario: device.t1.ptt, device.t2.ax, or device.t3.memory");
 }
 
 const deviceConfig = deviceMode ? loadDeviceConfig(selected) : undefined;
@@ -300,6 +305,7 @@ const report = {
   scenarioCount: results.length,
   oracleStatus: oracle?.status ?? null,
   ...(deviceConfig ? { deviceProvenance: deviceConfig.provenance } : {}),
+  ...(deviceConfig ? { deviceInstallation: deviceConfig.installation } : {}),
   ...(deviceConfig ? {
     trialCount: results.reduce((sum, item) => sum + item.trialCount, 0),
     passCount: results.reduce((sum, item) => sum + item.passCount, 0),

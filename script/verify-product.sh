@@ -19,6 +19,8 @@ pnpm size:check
 pnpm generated:check
 pnpm arch:check
 node script/check-capability-tools.mjs
+pnpm --dir evals/capability check
+pnpm --dir evals/capability test
 pnpm --filter @yishu/kernel check
 pnpm --filter @yishu/kernel build
 pnpm --filter @yishu/runtime check
