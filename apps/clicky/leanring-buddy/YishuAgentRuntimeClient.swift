@@ -178,6 +178,7 @@ enum YishuAgentRuntimeClientError: LocalizedError {
     case runtimeEntryMissing
     case nodeExecutableMissing
     case launchFailed
+    case credentialConfigurationUnavailable
     case runtimeNotRunning
     case unsupportedModel
     case turnFailed
@@ -213,6 +214,7 @@ enum YishuAgentRuntimeClientError: LocalizedError {
         case .runtimeEntryMissing: return "找不到奕枢后台。"
         case .nodeExecutableMissing: return "找不到可用的 Node.js。"
         case .launchFailed: return "奕枢后台没起来。"
+        case .credentialConfigurationUnavailable: return "本机模型凭据配置不可用。请完成迁移后重试。"
         case .runtimeNotRunning: return YishuPanelRuntimeCopy.headerStopped + "。"
         case .unsupportedModel: return "这个模型还接不上。"
         case .turnFailed: return "这一轮没做成。"
@@ -864,6 +866,14 @@ final class YishuAgentRuntimeClient {
         var environment = YishuVoiceProxySupervisor.minimumChildEnvironment(
             from: parentEnvironment
         )
+        do {
+            try YishuRuntimeCredentialEnvironment.applyDefaultConfiguration(to: &environment)
+        } catch {
+            // Do not pass through malformed references, missing Keychain
+            // values, or inline legacy secrets.  The error is intentionally
+            // collapsed so neither the UI nor logs can reveal config details.
+            throw YishuAgentRuntimeClientError.credentialConfigurationUnavailable
+        }
         environment["YISHU_RUNTIME_MODE"] = "pi"
         environment["YISHU_PRODUCT_KERNEL"] = "1"
         environment["YISHU_STORE_BACKEND"] = "sqlite"
