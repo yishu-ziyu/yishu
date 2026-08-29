@@ -112,6 +112,8 @@ export {
 } from "./memory/index.js";
 export type {
   MemoryLedger,
+  ExtractedMemoryInput,
+  MemoryExtractionStorePort,
   RecalledMemory,
   RecallRelevantMemoriesOptions,
   VisibleMemoryAuthoritySnapshot,

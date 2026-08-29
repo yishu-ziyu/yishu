@@ -62,9 +62,11 @@ export {
 export type {
   ExtractionRunStats,
   ExtractionSnapshot,
+  ExtractedMemoryInput,
   MemoryExtractionInput,
   MemoryExtractionModel,
   MemoryExtractionOutput,
+  MemoryExtractionStorePort,
 } from "./extraction.js";
 export {
   DEFAULT_EVEROS_IDENTITY,

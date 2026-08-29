@@ -3751,6 +3751,69 @@ type ContinuityAttachedCommand = TurnStartCommand & {
   };
 };
 
+test("ordinary turn reads cold history through the Kernel conversation ledger", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const conversationId = randomUUID();
+  const personal = { kind: "personal" } as const;
+  let opened = 0;
+  const conversations = kernel.conversations;
+  kernel.conversations = {
+    ...conversations,
+    async open(input) {
+      opened += 1;
+      assert.equal(input.conversationId, conversationId);
+      assert.deepEqual(input.expectedScope, personal);
+      return {
+        ok: true,
+        conversation: {
+          id: conversationId,
+          createdAt: "2026-08-15T10:00:00.000Z",
+          updatedAt: "2026-08-15T10:01:00.000Z",
+          status: "active",
+          sessionScope: personal,
+        },
+        turns: [
+          {
+            id: "ledger-completed",
+            sequence: 1,
+            status: "completed",
+            createdAt: "2026-08-15T10:00:00.000Z",
+            updatedAt: "2026-08-15T10:00:01.000Z",
+            userInput: "来自 Kernel ledger 的历史",
+            assistantOutput: "来自 ledger 的回答",
+          },
+          {
+            id: "ledger-failed",
+            sequence: 2,
+            status: "failed",
+            createdAt: "2026-08-15T10:00:02.000Z",
+            updatedAt: "2026-08-15T10:00:03.000Z",
+            userInput: "失败轮不能注入",
+          },
+        ],
+      };
+    },
+  };
+
+  const capturing = new CapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  const command = makeCommand("继续当前对话");
+  command.payload.conversationId = conversationId;
+  command.payload.sessionScope = personal;
+  await runtime.startTurn(command, () => undefined);
+
+  const attached = capturing.lastCommand as ContinuityAttachedCommand;
+  assert.equal(opened, 1);
+  assert.deepEqual(attached.payload.__yishuConversationHistory?.map((turn) => turn.userInput), [
+    "来自 Kernel ledger 的历史",
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(attached.payload.__yishuConversationHistory),
+    /失败轮不能注入/,
+  );
+  await runtime.dispose();
+});
+
 test("ordinary turn attaches only same-scope completed history, recent prior trail, and Learning rules", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const conversationId = randomUUID();

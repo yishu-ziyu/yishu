@@ -123,14 +123,14 @@ assert_files_in_allowlist() {
 }
 
 PKR_STORE_COUNT="$(count_source_matches 'kernel\.store\b' packages/runtime/src/product-kernel-runtime.ts)"
-if [[ "$PKR_STORE_COUNT" -gt 37 ]]; then
-  echo "Product boundary check failed: product-kernel-runtime.ts kernel.store count $PKR_STORE_COUNT exceeds 37" >&2
+if [[ "$PKR_STORE_COUNT" -gt 34 ]]; then
+  echo "Product boundary check failed: product-kernel-runtime.ts kernel.store count $PKR_STORE_COUNT exceeds 34" >&2
   exit 1
 fi
 
 RUNTIME_STORE_COUNT="$(count_source_matches 'kernel\.store\b' packages/runtime/src)"
-if [[ "$RUNTIME_STORE_COUNT" -gt 39 ]]; then
-  echo "Product boundary check failed: packages/runtime/src kernel.store count $RUNTIME_STORE_COUNT exceeds 39" >&2
+if [[ "$RUNTIME_STORE_COUNT" -gt 36 ]]; then
+  echo "Product boundary check failed: packages/runtime/src kernel.store count $RUNTIME_STORE_COUNT exceeds 36" >&2
   exit 1
 fi
 
@@ -147,4 +147,4 @@ fi
 assert_files_in_allowlist 'YishuStorePort\b' 'YishuStorePort' \
   packages/runtime/src/delegation.ts
 
-echo "Product boundary check passed: runtime kernel.store cap PKR<=37 src<=39 files<=delegation+PKR; YishuStorePort<=2 files<=delegation"
+echo "Product boundary check passed: runtime kernel.store cap PKR<=34 src<=36 files<=delegation+PKR; YishuStorePort<=2 files<=delegation"

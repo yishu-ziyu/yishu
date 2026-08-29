@@ -53,12 +53,15 @@ import {
   createMemoryLedger,
   type MemoryLedger,
 } from "./memory/ledger.js";
+import type { MemoryExtractionStorePort } from "./memory/extraction.js";
 
 export type YishuStoreBackend = "memory" | "json" | "sqlite";
 
 export interface YishuMemoryLayer {
   readonly truth: MemoryTruthLayer;
   readonly queue: ExtractionQueuePort;
+  /** Narrow durable index surface used by the asynchronous extractor. */
+  readonly extraction: MemoryExtractionStorePort;
   /** The one user-visible file. Agent writes; user edits. */
   readonly visible: VisibleMemoryFile;
 }
@@ -161,7 +164,19 @@ function buildMemoryLayer(
   } else {
     queue = new InMemoryExtractionQueue();
   }
-  return { truth, queue, visible };
+  const extraction: MemoryExtractionStorePort = {
+    searchExistingClaims: async (scopeKey) => resolved.store.searchMemory("", {
+      scope: scopeKey,
+      minConfidence: 0,
+    }),
+    addExtractedMemory: async (input) => resolved.store.addMemory({
+      ...input,
+      source: "extraction",
+      tags: [...input.tags],
+    }),
+    confirmMemory: (id, confirmedAt) => resolved.store.confirmMemory(id, confirmedAt),
+  };
+  return { truth, queue, extraction, visible };
 }
 
 /**
@@ -179,7 +194,7 @@ export function createYishuKernel(
   const taskTruth = new TaskTruthProjector(store);
   const conversations = createConversationLedger(store);
   const contextWatches = createContextWatchLedger(store);
-  const memories = createMemoryLedger(store, memory?.visible);
+  const memories = createMemoryLedger(store, memory?.visible, memory?.truth);
   const registry = new YishuActionRegistry();
 
   const defaults: AnyYishuAction[] = [

@@ -7,9 +7,14 @@
  */
 
 import type {
-  ConversationTurn, RecalledMemory, SessionScope, TaskExecutionContract, TurnIntentFrame,
+  ConversationTurn,
+  RecalledMemory,
+  SessionScope,
+  TaskExecutionContract,
+  TurnIntentFrame,
+  VisibleMemoryAuthoritySnapshot,
 } from "@yishu/kernel";
-import { sanitizeVisibleText } from "@yishu/kernel";
+import { isVisibleFactSuppressed, sanitizeVisibleText } from "@yishu/kernel";
 import type { ContextFrame, ConversationId, RuntimeEvent, TurnStartCommand } from "./protocol.js";
 import type { RuntimeEventSink } from "./runtime-port.js";
 import type { StatusBarToolState } from "./model-loop/index.js";
@@ -176,6 +181,16 @@ export function toPromptMemorySnippet(memory: RecalledMemory): PromptMemorySnipp
     scope: memory.scope,
     authority: memory.authority ?? "derived",
   };
+}
+
+export function acceptScopedDerivedMemories(
+  rows: readonly RecalledMemory[],
+  scope: string,
+  authority?: VisibleMemoryAuthoritySnapshot,
+): RecalledMemory[] {
+  return rows.filter((row) =>
+    row.scope === scope
+    && (authority === undefined || !isVisibleFactSuppressed(authority, row.claim)));
 }
 
 type ClientEventScalar = string | number | boolean | null;
@@ -975,4 +990,3 @@ export function summarizeOutput(output: unknown): unknown {
   }
   return o;
 }
-

@@ -12,6 +12,7 @@ import {
 } from "@yishu/kernel";
 import { ProductKernelRuntime } from "../src/product-kernel-runtime.js";
 import { MockAgentRuntime } from "../src/mock-runtime.js";
+import type { TurnContextProviderFactory } from "../src/model-loop/turn-context.js";
 import {
   EverOSSidecar,
   everosEnabled,
@@ -51,7 +52,30 @@ class FakeEverOS implements EverOSMemoryPort {
   }
 }
 
-async function makeRuntime(t: TestContext, everos?: EverOSMemoryPort): Promise<ProductKernelRuntime> {
+class ContextCapturingRuntime extends MockAgentRuntime {
+  private turnContextProviderFactory: TurnContextProviderFactory | undefined;
+  assembledMemory: string | undefined;
+
+  setTurnContextProviderFactory(factory: TurnContextProviderFactory): void {
+    this.turnContextProviderFactory = factory;
+  }
+
+  override async startTurn(...args: Parameters<MockAgentRuntime["startTurn"]>): Promise<void> {
+    const [command] = args;
+    const providers = this.turnContextProviderFactory?.(
+      command.payload.sessionScope?.kind ?? "personal",
+      command.payload.conversationId ?? command.requestId,
+    );
+    this.assembledMemory = await providers?.assembleTurnMemory?.(command.payload.utterance);
+    await super.startTurn(...args);
+  }
+}
+
+async function makeRuntime(
+  t: TestContext,
+  everos?: EverOSMemoryPort,
+  inner: MockAgentRuntime = new MockAgentRuntime(),
+): Promise<ProductKernelRuntime> {
   const memoryDir = await mkdtemp(path.join(tmpdir(), "yishu-everos-mem-"));
   const storeDir = await mkdtemp(path.join(tmpdir(), "yishu-everos-store-"));
   t.after(async () => {
@@ -65,7 +89,7 @@ async function makeRuntime(t: TestContext, everos?: EverOSMemoryPort): Promise<P
     sqlitePath: path.join(storeDir, "s.sqlite"),
     memoryDir,
   });
-  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel, undefined, {
+  const runtime = new ProductKernelRuntime(inner, kernel, undefined, {
     ...(everos !== undefined ? { everos } : {}),
   });
   t.after(() => runtime.dispose());
@@ -101,6 +125,46 @@ test("ordinary completed turns are buffered in EverOS without rewriting the visi
   assert.equal(rows?.length ?? 0, 0);
   const visible = await runtime.kernel.memory?.visible.readText();
   assert.doesNotMatch(visible ?? "", /春天去优胜美地攀岩/);
+});
+
+test("fake EverOS results from another scope never reach prompt or memory.used", async (t) => {
+  const everos = new FakeEverOS();
+  everos.profileHits = [{
+    id: "ev-profile-wrong-scope",
+    claim: "另一个项目的个人资料",
+    summary: "另一个项目的个人资料",
+    source: "conversation",
+    capturedAt: "2026-08-18T10:00:00.000Z",
+    scope: "project:other",
+    confidence: 0.8,
+  }];
+  everos.searchHits = [{
+    id: "ev-search-wrong-scope",
+    claim: "另一个项目的记忆",
+    summary: "另一个项目的记忆",
+    source: "conversation",
+    capturedAt: "2026-08-18T10:00:00.000Z",
+    scope: "project:other",
+    confidence: 0.8,
+  }, {
+    id: "ev-search-missing-scope",
+    claim: "缺少范围的记忆",
+    summary: "缺少范围的记忆",
+    source: "conversation",
+    capturedAt: "2026-08-18T10:00:00.000Z",
+    scope: undefined,
+    confidence: 0.8,
+  } as unknown as RecalledMemory];
+  const inner = new ContextCapturingRuntime();
+  const runtime = await makeRuntime(t, everos, inner);
+  const events: Array<{ type: string }> = [];
+  const command = makeTurnStartCommand();
+  command.payload.utterance = "我希望你怎么回答？";
+  command.payload.conversationId = "conv-everos-wrong-scope";
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(inner.assembledMemory, undefined);
+  assert.ok(!events.some((event) => event.type === "memory.used"));
 });
 
 test("private turns never call EverOS", async (t) => {

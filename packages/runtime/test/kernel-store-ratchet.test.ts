@@ -39,8 +39,8 @@ const MEMORY_METHODS = [
   "recallForOrdinaryTurn",
 ] as const;
 const CONTEXT_WATCH_METHODS = ["observeTrailSerial", "cancelTask"] as const;
-const PKR_STORE_MAX = 37;
-const RUNTIME_SRC_STORE_MAX = 39;
+const PKR_STORE_MAX = 34;
+const RUNTIME_SRC_STORE_MAX = 36;
 const RUNTIME_SRC_STORE_PORT_MAX = 2;
 
 function countStoreTokens(source: string): number {

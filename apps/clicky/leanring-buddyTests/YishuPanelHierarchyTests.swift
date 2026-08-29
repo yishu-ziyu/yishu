@@ -21,7 +21,7 @@ struct YishuPanelHierarchyTests {
             selectedModel: "grok-4.3",
             selectedProvider: YishuConversationModelCatalog.localProvider
         )
-        #expect(selectedHidden.map(\.model) == ["grok-4.6", "grok-4.3"])
+        #expect(selectedHidden.map(\.model) == [YishuConversationModelCatalog.defaultModel, "grok-4.3"])
         #expect(
             !YishuConversationModelCatalog.moreLocalModels(
                 selectedModel: "grok-4.3",

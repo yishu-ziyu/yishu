@@ -469,6 +469,60 @@ test("startTurn prompts with grounded text and streams deltas to completion", as
   assert.ok(!events.some((event) => event.type === "turn.failed"));
 });
 
+test("expired ContextFrame fails before the model prompt and publishes no response", async (t) => {
+  const harness = createFakePiHarness();
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      current.emitTextDelta("这段回答不应该出现。");
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const command = makeCommand();
+  command.payload.contextFrame.capturedAt = "2020-01-01T00:00:00.000Z";
+  command.payload.contextFrame.expiresAt = "2020-01-01T00:00:01.000Z";
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(command, (event) => events.push(event));
+
+  assert.deepEqual(eventTypes(events), ["turn.started", "turn.failed"]);
+  assert.equal(harness.sessions[0]?.prompts.length, 0, "expired frame must not reach Pi");
+  const failed = events.at(-1)!;
+  assert.equal(failed.payload.code, "context_frame_expired");
+  assert.equal(
+    failed.payload.message,
+    "ContextFrame expired before the model prompt was admitted.",
+  );
+  assert.equal(events.some((event) => event.type === "response.delta"), false);
+  assert.equal(events.some((event) => event.type === "response.completed"), false);
+});
+
+test("materially future ContextFrame fails before the model prompt", async (t) => {
+  const harness = createFakePiHarness();
+  harness.adapterOptions.now = () => new Date("2026-08-29T00:00:00.000Z");
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      current.emitTextDelta("这段回答不应该出现。");
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const command = makeCommand();
+  command.payload.contextFrame.capturedAt = "2026-08-29T00:01:00.000Z";
+  command.payload.contextFrame.expiresAt = "2026-08-29T00:02:00.000Z";
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(command, (event) => events.push(event));
+
+  assert.deepEqual(eventTypes(events), ["turn.started", "turn.failed"]);
+  assert.equal(harness.sessions[0]?.prompts.length, 0, "future frame must not reach Pi");
+  const failed = events.at(-1)!;
+  assert.equal(failed.payload.code, "context_frame_from_future");
+  assert.equal(failed.payload.message, "ContextFrame capturedAt is too far in the future.");
+  assert.equal(events.some((event) => event.type === "response.delta"), false);
+  assert.equal(events.some((event) => event.type === "response.completed"), false);
+});
+
 test("barge-in suppresses stale output and completes only the replacement generation", async (t) => {
   const harness = createFakePiHarness();
   const oldTurnRelease = deferred();
@@ -1580,6 +1634,87 @@ test("direct click turn admits failure when the receipt failed", async (t) => {
   assert.ok(completed);
   assert.equal(completed.payload.text, "这次没点成功。");
   assert.equal(completed.payload.verified, false);
+});
+
+test("model computer turns project an unverified receipt instead of model completion language", async (t) => {
+  const harness = createFakePiHarness();
+  const events: RuntimeEvent[] = [];
+  const requested = deferred<RuntimeEvent>();
+  const sink = (event: RuntimeEvent): void => {
+    events.push(event);
+    if (event.type === "computer.action.requested") requested.resolve(event);
+  };
+  const port = new StdioComputerUsePort(sink, 30_000);
+  const { adapter, workdir } = await makeAdapter(harness, port);
+  cleanupAfter(t, adapter, workdir);
+
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      const tool = harness.capturedTools[0]!;
+      current.emitSessionEvent({
+        type: "tool_execution_start",
+        toolCallId: "tool-call-1",
+        toolName: "computer_control",
+      });
+      try {
+        await tool.execute(
+          "tool-call-1",
+          { action: "left_click", targetId: "1" },
+          undefined,
+          undefined,
+          {} as never,
+        );
+      } catch {
+        // The model receives an unverified tool result and then incorrectly
+        // claims completion; the public completion must reject that claim.
+      }
+      current.emitSessionEvent({
+        type: "tool_execution_end",
+        toolCallId: "tool-call-1",
+        toolName: "computer_control",
+        isError: false,
+      });
+      current.emitTextDelta("已经完成了。 ");
+    };
+  };
+
+  const command = makeCommand("先观察一下当前窗口，然后点击 Primary");
+  const turn = adapter.startTurn(command, sink);
+  const requestEvent = await requested.promise;
+  const payload = computerActionRequestedPayloadSchema.parse(requestEvent.payload);
+  assert.equal(payload.action, "left_click");
+  assert.equal(port.resolve({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "computer.action.result",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      actionId: payload.actionId,
+      ...(payload.attemptId === undefined ? {} : { attemptId: payload.attemptId }),
+      succeeded: true,
+      verified: false,
+      status: "unverified",
+      code: "ax_press_unverified",
+      method: "ax_press",
+      message: "AXPress was delivered, but the visible outcome was not confirmed.",
+    },
+  }), true);
+
+  await turn;
+
+  const publicResponses = events.filter(
+    (event) => event.type === "response.delta" || event.type === "response.completed",
+  );
+  assert.ok(publicResponses.length > 0);
+  for (const event of publicResponses) {
+    assert.doesNotMatch(String(event.payload.text), /完成|点好了/u);
+  }
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.ok(completed);
+  assert.equal(completed.payload.verified, false);
+  assert.equal(completed.payload.text, "已经点击，但界面结果还没确认。");
+  assert.doesNotMatch(String(completed.payload.text), /完成|点好了/u);
 });
 
 test("Pi sessions are cached per conversation identity", async (t) => {

@@ -14,6 +14,7 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: 11,
             currentWindowNumber: 11,
             capturedAt: 1_000,
+            screenshotCapturedAt: 1_000,
             now: 1_000 + 2_000_000_000
         )
         XCTAssertEqual(decision, .reuse)
@@ -31,6 +32,7 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: nil,
             currentWindowNumber: nil,
             capturedAt: 1_000,
+            screenshotCapturedAt: 1_000,
             now: 2_000
         )
         XCTAssertEqual(decision, .reuse)
@@ -48,6 +50,7 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: 11,
             currentWindowNumber: 22,
             capturedAt: 1_000,
+            screenshotCapturedAt: 1_000,
             now: 2_000
         )
         XCTAssertEqual(decision, .recaptureSceneChanged)
@@ -65,6 +68,7 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: nil,
             currentWindowNumber: 22,
             capturedAt: 1_000,
+            screenshotCapturedAt: 1_000,
             now: 2_000
         )
         let disappeared = YishuHeldScenePolicy.decide(
@@ -78,6 +82,7 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: 11,
             currentWindowNumber: nil,
             capturedAt: 1_000,
+            screenshotCapturedAt: 1_000,
             now: 2_000
         )
         XCTAssertEqual(appeared, .recaptureSceneChanged)
@@ -117,6 +122,7 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: 11,
             currentWindowNumber: 11,
             capturedAt: 1_000,
+            screenshotCapturedAt: 1_000,
             now: 2_000
         )
         XCTAssertEqual(decision, .recaptureSceneChanged)
@@ -134,6 +140,7 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: 11,
             currentWindowNumber: 11,
             capturedAt: 1_000,
+            screenshotCapturedAt: 1_000,
             now: 2_000
         )
         XCTAssertEqual(decision, .recaptureSceneChanged)
@@ -151,6 +158,7 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: 11,
             currentWindowNumber: 11,
             capturedAt: 1_000,
+            screenshotCapturedAt: 1_000,
             now: 2_000
         )
         XCTAssertEqual(decision, .recaptureActiveWindow)
@@ -169,9 +177,48 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: 11,
             currentWindowNumber: 11,
             capturedAt: capturedAt,
+            screenshotCapturedAt: capturedAt,
             now: capturedAt + YishuHeldScenePolicy.maxAgeNanoseconds + 1
         )
         XCTAssertEqual(decision, .recaptureStale)
+    }
+
+    func testRecapturesWhenSameSceneScreenshotIsOlderThanFiveSeconds() {
+        let now: UInt64 = 10_000_000_000
+        let decision = YishuHeldScenePolicy.decide(
+            requiresActiveWindowOnly: false,
+            heldTraceID: "t1",
+            turnTraceID: "t1",
+            heldFrontmost: 42,
+            currentFrontmost: 42,
+            heldDisplay: "0,0,1440,900",
+            currentDisplay: "0,0,1440,900",
+            heldWindowNumber: 11,
+            currentWindowNumber: 11,
+            capturedAt: now - 1_000_000_000,
+            screenshotCapturedAt: now - YishuHeldScenePolicy.maxScreenshotAgeNanoseconds - 1,
+            now: now
+        )
+        XCTAssertEqual(decision, .recaptureStale)
+    }
+
+    func testRecapturesWhenScreenshotBasisIsMissingEvenWithFreshMetadata() {
+        let now: UInt64 = 10_000_000_000
+        let decision = YishuHeldScenePolicy.decide(
+            requiresActiveWindowOnly: false,
+            heldTraceID: "t1",
+            turnTraceID: "t1",
+            heldFrontmost: 42,
+            currentFrontmost: 42,
+            heldDisplay: "0,0,1440,900",
+            currentDisplay: "0,0,1440,900",
+            heldWindowNumber: 11,
+            currentWindowNumber: 11,
+            capturedAt: now - 1_000_000_000,
+            screenshotCapturedAt: nil,
+            now: now
+        )
+        XCTAssertEqual(decision, .recaptureMissingBasis)
     }
 
     func testRecapturesWhenPressCaptureNeverLanded() {
@@ -186,6 +233,7 @@ final class YishuHeldScenePolicyTests: XCTestCase {
             heldWindowNumber: 11,
             currentWindowNumber: 11,
             capturedAt: nil,
+            screenshotCapturedAt: nil,
             now: 2_000
         )
         XCTAssertEqual(decision, .recaptureMissingBasis)

@@ -99,4 +99,60 @@ describe("MemoryLedger", () => {
       await rm(memoryDir, { recursive: true, force: true });
     }
   });
+
+  it("forgets the truth fact before reopen/hydrate can resurrect it", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "yishu-memory-ledger-truth-"));
+    const memoryDir = path.join(dir, "memory");
+    try {
+      const kernel = createYishuKernel({
+        storeBackend: "json",
+        storeDir: dir,
+        memoryDir,
+      });
+      const remembered = await kernel.registry.invoke("remember", {
+        caller: "voice",
+        input: { claim: "忘记后不能从 Truth 复活", scope: "personal" },
+      });
+      assert.equal(remembered.status, "verified");
+      const claim = remembered.output as { id: string; truthRef?: string };
+      assert.match(claim.truthRef ?? "", /^personal\/facts\/preferences\.md#mem:/u);
+      assert.equal((await kernel.memory!.truth.listFacts("personal")).length, 1);
+
+      const mismatch = await kernel.memories.forget({
+        id: claim.id,
+        expectedScope: PROJECT_SCOPE,
+      });
+      assert.equal(mismatch, null);
+      assert.equal((await kernel.memory!.truth.listFacts("personal")).length, 1);
+
+      const forgotten = await kernel.memories.forget({
+        id: claim.id,
+        expectedScope: "personal",
+      });
+      assert.equal(forgotten?.alreadyGone, false);
+      assert.equal((await kernel.memory!.truth.listFacts("personal")).length, 0);
+
+      const reopened = createYishuKernel({
+        storeBackend: "json",
+        storeDir: dir,
+        memoryDir,
+      });
+      await reopened.store.load();
+      const reopenedFacts = await reopened.memory!.truth.listFacts("personal");
+      assert.deepEqual(reopenedFacts, []);
+      await reopened.memories.hydrateVisible(reopenedFacts.map((fact) => fact.claim));
+      assert.doesNotMatch(
+        await readFile(path.join(memoryDir, "记忆.md"), "utf8"),
+        /忘记后不能从 Truth 复活/u,
+      );
+      assert.equal(
+        (await reopened.memories.list({ scope: "personal" })).some(
+          (row) => row.id === claim.id,
+        ),
+        false,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

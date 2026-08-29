@@ -7,6 +7,9 @@ import YishuContext
 struct YishuCapturedContext {
     let frame: YishuContextFrame
     let screenCaptures: [CompanionScreenCapture]
+    /// Monotonic time when the validated JPEG capture completed; nil means
+    /// this context has no reusable screenshot basis.
+    let screenshotCapturedAtUptimeNanoseconds: UInt64?
 }
 
 @MainActor
@@ -28,11 +31,13 @@ final class YishuContextFrameCollector {
         var warnings = snapshot.warnings
         var screenCaptures: [CompanionScreenCapture] = []
         var activeWindowCapture: CompanionWindowCapture?
+        var screenshotCaptureCompletedAtUptimeNanoseconds: UInt64?
         if activeWindowOnly, let windowNumber = snapshot.activeWindow?.value.windowNumber {
             do {
                 activeWindowCapture = try await CompanionScreenCaptureUtility.captureWindowAsJPEG(
                     windowNumber: windowNumber
                 )
+                screenshotCaptureCompletedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
             } catch {
                 // Do not fall back to the cursor display. The exact page is
                 // either available as its own image or omitted altogether.
@@ -41,6 +46,9 @@ final class YishuContextFrameCollector {
         } else {
             do {
                 screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                if !screenCaptures.isEmpty {
+                    screenshotCaptureCompletedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                }
             } catch {
                 warnings.append("screen-capture-unavailable:\(compactError(error))")
             }
@@ -66,6 +74,9 @@ final class YishuContextFrameCollector {
             )
             }
         }
+        let screenshotCapturedAtUptimeNanoseconds = screenshots.isEmpty
+            ? nil
+            : screenshotCaptureCompletedAtUptimeNanoseconds
 
         let frame = YishuContextFrame(
             capturedAt: snapshot.capturedAt,
@@ -82,7 +93,11 @@ final class YishuContextFrameCollector {
 
         do {
             try frame.validate(referenceDate: snapshot.capturedAt)
-            return YishuCapturedContext(frame: frame, screenCaptures: screenCaptures)
+            return YishuCapturedContext(
+                frame: frame,
+                screenCaptures: screenCaptures,
+                screenshotCapturedAtUptimeNanoseconds: screenshotCapturedAtUptimeNanoseconds
+            )
         } catch {
             let safeFrame = YishuContextFrame(
                 capturedAt: snapshot.capturedAt,
@@ -96,7 +111,11 @@ final class YishuContextFrameCollector {
                 numberedTargets: snapshot.numberedTargets,
                 warnings: warnings + ["context-validation-failed:\(compactError(error))"]
             )
-            return YishuCapturedContext(frame: safeFrame, screenCaptures: screenCaptures)
+            return YishuCapturedContext(
+                frame: safeFrame,
+                screenCaptures: screenCaptures,
+                screenshotCapturedAtUptimeNanoseconds: nil
+            )
         }
     }
 
@@ -187,8 +206,8 @@ final class YishuContextFrameCollector {
         )
     }
 
-    /// Keep press-time screenshots; refresh cursor, pointer path, and the
-    /// control under the cursor so a long hold still sees the latest point.
+    /// Keep a still-fresh held screenshot; refresh cursor, pointer path, and
+    /// the control under the cursor so a short hold still sees the latest point.
     func refreshLiveAttention(
         onto captured: YishuCapturedContext,
         pointerSince: Date
@@ -210,7 +229,11 @@ final class YishuContextFrameCollector {
             numberedTargets: snapshot.numberedTargets,
             warnings: snapshot.warnings
         )
-        return YishuCapturedContext(frame: frame, screenCaptures: captured.screenCaptures)
+        return YishuCapturedContext(
+            frame: frame,
+            screenCaptures: captured.screenCaptures,
+            screenshotCapturedAtUptimeNanoseconds: captured.screenshotCapturedAtUptimeNanoseconds
+        )
     }
 
     private func captureMetadata(
