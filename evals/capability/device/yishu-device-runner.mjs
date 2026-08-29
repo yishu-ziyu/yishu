@@ -99,7 +99,7 @@ const FORBIDDEN_FIELDS = new Set([
 ]);
 const RESTRICTED_ENV = Object.freeze({
   PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
-  LC_ALL: "C",
+  LC_ALL: "C.UTF-8",
 });
 
 export class DeviceRunnerError extends Error {
