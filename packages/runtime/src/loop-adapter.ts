@@ -10,6 +10,7 @@ import {
   type AnyToolDefinition,
   type ModelProviderRuntime,
   type ModelSession,
+  type PromptImage,
   type ResolvedModel,
   type ToolDefinition,
   type TurnContextProviderFactory,
@@ -18,6 +19,8 @@ import {
   AssistantOutputGenerationProjector,
   attachObservationalPointDirective,
   isDirectComputerActionUtterance,
+  parsePointDirective,
+  utteranceRequiresObservationalPointing,
 } from "./assistant-output.js";
 import { intentAllowsComputerEffect } from "./intent-frame.js";
 import {
@@ -104,6 +107,8 @@ import {
 type RuntimeModel = ResolvedModel;
 const SESSION_ABORT_TIMEOUT_MS = 2_000;
 const INTERRUPTION_STEER_TIMEOUT_MS = 30_000;
+const POINT_DIRECTIVE_REPAIR_PROMPT =
+  "请重发上一条回答。口播正文之后、回复最末尾必须追加且只追加一个合法的 [POINT:x,y:标签]；根据同一张截图给出界面元素坐标，不要解释规则，不要调用工具。";
 
 async function abortSessionWithin(session: ModelSession): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -347,6 +352,12 @@ class PiTurnGenerationState {
     return this.textByGeneration.get(generation) ?? "";
   }
 
+  resetAssistantOutput(generation: number): boolean {
+    if (!this.output.reset(generation)) return false;
+    this.textByGeneration.set(generation, "");
+    return true;
+  }
+
   isDirectAction(generation = this.currentGeneration): boolean {
     return this.directActionByGeneration.get(generation) === true;
   }
@@ -532,6 +543,16 @@ class DuplicateRequestError extends Error {
   constructor() {
     super("A turn with this request id is already active.");
     this.name = "DuplicateRequestError";
+  }
+}
+
+class PointDirectiveContractError extends Error {
+  constructor(
+    readonly code: "point_directive_missing" | "point_directive_repair_failed",
+    message: string,
+  ) {
+    super(message);
+    this.name = "PointDirectiveContractError";
   }
 }
 
@@ -1025,6 +1046,12 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         lastObservation: observationFromContextFrame(command.payload.contextFrame),
       }),
     };
+    const turnImages: readonly PromptImage[] = command.payload.contextFrame.screenshots.map((screenshot) => ({
+      type: "image" as const,
+      data: screenshot.base64Data,
+      mimeType: screenshot.mediaType,
+      label: screenshotDimensionCaption(screenshot),
+    }));
     let completedSuccessfully = false;
     let restoreTools: (() => void) | undefined;
     try {
@@ -1047,12 +1074,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
             if (accepted) generationState.markInitialPromptAdmitted();
             else generationState.rejectInitialPrompt(new Error("Initial Pi prompt preflight was rejected."));
           },
-          images: command.payload.contextFrame.screenshots.map((screenshot) => ({
-            type: "image" as const,
-            data: screenshot.base64Data,
-            mimeType: screenshot.mediaType,
-            label: screenshotDimensionCaption(screenshot),
-          })),
+          images: turnImages,
         });
 
         if (this.isRequestCancelled(command.requestId)) return;
@@ -1068,9 +1090,43 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         await generationState.awaitAdmittedReplacement();
 
         const generation = generationState.currentGeneration;
-        const completedOutput = generationState.output.complete(generation);
+        let completedOutput = generationState.output.complete(generation);
         if (completedOutput.stale) {
           throw new Error("Pi ended before the interrupted response was replaced.");
+        }
+        let pointDirective = parsePointDirective(completedOutput.rawText);
+        const isComputerTurn = generationState.isDirectAction(generation)
+          || computerActionAttempted
+          || computerTurn.actionCount > 0
+          || completedOutput.computerActions.length > 0;
+        const requiresObservationalPointing = turnImages.length > 0
+          && !isComputerTurn
+          && utteranceRequiresObservationalPointing(command.payload.utterance);
+        if (
+          requiresObservationalPointing
+          && (pointDirective === undefined || pointDirective.kind === "none")
+        ) {
+          await this.repairMissingPointDirective(
+            session,
+            generationState,
+            generation,
+            turnImages,
+          );
+          if (this.isRequestCancelled(command.requestId)) return;
+          completedOutput = generationState.output.complete(generation);
+          pointDirective = parsePointDirective(completedOutput.rawText);
+          if (pointDirective === undefined) {
+            throw new PointDirectiveContractError(
+              "point_directive_missing",
+              "我没看准屏幕上的位置，这次先不乱指。",
+            );
+          }
+          if (pointDirective.kind === "none") {
+            throw new PointDirectiveContractError(
+              "point_directive_missing",
+              "我没看准屏幕上的位置，这次先不乱指。",
+            );
+          }
         }
         const compatibilityAction = completedOutput.computerActions.at(0)
           ?? (completedOutput.pointing === undefined
@@ -1141,6 +1197,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
               visibleChars: completedOutput.visibleText.length,
               spokenChars: spokenText.length,
               hadPointing: completedOutput.pointing !== undefined,
+              hadPointDirective: pointDirective !== undefined,
             },
           });
           throw error;
@@ -1183,9 +1240,13 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
             ? "first_byte_timeout"
             : error instanceof ContextFrameFreshnessError
               ? error.code
+              : error instanceof PointDirectiveContractError
+                ? error.code
               : "pi_turn_failed",
         message: error instanceof ContextFrameFreshnessError
           ? error.message
+          : error instanceof PointDirectiveContractError
+            ? error.message
           : safeRuntimeErrorMessage(error),
         generation: Math.max(
           generationState.currentGeneration,
@@ -1527,6 +1588,32 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       };
       activeTurn.allActionsVerified = false;
       throw error;
+    }
+  }
+
+  private async repairMissingPointDirective(
+    session: ModelSession,
+    generationState: PiTurnGenerationState,
+    generation: number,
+    images: readonly PromptImage[],
+  ): Promise<void> {
+    if (!generationState.resetAssistantOutput(generation)) {
+      throw new PointDirectiveContractError(
+        "point_directive_repair_failed",
+        "屏幕回答在更新时被打断了。",
+      );
+    }
+    const previousTools = [...session.getActiveToolNames()];
+    session.setActiveToolsByName([]);
+    try {
+      await session.prompt(POINT_DIRECTIVE_REPAIR_PROMPT, { images });
+    } catch {
+      throw new PointDirectiveContractError(
+        "point_directive_repair_failed",
+        "我没看准屏幕上的位置，这次先不乱指。",
+      );
+    } finally {
+      session.setActiveToolsByName(previousTools);
     }
   }
 
