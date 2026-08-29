@@ -20,6 +20,27 @@ enum CompanionResponsePresentationPhase: Equatable {
     case message
 }
 
+/// Runtime completion owns observational pointing so the later response
+/// presentation cannot publish the same target a second time.
+enum YishuObservationalPointingPolicy {
+    enum PublicationSource {
+        case runtimeCompletion
+        case responsePresentation
+    }
+
+    static func shouldPublish(
+        from source: PublicationSource,
+        hasCoordinate: Bool,
+        isDirectClickTurn: Bool,
+        presentationTranscriptMatches: Bool
+    ) -> Bool {
+        guard case .runtimeCompletion = source else { return false }
+        return hasCoordinate
+            && !isDirectClickTurn
+            && presentationTranscriptMatches
+    }
+}
+
 @MainActor
 final class CompanionResponseOverlayViewModel: ObservableObject {
     @Published var streamingResponseText: String = ""
