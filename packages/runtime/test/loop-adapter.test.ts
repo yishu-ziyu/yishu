@@ -439,6 +439,7 @@ test("a missing or none POINT is repaired once with the same image and only the 
   assert.equal(promptCount, 2, "the missing directive gets one bounded repair");
   assert.equal(harness.sessions.length, 1);
   assert.equal(harness.sessions[0]?.prompts.length, 2);
+  assert.match(harness.sessions[0]?.prompts[1]?.text ?? "", /一句直接答案/u);
   assert.deepEqual(
     harness.sessions[0]?.prompts.map((prompt) => prompt.images),
     [

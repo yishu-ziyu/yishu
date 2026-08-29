@@ -210,6 +210,15 @@ struct YishuSentenceSpeechPipelineTests {
         #expect(spoken == ["版本 1.2，参考 https://example.com/a."])
     }
 
+    @Test func numberedListMarkerIsNotConsumedAsAnEntireSpokenSentence() {
+        let text = "1. **知识库** — 这是第一个项目。"
+
+        #expect(
+            YishuSpokenReplyBudget.prefixSentences(in: text, limit: 1)
+                == [text]
+        )
+    }
+
     @Test @MainActor func failedStreamingSpeechFallsBackToAuthoritativeFinalPresentation() async {
         var stopCount = 0
         let pipeline = YishuSentenceSpeechPipeline(

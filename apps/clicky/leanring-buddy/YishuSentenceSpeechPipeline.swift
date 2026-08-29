@@ -347,6 +347,17 @@ enum YishuSpokenReplyBudget {
             return false
         }
 
+        // Markdown ordered-list markers such as `1. ` are not sentences.
+        // Counting them against the two-sentence mouth budget made speech end
+        // immediately after saying the list number.
+        let prefixThroughPeriod = String(buffer[...index])
+        if prefixThroughPeriod.range(
+            of: #"(?:^|\n)\s*\d+\.$"#,
+            options: .regularExpression
+        ) != nil {
+            return false
+        }
+
         let tokenStart = buffer[..<index].lastIndex(where: { $0.isWhitespace })
             .map { buffer.index(after: $0) } ?? buffer.startIndex
         let token = buffer[tokenStart...index].lowercased()
