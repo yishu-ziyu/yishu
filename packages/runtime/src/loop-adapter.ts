@@ -108,7 +108,7 @@ type RuntimeModel = ResolvedModel;
 const SESSION_ABORT_TIMEOUT_MS = 2_000;
 const INTERRUPTION_STEER_TIMEOUT_MS = 30_000;
 const POINT_DIRECTIVE_REPAIR_PROMPT =
-  "请重发上一条回答。口播正文之后、回复最末尾必须追加且只追加一个合法的 [POINT:x,y:标签]；根据同一张截图给出界面元素坐标，不要解释规则，不要调用工具。";
+  "请重发上一条回答。口播正文只保留一句直接答案；之后、回复最末尾必须追加且只追加一个合法的 [POINT:x,y:标签]；根据同一张截图给出界面元素坐标，不要解释规则，不要调用工具。";
 
 async function abortSessionWithin(session: ModelSession): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;

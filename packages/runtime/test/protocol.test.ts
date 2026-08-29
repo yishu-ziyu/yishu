@@ -800,6 +800,7 @@ test("Yishu persona keeps agency without leaking private reflection", () => {
   assert.match(YISHU_SYSTEM_PROMPT, /光球/);
   assert.match(YISHU_SYSTEM_PROMPT, /\[POINT:x,y:标签\]/);
   assert.match(YISHU_SYSTEM_PROMPT, /口播正文必须有字/);
+  assert.match(YISHU_SYSTEM_PROMPT, /屏幕问答默认只说一句短答案/);
   assert.match(YISHU_SYSTEM_PROMPT, /image dimensions/);
   assert.match(YISHU_SYSTEM_PROMPT, /numberedTargets/);
   assert.match(YISHU_SYSTEM_PROMPT, /targetId/);
