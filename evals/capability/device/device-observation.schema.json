@@ -74,7 +74,7 @@
         "kind": { "const": "terminal" },
         "sequence": { "type": "integer", "minimum": 1 },
         "observedAt": { "$ref": "#/$defs/observedAt" },
-        "state": { "enum": ["verified", "failed", "unknown"] }
+        "state": { "enum": ["completed", "failed", "unknown"] }
       },
       "required": ["kind", "sequence", "observedAt", "state"],
       "additionalProperties": false

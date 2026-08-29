@@ -394,23 +394,14 @@ function pushMapped(mapped, event) {
   mapped.push({ ...event, sequence: mapped.length + 1 });
 }
 
-function modelTerminalIsVerified(event, reasons, reasonPrefix = "terminal", bindReceipt = false) {
+function validateModelTerminalShape(event, reasons, reasonPrefix, requiredAttributes) {
   let valid = true;
   if (event.status !== undefined && !["ok", "verified"].includes(event.status)) {
     pushUnique(reasons, `${reasonPrefix}_status_not_accepted`);
     valid = false;
   }
-  const requiredAttributes = bindReceipt
-    ? ["verified", "taskTerminal", "receiptHash"]
-    : ["verified", "taskTerminal"];
   if (!hasOnlyAttributes(event, requiredAttributes, [])) {
     pushUnique(reasons, `${reasonPrefix}_attributes_invalid`);
-    valid = false;
-  }
-  if (event.attributes?.verified !== true || event.attributes?.taskTerminal !== "verified") {
-    // taskTerminal is inspected only as an event-level assertion. It is never
-    // copied to the raw observation because it is an aggregate truth field.
-    pushUnique(reasons, reasonPrefix === "terminal" ? "terminal_not_verified" : `${reasonPrefix}_not_verified`);
     valid = false;
   }
   if (event.durationMs !== undefined) {
@@ -420,30 +411,63 @@ function modelTerminalIsVerified(event, reasons, reasonPrefix = "terminal", bind
   return valid;
 }
 
-function mapModelTerminal(
-  event,
-  mapped,
-  reasons,
-  counts,
-  expectedReceiptHash,
-  requireReceiptBinding = false,
-) {
+function informationAnswerTerminalIsCompleted(event, reasons, reasonPrefix = "terminal") {
+  let valid = validateModelTerminalShape(event, reasons, reasonPrefix, ["verified", "taskTerminal"]);
+  const completed = (event.attributes?.verified === true && event.attributes?.taskTerminal === "verified")
+    || (event.attributes?.verified === false && event.attributes?.taskTerminal === "unverified");
+  if (!completed) {
+    pushUnique(reasons, `${reasonPrefix}_not_completed`);
+    valid = false;
+  }
+  return valid;
+}
+
+function verifiedActionTerminalIsBoundToReceipt(event, reasons, expectedReceiptHash, reasonPrefix = "terminal") {
+  let valid = validateModelTerminalShape(
+    event,
+    reasons,
+    reasonPrefix,
+    ["verified", "taskTerminal", "receiptHash"],
+  );
+  if (event.attributes?.verified !== true || event.attributes?.taskTerminal !== "verified") {
+    pushUnique(reasons, `${reasonPrefix}_not_verified`);
+    valid = false;
+  }
+  const receiptHash = event.attributes?.receiptHash;
+  if (!isSafeHash(receiptHash) || receiptHash !== expectedReceiptHash) {
+    pushUnique(reasons, `${reasonPrefix}_receipt_mismatch`);
+    valid = false;
+  }
+  return valid;
+}
+
+function mapInformationTerminal(event, mapped, reasons, counts) {
   if (counts.modelCompleted > 0) {
     pushUnique(reasons, "duplicate_critical_event:model.completed");
     return;
   }
   counts.modelCompleted += 1;
-  const receiptHash = event.attributes?.receiptHash;
-  if (requireReceiptBinding && (!isSafeHash(receiptHash) || receiptHash !== expectedReceiptHash)) {
-    pushUnique(reasons, "terminal_receipt_mismatch");
+  if (informationAnswerTerminalIsCompleted(event, reasons)) {
+    pushMapped(mapped, {
+      kind: "terminal",
+      observedAt: event.occurredAt,
+      state: "completed",
+    });
   }
-  if (modelTerminalIsVerified(event, reasons, "terminal", requireReceiptBinding)
-    && (!requireReceiptBinding || receiptHash === expectedReceiptHash)) {
+}
+
+function mapVerifiedActionTerminal(event, mapped, reasons, counts, expectedReceiptHash) {
+  if (counts.modelCompleted > 0) {
+    pushUnique(reasons, "duplicate_critical_event:model.completed");
+    return;
+  }
+  counts.modelCompleted += 1;
+  if (verifiedActionTerminalIsBoundToReceipt(event, reasons, expectedReceiptHash)) {
     pushMapped(mapped, {
       kind: "terminal",
       observedAt: event.occurredAt,
       state: "verified",
-      ...(requireReceiptBinding ? { receiptIdHash: receiptHash } : {}),
+      receiptIdHash: event.attributes.receiptHash,
     });
   }
 }
@@ -498,7 +522,7 @@ function mapT1(events, reasons) {
         }
         break;
       case "model.completed":
-        mapModelTerminal(event, mapped, reasons, counts);
+        mapInformationTerminal(event, mapped, reasons, counts);
         break;
       default:
         break;
@@ -558,7 +582,7 @@ function mapT2(events, reasons) {
         });
       }
     } else {
-      mapModelTerminal(event, mapped, reasons, counts, actionReceiptHash, true);
+      mapVerifiedActionTerminal(event, mapped, reasons, counts, actionReceiptHash);
     }
   }
   if (counts.action !== 1) pushUnique(reasons, "required_event_count:computer.action.completed");
@@ -706,7 +730,7 @@ function mapT3(events, input, reasons) {
         if (postQueryCounts.modelCompleted > 1) {
           pushUnique(reasons, "duplicate_critical_event:model.completed_after_restart");
         }
-        if (modelTerminalIsVerified(event, reasons, "post_restart_terminal")) postQueryModel = event;
+        if (informationAnswerTerminalIsCompleted(event, reasons, "post_restart_terminal")) postQueryModel = event;
         break;
       default:
         break;
