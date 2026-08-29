@@ -80,7 +80,12 @@ export function createMemoryLedger(
       const result = await store.forgetMemory(input.id, {
         expectedScope: input.expectedScope,
       });
-      if (result !== null && !result.alreadyGone && forgotten !== undefined) {
+      if (
+        result !== null
+        && !result.alreadyGone
+        && forgotten !== undefined
+        && forgotten.scope === "personal"
+      ) {
         await visible?.removeFactsMatching(forgotten.claim);
       }
       return result;

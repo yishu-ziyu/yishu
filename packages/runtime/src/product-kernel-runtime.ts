@@ -3290,7 +3290,9 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
     };
 
-    const visible = this.kernel.memory?.visible;
+    // The one visible file is the personal projection. Project memory must
+    // come from its scoped index/engine, never from personal markdown.
+    const visible = scope === "personal" ? this.kernel.memory?.visible : undefined;
     let visibleUsed = false;
     let authority: VisibleMemoryAuthoritySnapshot | undefined;
     let derivedRecallAllowed = true;

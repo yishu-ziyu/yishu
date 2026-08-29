@@ -5,9 +5,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import {
+  BUILD_PROVENANCE_SCHEMA_VERSION,
+  sourceInputHash,
+} from "./build-provenance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "script/verify-installed-yishu-app.mjs");
+const CURRENT_HEAD = spawnSync("git", ["rev-parse", "--verify", "HEAD"], {
+  cwd: ROOT,
+  encoding: "utf8",
+}).stdout.trim();
+const CURRENT_SOURCE_INPUT_HASH = sourceInputHash(ROOT);
 const tempRoots = [];
 
 test.afterEach(() => {
@@ -21,16 +30,45 @@ function makeExecutable(filePath, content) {
   chmodSync(filePath, 0o755);
 }
 
+function makeProvenanceRepoFixture(repoRoot) {
+  const appSource = path.join(repoRoot, "apps", "clicky", "leanring-buddy");
+  mkdirSync(appSource, { recursive: true });
+  writeFileSync(path.join(appSource, "Fixture.swift"), "struct Fixture {}\n", "utf8");
+  writeFileSync(path.join(appSource, "Info.plist"), "fixture plist\n", "utf8");
+  writeFileSync(path.join(appSource, "Fixture.entitlements"), "fixture entitlements\n", "utf8");
+  mkdirSync(path.join(repoRoot, "apps", "clicky", "leanring-buddy.xcodeproj"), { recursive: true });
+  writeFileSync(
+    path.join(repoRoot, "apps", "clicky", "leanring-buddy.xcodeproj", "project.pbxproj"),
+    "fixture project\n",
+    "utf8",
+  );
+  mkdirSync(path.join(repoRoot, "packages", "runtime", "src"), { recursive: true });
+  writeFileSync(
+    path.join(repoRoot, "packages", "runtime", "src", "assistant-output.ts"),
+    "export const fixture = true;\n",
+    "utf8",
+  );
+  mkdirSync(path.join(repoRoot, "packages", "kernel", "src"), { recursive: true });
+  writeFileSync(path.join(repoRoot, "packages", "kernel", "src", "fixture.ts"), "export {};\n", "utf8");
+  const worker = path.join(repoRoot, "apps", "clicky", "worker");
+  mkdirSync(worker, { recursive: true });
+  writeFileSync(path.join(worker, "local-server.mjs"), "fixture voice proxy\n", "utf8");
+  writeFileSync(path.join(worker, "stepfun-hotwords.mjs"), "fixture hotwords\n", "utf8");
+}
+
 function makeFixture({
   bundleIdentifier = "com.yishu.yishu-buddy",
   bundleVersion = "1",
   shortVersion = "0.0.1",
   executableName = "奕枢",
   includeRuntime = true,
+  provenance = {},
 } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "yishu-installed-app-test-"));
   tempRoots.push(root);
   const appPath = path.join(root, "Fixture.app");
+  const repoRoot = path.join(root, "repo");
+  makeProvenanceRepoFixture(repoRoot);
   const contents = path.join(appPath, "Contents");
   const macOS = path.join(contents, "MacOS");
   const resources = path.join(contents, "Resources");
@@ -67,6 +105,17 @@ function makeFixture({
   mkdirSync(voiceProxy, { recursive: true });
   writeFileSync(path.join(voiceProxy, "local-server.mjs"), "fixture voice proxy\n", "utf8");
   writeFileSync(path.join(voiceProxy, "stepfun-hotwords.mjs"), "fixture hotwords\n", "utf8");
+  writeFileSync(
+    path.join(resources, "YishuBuildManifest.json"),
+    `${JSON.stringify({
+      schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
+      commit: CURRENT_HEAD,
+      worktreeDirty: false,
+      sourceInputHash: CURRENT_SOURCE_INPUT_HASH,
+      ...provenance,
+    })}\n`,
+    "utf8",
+  );
 
   const commandDir = path.join(root, "commands");
   mkdirSync(commandDir, { recursive: true });
@@ -91,6 +140,18 @@ process.stdout.write(values[key] + "\\n");
   makeExecutable(
     path.join(commandDir, "pgrep"),
     "#!/usr/bin/env node\nprocess.stdout.write(process.env.MOCK_PGREP_OUTPUT || \"\");\nprocess.exit(Number(process.env.MOCK_PGREP_STATUS || (process.env.MOCK_PGREP_OUTPUT ? 0 : 1)));\n",
+  );
+  makeExecutable(
+    path.join(commandDir, "git"),
+    `#!/usr/bin/env node
+if (process.argv.includes("rev-parse")) {
+  process.stdout.write(${JSON.stringify(CURRENT_HEAD)} + "\\n");
+} else if (process.argv.includes("status")) {
+  process.stdout.write("\\n");
+} else {
+  process.exit(1);
+}
+`,
   );
 
   return {
@@ -123,6 +184,20 @@ function runVerifier(fixture, extraArgs = [], extraEnv = {}) {
   };
 }
 
+function updateManifest(fixture, repoRoot, overrides = {}) {
+  writeFileSync(
+    path.join(fixture.appPath, "Contents", "Resources", "YishuBuildManifest.json"),
+    `${JSON.stringify({
+      schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
+      commit: CURRENT_HEAD,
+      worktreeDirty: false,
+      sourceInputHash: sourceInputHash(repoRoot),
+      ...overrides,
+    })}\n`,
+    "utf8",
+  );
+}
+
 function assertNoPrivateContent(report) {
   const serialized = JSON.stringify(report);
   assert.doesNotMatch(serialized, /transcript|screenshot|password|authorization|token|stderr|stdout/i);
@@ -151,6 +226,8 @@ test("accepts a complete static fixture and emits only safe installation evidenc
   assert.equal(result.report?.checks?.node?.status, "passed");
   assert.equal(result.report?.checks?.voiceProxy?.status, "passed");
   assert.equal(result.report?.checks?.runtime?.files?.voiceProxyHotwords?.status, "passed");
+  assert.equal(result.report?.checks?.provenance?.status, "passed");
+  assert.equal(result.report?.checks?.provenance?.worktreeDirty, false);
   assert.equal(result.report?.checks?.singleInstance?.status, "passed");
   assert.equal(result.report?.runningPidCount, 0);
   assertNoPrivateContent(result.report);
@@ -211,6 +288,51 @@ test("fails closed on an unexpected bundle id or missing main executable", () =>
   assert.equal(missingExecutable.report?.checks?.mainExecutable?.status, "failed");
 });
 
+test("fails closed when the signed app has no build provenance manifest", () => {
+  const fixture = makeFixture();
+  rmSync(
+    path.join(fixture.appPath, "Contents", "Resources", "YishuBuildManifest.json"),
+    { force: true },
+  );
+  const result = runVerifier(fixture);
+
+  assert.notEqual(result.status, 0, result.output);
+  assert.equal(result.report?.ok, false);
+  assert.equal(result.report?.checks?.provenance?.status, "failed");
+  assert.equal(result.report?.checks?.provenance?.reason, "manifest_missing");
+});
+
+test("rejects a manifest from another commit or with a changed source hash", () => {
+  const commitFixture = makeFixture({ provenance: { commit: "0".repeat(40) } });
+  const wrongCommit = runVerifier(commitFixture);
+  assert.notEqual(wrongCommit.status, 0, wrongCommit.output);
+  assert.equal(wrongCommit.report?.ok, false);
+  assert.equal(wrongCommit.report?.checks?.provenance?.reason, "commit_mismatch");
+  assert.equal(wrongCommit.report?.checks?.provenance?.commit?.status, "failed");
+
+  const hashFixture = makeFixture({ provenance: { sourceInputHash: "0".repeat(64) } });
+  const wrongHash = runVerifier(hashFixture);
+  assert.notEqual(wrongHash.status, 0, wrongHash.output);
+  assert.equal(wrongHash.report?.ok, false);
+  assert.equal(wrongHash.report?.checks?.provenance?.reason, "source_hash_mismatch");
+  assert.equal(wrongHash.report?.checks?.provenance?.sourceInputHash?.status, "failed");
+});
+
+test("reports a dirty local manifest but rejects it when clean provenance is required", () => {
+  const fixture = makeFixture({ provenance: { worktreeDirty: true } });
+  const allowed = runVerifier(fixture);
+  assert.equal(allowed.status, 0, allowed.output);
+  assert.equal(allowed.report?.ok, true);
+  assert.equal(allowed.report?.checks?.provenance?.worktreeDirty, true);
+  assert.equal(allowed.report?.checks?.provenance?.clean?.status, "passed");
+
+  const rejected = runVerifier(fixture, ["--require-clean-provenance"]);
+  assert.notEqual(rejected.status, 0, rejected.output);
+  assert.equal(rejected.report?.ok, false);
+  assert.equal(rejected.report?.checks?.provenance?.reason, "worktree_dirty");
+  assert.equal(rejected.report?.checks?.provenance?.clean?.status, "failed");
+});
+
 test("allows zero static pids but enforces --require-running", () => {
   const fixture = makeFixture();
   const staticResult = runVerifier(fixture);
@@ -232,10 +354,12 @@ test("allows zero static pids but enforces --require-running", () => {
 
 test("compares bundle runtime source with --repo-root and ignores generated maps", () => {
   const fixture = makeFixture();
+  updateManifest(fixture, fixture.repoRoot);
   const repoSrc = path.join(fixture.repoRoot, "packages/runtime/src");
   mkdirSync(repoSrc, { recursive: true });
   writeFileSync(path.join(repoSrc, "assistant-output.ts"), "export const fixture = true;\n", "utf8");
   writeFileSync(path.join(repoSrc, "generated.map"), "different generated output\n", "utf8");
+  updateManifest(fixture, fixture.repoRoot);
 
   const matching = runVerifier(fixture, ["--repo-root", fixture.repoRoot]);
   assert.equal(matching.status, 0, matching.output);
