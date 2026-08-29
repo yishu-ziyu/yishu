@@ -544,7 +544,7 @@ test("process discovery uses one fixed executable path and rejects duplicate or 
   const spawn = (command, args, options) => {
     assert.equal(command, "/bin/ps");
     assert.deepEqual(args, ["-axo", "pid=,command="]);
-    assert.deepEqual(options.env, { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LC_ALL: "C" });
+    assert.deepEqual(options.env, { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LC_ALL: "C.UTF-8" });
     return {
       status: 0,
       stdout: [
