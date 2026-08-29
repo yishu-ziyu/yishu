@@ -5,7 +5,9 @@ import {
   AssistantOutputStreamProjector,
   attachObservationalPointDirective,
   isDirectComputerActionUtterance,
+  parsePointDirective,
   projectAssistantOutput,
+  utteranceRequiresObservationalPointing,
 } from "../src/assistant-output.js";
 
 test("generation projector makes an interrupted assistant permanently stale", () => {
@@ -238,4 +240,24 @@ test("a POINT-only MiniMax reply has no spoken overlay", () => {
   const projection = projectAssistantOutput("[POINT:none]");
   assert.equal(projection.visibleText, "");
   assert.equal(projection.pointing, undefined);
+});
+
+test("point contract accepts one terminal coordinate or none directive", () => {
+  assert.deepEqual(
+    parsePointDirective("日期在菜单栏。[POINT:1180,18:日期]"),
+    { kind: "coordinate", pointing: { x: 1180, y: 18, label: "日期" } },
+  );
+  assert.deepEqual(parsePointDirective("这是常识。[POINT:none]"), { kind: "none" });
+  assert.equal(parsePointDirective("日期在菜单栏。"), undefined);
+  assert.equal(parsePointDirective("日期在菜单栏。[POINT:1180,18:日期] 之后"), undefined);
+  assert.equal(
+    parsePointDirective("前句。[POINT:none] 后句。[POINT:1180,18:日期]"),
+    undefined,
+  );
+});
+
+test("screen-dependent utterances require observational pointing without hardcoding a question", () => {
+  assert.equal(utteranceRequiresObservationalPointing("侧边栏最顶上哪一个？"), true);
+  assert.equal(utteranceRequiresObservationalPointing("What is this page showing?"), true);
+  assert.equal(utteranceRequiresObservationalPointing("法国的首都是哪里？"), false);
 });

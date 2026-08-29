@@ -124,7 +124,7 @@ struct YishuSentenceSpeechPipelineTests {
         #expect(!YishuSearchCoverSpeech.line.contains("web_search"))
     }
 
-    @Test func shortConfirmationsSpeakInFullAndEssaysRequestExcerpt() {
+    @Test func shortConfirmationsSpeakInFullAndEssaysUseDeterministicExcerpt() {
         #expect(YishuSpokenReplyBudget.shouldSpeakInFull("已经设好提醒。"))
         #expect(YishuSpokenReplyBudget.shouldSpeakInFull("已经点到了。"))
         #expect(YishuSpokenReplyBudget.route(
@@ -138,15 +138,32 @@ struct YishuSentenceSpeechPipelineTests {
         #expect(YishuSpokenReplyBudget.route(
             speechAlreadyPresented: false,
             visibleText: "第一句。第二句。第三句。第四句。第五句。第六句。第七句。第八句。"
-        ) == .requestExcerpt)
+        ) == .speakDeterministicExcerpt)
         #expect(YishuSpokenReplyBudget.route(
             speechAlreadyPresented: false,
             visibleText: String(repeating: "长", count: 81)
-        ) == .requestExcerpt)
+        ) == .speakDeterministicExcerpt)
         #expect(YishuSpokenReplyBudget.route(
             speechAlreadyPresented: false,
             visibleText: "第一句。第二句。"
         ) == .speakInFull)
+    }
+
+    @Test func longRepliesUseDeterministicVisibleSentencesWithoutRewriting() {
+        let visibleReply = "第一句保留原文里的事实。第二句也保留原文里的事实。第三句不应进入口播。"
+
+        #expect(
+            YishuSpokenReplyBudget.deterministicExcerpt(from: visibleReply)
+                == "第一句保留原文里的事实。第二句也保留原文里的事实。"
+        )
+        #expect(
+            YishuSpokenReplyBudget.deterministicExcerpt(from: "短回答保持完整。")
+                == "短回答保持完整。"
+        )
+        #expect(
+            YishuSpokenReplyBudget.deterministicExcerpt(from: String(repeating: "长", count: 81))
+                == nil
+        )
     }
 
     @Test @MainActor func cancellationStopsCurrentPlaybackAndDropsQueuedSentences() async {

@@ -6,7 +6,7 @@ import Foundation
 ///
 /// Mouth budget: at most two complete sentences. A run of more than ~80
 /// characters with no sentence boundary is a wall — do not stream-speak;
-/// the caller should ask Runtime for a spoken excerpt instead.
+/// the caller should select a deterministic excerpt from the final visible reply.
 @MainActor
 final class YishuSentenceSpeechPipeline {
     typealias Speaker = @MainActor (String) async throws -> Void
@@ -205,7 +205,7 @@ enum YishuSearchCoverSpeech {
 enum YishuAnswerSpeechRoute: Equatable {
     case alreadySpoken
     case speakInFull
-    case requestExcerpt
+    case speakDeterministicExcerpt
 }
 
 enum YishuSpokenReplyBudget {
@@ -219,7 +219,20 @@ enum YishuSpokenReplyBudget {
         if speechAlreadyPresented { return .alreadySpoken }
         let trimmed = visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .alreadySpoken }
-        return shouldSpeakInFull(trimmed) ? .speakInFull : .requestExcerpt
+        return shouldSpeakInFull(trimmed) ? .speakInFull : .speakDeterministicExcerpt
+    }
+
+    /// Returns only source text from the completed visible reply. Short replies
+    /// stay intact; longer replies are capped at two complete sentences. A
+    /// long fragment with no sentence boundary is intentionally not spoken.
+    static func deterministicExcerpt(from visibleText: String) -> String? {
+        let trimmed = visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if shouldSpeakInFull(trimmed) { return trimmed }
+
+        let sentences = prefixSentences(in: trimmed, limit: maxSpokenSentences)
+        guard !sentences.isEmpty else { return nil }
+        return sentences.joined().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func shouldSpeakInFull(_ text: String) -> Bool {

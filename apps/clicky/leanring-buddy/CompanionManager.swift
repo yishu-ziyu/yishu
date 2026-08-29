@@ -3659,22 +3659,21 @@ final class CompanionManager: ObservableObject {
                 print("⚠️ MiniMax TTS failed")
                 speakCreditsErrorFallback()
             }
-        case .requestExcerpt:
+        case .speakDeterministicExcerpt:
             guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
             stopCoverSpeech()
+            // Long replies use source text from the completed visible answer;
+            // never spend a second Runtime/model turn to rewrite it.
+            let excerptTts = YishuSpokenReplyBudget
+                .deterministicExcerpt(from: spokenText)
+                .map { Self.speechText(from: $0) } ?? ""
+            guard !excerptTts.isEmpty else {
+                timing?.mark("tts_complete", reason: "excerpt_empty")
+                break
+            }
+            guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
+            timing?.mark("tts_start", reason: "excerpt")
             do {
-                let excerpt = try await yishuAgentRuntimeClient.excerptSpeech(
-                    visibleText: spokenText,
-                    provider: selectedModelProvider,
-                    model: selectedModel
-                )
-                let excerptTts = Self.speechText(from: excerpt)
-                guard !excerptTts.isEmpty else {
-                    timing?.mark("tts_complete", reason: "excerpt_empty")
-                    break
-                }
-                guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
-                timing?.mark("tts_start", reason: "excerpt")
                 try await elevenLabsTTSClient.speakText(
                     excerptTts,
                     speed: speechSpeed
@@ -3686,7 +3685,6 @@ final class CompanionManager: ObservableObject {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                // Failure must not fall back to reading the full essay.
                 guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
                 timing?.mark("tts_complete", reason: "excerpt_failed")
             }

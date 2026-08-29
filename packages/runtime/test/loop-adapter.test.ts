@@ -273,7 +273,10 @@ function cleanupAfter(t: TestContext, adapter: YishuLoopRuntimeAdapter, workdir:
 
 function makeCommand(utterance?: string, conversationId?: string): TurnStartCommand {
   const command = makeTurnStartCommand();
-  if (utterance !== undefined) command.payload.utterance = utterance;
+  // Most lifecycle tests exercise conversation plumbing, not the
+  // screen-dependent POINT contract. Keep those turns ordinary and reserve
+  // explicit screen utterances for the focused contract cases above.
+  command.payload.utterance = utterance ?? "你好";
   if (conversationId !== undefined) command.payload.conversationId = conversationId;
   return command;
 }
@@ -380,6 +383,7 @@ test("direct-click POINT still dispatches one left_click instead of flying", asy
     },
   }), true);
   await turn;
+  assert.equal(harness.sessions[0]?.prompts.length, 1, "direct actions do not enter POINT repair");
   const completed = events.find((event) => event.type === "response.completed");
   assert.equal(completed?.payload.text, "点好了。");
   assert.doesNotMatch(String(completed?.payload.text), /POINT/);
@@ -412,6 +416,104 @@ test("observational POINT stays off the stream and lands on completion so Clicky
   );
   assert.equal(completed.payload.verifier, "conversation-response-only");
   assert.equal(events.some((event) => event.type === "computer.action.requested"), false);
+});
+
+test("a missing or none POINT is repaired once with the same image and only the repaired answer completes", async (t) => {
+  const harness = createFakePiHarness();
+  let promptCount = 0;
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      promptCount += 1;
+      current.emitTextDelta(promptCount === 1
+        ? "初始屏幕结论，不应先流出。[POINT:none]"
+        : "修复后的屏幕结论。[POINT:320,240:页面]");
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const command = makeCommand("当前页面是什么");
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(command, (event) => events.push(event));
+
+  assert.equal(promptCount, 2, "the missing directive gets one bounded repair");
+  assert.equal(harness.sessions.length, 1);
+  assert.equal(harness.sessions[0]?.prompts.length, 2);
+  assert.deepEqual(
+    harness.sessions[0]?.prompts.map((prompt) => prompt.images),
+    [
+      [{
+        type: "image",
+        data: "c2NyZWVu",
+        mimeType: "image/jpeg",
+        label: "cursor display (image dimensions: 1280x800 pixels)",
+      }],
+      [{
+        type: "image",
+        data: "c2NyZWVu",
+        mimeType: "image/jpeg",
+        label: "cursor display (image dimensions: 1280x800 pixels)",
+      }],
+    ],
+    "repair must keep the original image context",
+  );
+
+  const deltaText = events
+    .filter((event) => event.type === "response.delta")
+    .map((event) => String(event.payload.text))
+    .join("");
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(deltaText, "初始屏幕结论，不应先流出。修复后的屏幕结论。");
+  assert.equal(completed?.payload.text, "修复后的屏幕结论。\n[POINT:320,240:页面]");
+  assert.match(deltaText, /初始屏幕结论/u, "ordinary streaming remains available before repair");
+  assert.doesNotMatch(String(completed?.payload.text), /初始屏幕结论/u);
+  assert.equal(events.filter((event) => event.type === "response.completed").length, 1);
+});
+
+test("an ordinary no-POINT reply completes without a repair", async (t) => {
+  const harness = createFakePiHarness();
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      current.emitTextDelta("法国的首都是巴黎。");
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(makeCommand("法国的首都是哪里？"), (event) => events.push(event));
+
+  assert.equal(harness.sessions[0]?.prompts.length, 1);
+  assert.equal(events.find((event) => event.type === "response.completed")?.payload.text, "法国的首都是巴黎。");
+  assert.equal(events.some((event) => event.type === "turn.failed"), false);
+});
+
+test("a missing POINT after repair fails soft without a completion or fallback point", async (t) => {
+  const harness = createFakePiHarness();
+  let promptCount = 0;
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      promptCount += 1;
+      current.emitTextDelta(promptCount === 1 ? "首版回答。" : "修复仍缺少标签。\n");
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(makeCommand("看看当前页面"), (event) => events.push(event));
+
+  assert.equal(promptCount, 2);
+  const deltaText = events
+    .filter((event) => event.type === "response.delta")
+    .map((event) => String(event.payload.text))
+    .join("");
+  assert.match(deltaText, /首版回答/u, "the first response may keep streaming before fail-soft");
+  assert.doesNotMatch(deltaText, /POINT/u);
+  assert.equal(events.some((event) => event.type === "response.completed"), false);
+  const failed = events.find((event) => event.type === "turn.failed");
+  assert.ok(failed);
+  assert.equal(failed.payload.code, "point_directive_missing");
 });
 
 test("startTurn prompts with grounded text and streams deltas to completion", async (t) => {

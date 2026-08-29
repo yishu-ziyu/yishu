@@ -189,7 +189,7 @@ test("concurrent turns keep sessions, events, and completion isolated", async (t
     const tag = harness.sessions.length === 1 ? "A" : "B";
     session.promptHandler = async (s) => {
       await gate.promise;
-      s.emitTextDelta(`reply-from-${tag}`);
+      s.emitTextDelta(`reply-from-${tag}[POINT:10,20:${tag}]`);
     };
     return { session: session as unknown as ModelSession };
   }) as NonNullable<YishuLoopRuntimeAdapterOptions["createSession"]>;
@@ -222,7 +222,7 @@ test("concurrent turns keep sessions, events, and completion isolated", async (t
   const completedB = eventsB.find((event) => event.type === "response.completed");
   assert.ok(completedB, "B must complete while A is still gated");
   assert.equal(completedB.requestId, "req-b");
-  assert.equal(completedB.payload.text, "reply-from-B");
+  assert.equal(completedB.payload.text, "reply-from-B\n[POINT:10,20:B]");
   assert.ok(
     !eventsA.some((event) => event.type === "response.completed"),
     "A must still be running when B completed",
@@ -234,7 +234,7 @@ test("concurrent turns keep sessions, events, and completion isolated", async (t
   const completedA = eventsA.find((event) => event.type === "response.completed");
   assert.ok(completedA);
   assert.equal(completedA.requestId, "req-a");
-  assert.equal(completedA.payload.text, "reply-from-A");
+  assert.equal(completedA.payload.text, "reply-from-A\n[POINT:10,20:A]");
 
   // Every emitted event belongs to its own requestId; no cross-talk.
   assertEventOwnership(eventsA, "req-a", "A");
@@ -255,7 +255,7 @@ test("cancelling one turn leaves a concurrently running turn intact", async (t) 
     } else {
       session.promptHandler = async (s) => {
         await gateB.promise;
-        s.emitTextDelta("B-survived");
+        s.emitTextDelta("B-survived[POINT:10,20:B]");
       };
     }
     return { session: session as unknown as ModelSession };
@@ -309,7 +309,7 @@ test("cancelling one turn leaves a concurrently running turn intact", async (t) 
   await turnB;
   const completedB = eventsB.find((event) => event.type === "response.completed");
   assert.ok(completedB, "B must complete after A was cancelled");
-  assert.equal(completedB.payload.text, "B-survived");
+  assert.equal(completedB.payload.text, "B-survived\n[POINT:10,20:B]");
 
   assertEventOwnership(eventsA, "req-a", "A");
   assertEventOwnership(eventsB, "req-b", "B");

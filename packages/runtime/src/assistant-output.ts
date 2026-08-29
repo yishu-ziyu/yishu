@@ -14,6 +14,10 @@ export interface ObservationalPointing {
   label?: string;
 }
 
+export type PointDirective =
+  | { kind: "none" }
+  | { kind: "coordinate"; pointing: ObservationalPointing };
+
 export interface AssistantOutputProjection {
   visibleText: string;
   computerActions: LegacyComputerAction[];
@@ -44,9 +48,18 @@ function pointTagPattern(): RegExp {
 }
 const directActionTriggerPattern = /(?:点击|点开|点选|点一下|点(?:这个|那个)|按一下|按下|选中|\b(?:click|press|tap)\b)/gi;
 const directActionTriggerSearchPattern = new RegExp(directActionTriggerPattern.source, "i");
+const screenDependencyPattern = /(?:当前|现在这个|屏幕|页面|网页|窗口|按钮|菜单|光标|鼠标|左边|右边|上面|下面|图里|截图|侧边栏|边栏|顶上|顶部|底部|左侧|右侧|\b(?:this|that|these|those|here|there|last|previous|current\s+(?:screen|page|window)|screen|page|window|button|menu|cursor|selected|sidebar|screenshot)\b)/iu;
 const sequenceConnectorPattern = /(?:然后|再|接着|之后|随后|并且|并|且|and then|after that|\band\b|then|next)/i;
 const followUpActionPattern = /(?:打开|选择|输入|填写|确认|提交|发送|拖动|滚动|关闭|删除|按(?:回车|enter)|\b(?:select|open|type|enter|submit|send|confirm|drag|scroll|close|delete)\b)/i;
 const explanationOrQuestionPattern = /(?:解释|为什么|是什么意思|怎么|如何|\b(?:why|what|how)\b)/i;
+
+/**
+ * Screen-dependent questions need an observational coordinate, while direct
+ * actions are handled separately by the computer-turn contract.
+ */
+export function utteranceRequiresObservationalPointing(utterance: string): boolean {
+  return screenDependencyPattern.test(utterance);
+}
 
 function parameterValue(block: string, name: string): string | undefined {
   const pattern = new RegExp(
@@ -100,6 +113,23 @@ function lastPointingFrom(rawText: string): ObservationalPointing | undefined {
     if (pointing) return pointing;
   }
   return undefined;
+}
+
+/**
+ * Validate the model's one-shot POINT contract at a completed assistant
+ * boundary. The directive must be the only valid POINT tag and must be the
+ * final non-whitespace token; callers may then safely publish the cleaned text.
+ */
+export function parsePointDirective(rawText: string): PointDirective | undefined {
+  const trimmed = rawText.trim();
+  const matches = [...trimmed.matchAll(pointTagPattern())];
+  if (matches.length !== 1) return undefined;
+  const match = matches[0]!;
+  const matchStart = match.index ?? -1;
+  if (matchStart < 0 || matchStart + match[0].length !== trimmed.length) return undefined;
+  if (/^\[POINT:\s*none\]$/iu.test(match[0])) return { kind: "none" };
+  const pointing = parsePointing(match);
+  return pointing === undefined ? undefined : { kind: "coordinate", pointing };
 }
 
 export function formatPointTag(pointing: ObservationalPointing): string {
@@ -358,6 +388,13 @@ export class AssistantOutputGenerationProjector {
       stale: false,
       ...(completed?.pointing === undefined ? {} : { pointing: completed.pointing }),
     };
+  }
+
+  /** Discard a failed model response before a bounded replacement prompt. */
+  reset(generation: number): boolean {
+    if (!this.accepts(generation)) return false;
+    this.projectors.set(generation, new AssistantOutputStreamProjector());
+    return true;
   }
 }
 
