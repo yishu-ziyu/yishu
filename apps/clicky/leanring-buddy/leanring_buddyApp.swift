@@ -35,6 +35,20 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
     private let singleInstance = YishuSingleInstanceLock()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--migrate-model-config") {
+            guard CommandLine.arguments.contains("--confirm") else {
+                fputs("Refusing to migrate without explicit confirmation.\n", stderr)
+                Darwin.exit(2)
+            }
+            do {
+                try YishuModelConfigMigration.migrateDefaultConfiguration()
+                fputs("Model credential migration completed; no credential values were printed.\n", stdout)
+                Darwin.exit(0)
+            } catch {
+                fputs("Model credential migration failed; the original config was preserved.\n", stderr)
+                Darwin.exit(1)
+            }
+        }
         guard !YishuVoiceProxySupervisor.shouldSkipRealProxyLifecycle else { return }
         guard singleInstance.acquire() else {
             let bundleID = Bundle.main.bundleIdentifier ?? "com.clicky-app.leanring-buddy"
