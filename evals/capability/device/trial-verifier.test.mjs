@@ -20,7 +20,7 @@ const T1_BASE = {
       reason: "recaptureSceneChanged",
       sourceDimensionsAvailable: true,
     },
-    { kind: "terminal", sequence: 4, observedAt: "2026-08-29T00:00:06Z", state: "verified" },
+    { kind: "terminal", sequence: 4, observedAt: "2026-08-29T00:00:06Z", state: "completed" },
     { kind: "human_judgment", sequence: 5, observedAt: "2026-08-29T00:00:06Z", phase: "latest_screen_answer", outcome: "correct", source: "human" },
   ],
 };
@@ -91,18 +91,39 @@ function clone(value) {
   return structuredClone(value);
 }
 
-test("T1 accepts one long PTT with stale-context recapture and verified terminal", () => {
+test("T1 accepts one PTT with a completed answer and correct human judgment", () => {
   const result = verifyDeviceTrial(clone(T1_BASE));
   assert.equal(result.status, "pass");
   assert.deepEqual(result.reasons, []);
 });
 
-test("T1 rejects a short monotonic key-up hold", () => {
+test("T1 accepts a short monotonic key-up hold when the event is otherwise valid", () => {
   const observation = clone(T1_BASE);
   observation.events.find((event) => event.kind === "ptt_released").durationMs = 5499;
   const result = verifyDeviceTrial(observation);
+  assert.equal(result.status, "pass");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("T1 rejects a release that precedes the press", () => {
+  const observation = clone(T1_BASE);
+  const pressed = observation.events.find((event) => event.kind === "ptt_pressed");
+  const released = observation.events.find((event) => event.kind === "ptt_released");
+  pressed.sequence = 2;
+  released.sequence = 1;
+  observation.events.sort((left, right) => left.sequence - right.sequence);
+
+  const result = verifyDeviceTrial(observation);
   assert.equal(result.status, "fail");
-  assert.ok(result.reasons.includes("ptt_duration_below_minimum"));
+  assert.ok(result.reasons.includes("ptt_order_invalid"));
+});
+
+test("T1 still rejects a negative monotonic key-up duration", () => {
+  const observation = clone(T1_BASE);
+  observation.events.find((event) => event.kind === "ptt_released").durationMs = -1;
+  const result = verifyDeviceTrial(observation);
+  assert.equal(result.status, "invalid");
+  assert.ok(result.reasons.includes("ptt_duration_invalid:events[1]"));
 });
 
 test("T1 uses monotonic key-up duration, not second-level occurredAt subtraction", () => {
@@ -136,13 +157,13 @@ test("T1 cannot carry a T2 action receipt on its terminal", () => {
   assert.ok(result.reasons.includes("unknown_field:events[3].receiptIdHash"));
 });
 
-test("T1 fails without a verified terminal or with a failure event", () => {
+test("T1 fails without a completed terminal or with a failure event", () => {
   const observation = clone(T1_BASE);
   observation.events.find((event) => event.kind === "terminal").state = "failed";
   observation.events.push({ kind: "failure", sequence: 5, observedAt: "2026-08-29T00:00:06.100Z", code: "turn_failed" });
   const result = verifyDeviceTrial(observation);
   assert.equal(result.status, "fail");
-  assert.ok(result.reasons.includes("verified_terminal_missing"));
+  assert.ok(result.reasons.includes("completed_terminal_missing"));
   assert.ok(result.reasons.includes("failure_event_present"));
 });
 

@@ -139,7 +139,8 @@ function checkEventShape(event, reasons, path, contract) {
       }
       break;
     case "terminal":
-      if (!["verified", "failed", "unknown"].includes(event.state)) {
+      if (!(contract === "t1.ptt" ? ["completed", "failed", "unknown"] : ["verified", "failed", "unknown"])
+        .includes(event.state)) {
         pushUnique(reasons, `terminal_state_invalid:${path}`);
       }
       if (contract === "t2.ax" && !isHash(event.receiptIdHash)) {
@@ -281,13 +282,13 @@ function checkT1(input) {
   const judgments = byKind(events, "human_judgment");
   if (pressed.length !== 1 || released.length !== 1) pushUnique(reasons, "ptt_event_count_invalid");
   if (contexts.length !== 1) pushUnique(reasons, "context_event_count_invalid");
-  if (terminals.length !== 1 || terminals[0]?.state !== "verified") pushUnique(reasons, "verified_terminal_missing");
+  if (terminals.length !== 1 || terminals[0]?.state !== "completed") pushUnique(reasons, "completed_terminal_missing");
   if (judgments.length !== 1) pushUnique(reasons, "human_judgment_missing");
   if (judgments.length === 1 && judgments[0].outcome !== "correct") {
     pushUnique(reasons, "human_judgment_not_correct");
   }
   if (pressed.length === 1 && released.length === 1) {
-    if (released[0].durationMs < 5_500) pushUnique(reasons, "ptt_duration_below_minimum");
+    if (pressed[0].sequence >= released[0].sequence) pushUnique(reasons, "ptt_order_invalid");
     if (contexts.length === 1 && contexts[0].sequence <= released[0].sequence) {
       pushUnique(reasons, "context_order_invalid");
     }

@@ -195,7 +195,7 @@ test("collects T1 raw observations and preserves durationMs without using second
       reason: "recaptureSceneChanged",
       sourceDimensionsAvailable: true,
     },
-    { kind: "terminal", sequence: 4, observedAt: "2026-08-29T00:00:02Z", state: "verified" },
+    { kind: "terminal", sequence: 4, observedAt: "2026-08-29T00:00:02Z", state: "completed" },
   ]);
   assert.equal("passed" in result.observation, false);
   assert.equal("taskTerminal" in result.observation, false);
@@ -270,6 +270,19 @@ test("collects T2 action receipt details and terminal, leaving Finder evidence e
     },
   ]);
   assert.equal(result.observation.events.some((event) => event.kind === "finder_state"), false);
+});
+
+test("T2 does not map an informational completion to a verified action", () => {
+  const events = t2Events();
+  events.at(-1).attributes = {
+    verified: false,
+    taskTerminal: "unverified",
+    receiptHash: "a".repeat(64),
+  };
+  const result = collect({ events, contract: "t2.ax", trialId: "t2-informational-terminal" });
+
+  assert.equal(result.status, "invalid");
+  assert.ok(result.reasons.includes("terminal_not_verified"));
 });
 
 test("does not derive a successful T2 action from a failed App status", () => {
@@ -499,7 +512,7 @@ test("rejects malformed JSON and a partial trailing JSONL line", () => {
   assert.ok(partial.reasons.includes("partial_trailing_line"));
 });
 
-test("rejects an unverified model terminal even when status is not failed", () => {
+test("accepts a completed informational answer whose correctness is judged externally", () => {
   const events = t1Events();
   events[3] = {
     ...events[3],
@@ -508,8 +521,9 @@ test("rejects an unverified model terminal even when status is not failed", () =
   };
   const result = collect({ events, contract: "t1.ptt", trialId: "t1-unverified" });
 
-  assert.equal(result.status, "invalid");
-  assert.ok(result.reasons.includes("terminal_not_verified"));
+  assert.equal(result.status, "valid");
+  assert.equal(result.observation.events.at(-1)?.kind, "terminal");
+  assert.equal(result.observation.events.at(-1)?.state, "completed");
 });
 
 test("rejects a failed forget instead of mapping it to forgotten", () => {

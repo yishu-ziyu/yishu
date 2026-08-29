@@ -497,7 +497,7 @@ test("replay accepts only the exact in-directory observation filename and rechec
         { kind: "ptt_pressed", sequence: 1, observedAt: "2026-08-29T00:00:00Z" },
         { kind: "ptt_released", sequence: 2, observedAt: "2026-08-29T00:00:05Z", durationMs: 5500 },
         { kind: "context_recaptured", sequence: 3, observedAt: "2026-08-29T00:00:06Z", reason: "recaptureSceneChanged", sourceDimensionsAvailable: true },
-        { kind: "terminal", sequence: 4, observedAt: "2026-08-29T00:00:06Z", state: "verified" },
+        { kind: "terminal", sequence: 4, observedAt: "2026-08-29T00:00:06Z", state: "completed" },
         { kind: "human_judgment", sequence: 5, observedAt: "2026-08-29T00:00:06Z", phase: "latest_screen_answer", outcome: "correct", source: "human" },
       ],
     };

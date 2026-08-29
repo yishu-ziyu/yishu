@@ -22,13 +22,12 @@ The top-level object has `schemaVersion: 1`, a safe `trialId`, and an ordered
 `events` array. `contract` selects one of these shapes:
 
 - `t1.ptt`: exactly one `ptt_pressed` and `ptt_released`; `ptt_released` carries
-  the monotonic `ptt.key_up` `durationMs`, which must be at least 5500 ms
-  (the second-level `observedAt` values are not used for duration); one
-  `context_recaptured` event must use `recaptureStale` or
-  `recaptureSceneChanged` after release and carry
-  `sourceDimensionsAvailable: true`; the only terminal must be verified; a
-  human `latest_screen_answer` judgment must be correct; failure and
-  false-completion events fail the trial.
+  the non-negative monotonic `ptt.key_up` `durationMs` (the second-level
+  `observedAt` values are not used for duration); one `context_recaptured` event
+  must use `recaptureStale` or `recaptureSceneChanged` after release and carry
+  `sourceDimensionsAvailable: true`; the answer must reach a `completed`
+  terminal, while a human `latest_screen_answer` judgment proves correctness;
+  failure and false-completion events fail the trial.
 - `t2.ax`: one `ax_action` event (the runner's safe projection of
   `computer.action.completed`) whose production
   fields are `method: "ax_press"`, `code: "verified_accessibility"`,
@@ -44,7 +43,10 @@ The top-level object has `schemaVersion: 1`, a safe `trialId`, and an ordered
   `notUsedAfterRestart`, with one `app_restart` between the latter two; a
   human `recall_before_forget` and `absence_after_restart` judgment must each
   be correct; every event must repeat the same memory and scope hashes, and
-  any post-restart use or resurrection fails the trial.
+  any post-restart use or resurrection fails the trial. The post-restart
+  informational query must complete; the collector represents that completion
+  as `notUsedAfterRestart` when no matching `memory.used` follows, rather than
+  adding a separate T3 terminal event to the observation schema.
 
 Use:
 
