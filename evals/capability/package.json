@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check scripts/write-scenarios.mjs",
-    "test": "node --test test/manifest.test.mjs"
+    "check": "node --check scripts/write-scenarios.mjs && node --check device/trial-verifier.mjs && node --check device/quality-observation-collector.mjs && node --check device/yishu-device-runner.mjs",
+    "test": "node --test test/manifest.test.mjs device/trial-verifier.test.mjs device/quality-observation-collector.test.mjs device/yishu-device-runner.test.mjs"
   }
 }

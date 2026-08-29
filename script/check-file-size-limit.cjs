@@ -162,3 +162,28 @@ console.log(
   `Swift god-file ratchet passed: ${COMPANION_MANAGER} ${companion.lines}/${SWIFT_LINE_CEILING} ` +
     `(ceiling, only down); ${swiftFiles.length} product Swift files scanned.`,
 );
+
+// The real-device trust boundary is intentionally explicit and may only shrink.
+// These files are already over the general helper guideline, so prevent any
+// further responsibility from accumulating before they are split deliberately.
+const DEVICE_EVAL_LINE_CEILINGS = new Map([
+  ["evals/capability/device/yishu-device-runner.mjs", 867],
+  ["evals/capability/device/quality-observation-collector.mjs", 856],
+  ["script/create-device-eval-provenance.mjs", 637],
+]);
+
+for (const [relativePath, ceiling] of DEVICE_EVAL_LINE_CEILINGS) {
+  const file = path.join(ROOT, relativePath);
+  if (!fs.existsSync(file)) {
+    console.error(`Device eval size ratchet FAILED: missing ${relativePath}`);
+    process.exit(1);
+  }
+  const lines = swiftLineCount(fs.readFileSync(file, "utf8"));
+  if (lines > ceiling) {
+    console.error(
+      `Device eval size ratchet FAILED: ${relativePath} ${lines}/${ceiling} lines (ceiling, only down).`,
+    );
+    process.exit(1);
+  }
+  console.log(`Device eval size ratchet passed: ${relativePath} ${lines}/${ceiling}.`);
+}

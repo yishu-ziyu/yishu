@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yishu.local/schemas/device-runner-state-v1.json",
+  "title": "Yishu device runner arm state",
+  "description": "Opaque metadata for one bounded quality-log window; it contains no transcript, screen, memory, or aggregate result.",
+  "type": "object",
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "scenario": { "enum": ["device.t1.ptt", "device.t2.ax", "device.t3.memory"] },
+    "trial": { "type": "integer", "minimum": 1 },
+    "contract": { "enum": ["t1.ptt", "t2.ax", "t3.memory"] },
+    "trialId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+    "startOffset": { "type": "integer", "minimum": 0 },
+    "qualityPrefixSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "appPid": { "type": "integer", "minimum": 1 },
+    "provenanceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "provenancePath": { "type": "string", "pattern": "^/[^\u0000]{0,4095}$" }
+  },
+  "required": [
+    "schemaVersion",
+    "scenario",
+    "trial",
+    "contract",
+    "trialId",
+    "startOffset",
+    "qualityPrefixSha256",
+    "appPid",
+    "provenanceSha256",
+    "provenancePath"
+  ],
+  "additionalProperties": false
+}

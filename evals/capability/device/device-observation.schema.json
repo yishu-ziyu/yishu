@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yishu.local/schemas/device-observation-v1.json",
+  "title": "Yishu device capability observation",
+  "description": "Content-safe raw observations. The verifier derives the trial result; callers must not send aggregate truth fields.",
+  "oneOf": [
+    { "$ref": "#/$defs/t1Ptt" },
+    { "$ref": "#/$defs/t2Ax" },
+    { "$ref": "#/$defs/t3Memory" }
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "trialId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "opaqueHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "eventBase": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" }
+      },
+      "required": ["kind", "sequence", "observedAt"],
+      "additionalProperties": false
+    },
+    "t1PttPressed": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "ptt_pressed" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" }
+      },
+      "required": ["kind", "sequence", "observedAt"],
+      "additionalProperties": false
+    },
+    "t1PttReleased": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "ptt_released" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "durationMs": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["kind", "sequence", "observedAt", "durationMs"],
+      "additionalProperties": false
+    },
+    "t1ContextRecaptured": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "context_recaptured" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "reason": { "enum": ["recaptureStale", "recaptureSceneChanged"] },
+        "sourceDimensionsAvailable": { "type": "boolean" }
+      },
+      "required": ["kind", "sequence", "observedAt", "reason", "sourceDimensionsAvailable"],
+      "additionalProperties": false
+    },
+    "t1Terminal": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "terminal" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "state": { "enum": ["verified", "failed", "unknown"] }
+      },
+      "required": ["kind", "sequence", "observedAt", "state"],
+      "additionalProperties": false
+    },
+    "t1Negative": {
+      "type": "object",
+      "properties": {
+        "kind": { "enum": ["failure", "false_completion"] },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" }
+      },
+      "required": ["kind", "sequence", "observedAt", "code"],
+      "additionalProperties": false
+    },
+    "t1HumanJudgment": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "human_judgment" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "phase": { "const": "latest_screen_answer" },
+        "outcome": { "enum": ["correct", "incorrect"] },
+        "source": { "const": "human" }
+      },
+      "required": ["kind", "sequence", "observedAt", "phase", "outcome", "source"],
+      "additionalProperties": false
+    },
+    "t2AxAction": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "ax_action" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "status": { "enum": ["verified", "delivered", "unverified", "blocked", "failed", "unknown"] },
+        "method": { "enum": ["ax_press", "ax_set_value", "quartz", "native_command", "shortcut", "unknown"] },
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" },
+        "verified": { "type": "boolean" },
+        "retryCount": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["kind", "sequence", "observedAt", "status", "method", "code", "verified", "retryCount"],
+      "additionalProperties": false
+    },
+    "t2ActionReceipt": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "action_receipt" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "receiptIdHash": { "$ref": "#/$defs/opaqueHash" }
+      },
+      "required": ["kind", "sequence", "observedAt", "receiptIdHash"],
+      "additionalProperties": false
+    },
+    "t2FinderBefore": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "finder_state" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "phase": { "const": "before" },
+        "opaqueStateHash": { "$ref": "#/$defs/opaqueHash" },
+        "finderInstanceHash": { "$ref": "#/$defs/opaqueHash" },
+        "source": { "const": "finder" }
+      },
+      "required": ["kind", "sequence", "observedAt", "phase", "opaqueStateHash", "finderInstanceHash", "source"],
+      "additionalProperties": false
+    },
+    "t2FinderAfter": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "finder_state" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "phase": { "const": "after" },
+        "opaqueStateHash": { "$ref": "#/$defs/opaqueHash" },
+        "finderInstanceHash": { "$ref": "#/$defs/opaqueHash" },
+        "relation": { "enum": ["direct_parent", "same", "unknown"] },
+        "source": { "const": "finder" }
+      },
+      "required": ["kind", "sequence", "observedAt", "phase", "opaqueStateHash", "finderInstanceHash", "relation", "source"],
+      "additionalProperties": false
+    },
+    "t2RecoverySignal": {
+      "type": "object",
+      "properties": {
+        "kind": { "enum": ["retry", "unknown_commit"] },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" }
+      },
+      "required": ["kind", "sequence", "observedAt"],
+      "additionalProperties": false
+    },
+    "t2Terminal": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "terminal" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "state": { "enum": ["verified", "failed", "unknown"] },
+        "receiptIdHash": { "$ref": "#/$defs/opaqueHash" }
+      },
+      "required": ["kind", "sequence", "observedAt", "state", "receiptIdHash"],
+      "additionalProperties": false
+    },
+    "t2Negative": {
+      "type": "object",
+      "properties": {
+        "kind": { "enum": ["failure", "false_completion"] },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" }
+      },
+      "required": ["kind", "sequence", "observedAt", "code"],
+      "additionalProperties": false
+    },
+    "t3MemoryState": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "memory_state" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "state": { "enum": ["remembered", "used", "forgotten", "notUsedAfterRestart", "resurrected"] },
+        "memoryIdHash": { "$ref": "#/$defs/opaqueHash" },
+        "scopeHash": { "$ref": "#/$defs/opaqueHash" }
+      },
+      "required": ["kind", "sequence", "observedAt", "state", "memoryIdHash", "scopeHash"],
+      "additionalProperties": false
+    },
+    "t3AppRestart": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "app_restart" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "memoryIdHash": { "$ref": "#/$defs/opaqueHash" },
+        "scopeHash": { "$ref": "#/$defs/opaqueHash" }
+      },
+      "required": ["kind", "sequence", "observedAt", "memoryIdHash", "scopeHash"],
+      "additionalProperties": false
+    },
+    "t3HumanJudgment": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "human_judgment" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "observedAt": { "$ref": "#/$defs/observedAt" },
+        "phase": { "enum": ["recall_before_forget", "absence_after_restart"] },
+        "outcome": { "enum": ["correct", "incorrect"] },
+        "source": { "const": "human" },
+        "memoryIdHash": { "$ref": "#/$defs/opaqueHash" },
+        "scopeHash": { "$ref": "#/$defs/opaqueHash" }
+      },
+      "required": ["kind", "sequence", "observedAt", "phase", "outcome", "source", "memoryIdHash", "scopeHash"],
+      "additionalProperties": false
+    },
+    "t1Event": {
+      "oneOf": [
+        { "$ref": "#/$defs/t1PttPressed" },
+        { "$ref": "#/$defs/t1PttReleased" },
+        { "$ref": "#/$defs/t1ContextRecaptured" },
+        { "$ref": "#/$defs/t1Terminal" },
+        { "$ref": "#/$defs/t1Negative" },
+        { "$ref": "#/$defs/t1HumanJudgment" }
+      ]
+    },
+    "t2Event": {
+      "oneOf": [
+        { "$ref": "#/$defs/t2AxAction" },
+        { "$ref": "#/$defs/t2ActionReceipt" },
+        { "$ref": "#/$defs/t2FinderBefore" },
+        { "$ref": "#/$defs/t2FinderAfter" },
+        { "$ref": "#/$defs/t2RecoverySignal" },
+        { "$ref": "#/$defs/t2Terminal" },
+        { "$ref": "#/$defs/t2Negative" }
+      ]
+    },
+    "t3Event": {
+      "oneOf": [
+        { "$ref": "#/$defs/t3MemoryState" },
+        { "$ref": "#/$defs/t3AppRestart" },
+        { "$ref": "#/$defs/t3HumanJudgment" }
+      ]
+    },
+    "t1Ptt": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/schemaVersion" },
+        "contract": { "const": "t1.ptt" },
+        "trialId": { "$ref": "#/$defs/trialId" },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/t1Event" } }
+      },
+      "required": ["schemaVersion", "contract", "trialId", "events"],
+      "additionalProperties": false
+    },
+    "t2Ax": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/schemaVersion" },
+        "contract": { "const": "t2.ax" },
+        "trialId": { "$ref": "#/$defs/trialId" },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/t2Event" } }
+      },
+      "required": ["schemaVersion", "contract", "trialId", "events"],
+      "additionalProperties": false
+    },
+    "t3Memory": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/schemaVersion" },
+        "contract": { "const": "t3.memory" },
+        "trialId": { "$ref": "#/$defs/trialId" },
+        "memoryIdHash": { "$ref": "#/$defs/opaqueHash" },
+        "scopeHash": { "$ref": "#/$defs/opaqueHash" },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/t3Event" } }
+      },
+      "required": ["schemaVersion", "contract", "trialId", "memoryIdHash", "scopeHash", "events"],
+      "additionalProperties": false
+    }
+  }
+}
