@@ -256,6 +256,11 @@ struct YishuPersonalNoteCard: View {
             }
         }
         .help(YishuPersonalNotesCopy.flipHint)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("记忆卡片")
+        .accessibilityIdentifier(
+            YishuMemoryQualityEvents.cardAccessibilityIdentifier(for: item.id)
+        )
     }
 
     private var front: some View {
@@ -314,6 +319,10 @@ struct YishuPersonalNoteCard: View {
                 .buttonStyle(.plain)
                 .disabled(!canForget)
                 .pointerCursor()
+                .accessibilityLabel("忘记这条记忆")
+                .accessibilityIdentifier(
+                    YishuMemoryQualityEvents.forgetAccessibilityIdentifier(for: item.id)
+                )
             }
         }
         .padding(.leading, 14)

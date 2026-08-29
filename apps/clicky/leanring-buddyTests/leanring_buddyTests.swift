@@ -983,6 +983,98 @@ struct leanring_buddyTests {
         #expect(client.pendingTurnCountForTests == 0)
     }
 
+    @Test @MainActor func voiceRememberActionCompletionRecordsOpaqueMemoryEvent() async throws {
+        let previousStoreURL = QualityEventRecorder.testStoreURL
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("yishu-voice-memory-quality-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let storeURL = root.appendingPathComponent("quality.jsonl")
+        QualityEventRecorder.testStoreURL = storeURL
+        QualityEventRecorder.clear()
+        defer {
+            QualityEventRecorder.clear()
+            QualityEventRecorder.testStoreURL = previousStoreURL
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let projectID = UUID(uuidString: "6BA7B811-9DAD-11D1-80B4-00C04FD430C8")!
+        let memoryID = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+        let projectScope = YishuSessionScope.project(id: projectID, label: "秘密项目")!
+        let client = YishuAgentRuntimeClient()
+        #expect(client.beginNewConversation(scope: projectScope))
+        let requestID = UUID()
+        let traceID = UUID()
+        let parked = client.parkTurnForTests(requestId: requestID, traceId: traceID)
+        #expect(!client.beginNewConversation(scope: .personal))
+
+        let validPayload: [String: Any] = [
+            "actionName": "remember",
+            "status": "verified",
+            "memoryId": memoryID.uuidString,
+            "projectLabel": "秘密项目",
+            "receipt": "private-receipt",
+        ]
+        for invalidPayload in [
+            ["actionName": "remember", "status": "failed", "memoryId": memoryID.uuidString],
+            ["actionName": "remember", "status": "unknown", "memoryId": memoryID.uuidString],
+            ["actionName": "forget", "status": "ok", "memoryId": memoryID.uuidString],
+            ["actionName": "remember", "status": "ok", "memoryId": "not-a-uuid"],
+        ] {
+            YishuMemoryQualityEvents.recordRememberedIfValid(payload: invalidPayload, scope: projectScope)
+        }
+        YishuMemoryQualityEvents.recordRememberedIfValid(payload: validPayload, scope: .privateSession)
+        YishuMemoryQualityEvents.recordRememberedIfValid(
+            payload: validPayload,
+            scope: YishuSessionScope(kind: .project, projectId: nil, projectLabel: "秘密项目")
+        )
+
+        client.dispatchRuntimeEventForTests([
+            "schemaVersion": 1,
+            "type": "product.action.completed",
+            "eventId": UUID().uuidString,
+            "requestId": requestID.uuidString,
+            "traceId": traceID.uuidString,
+            "sentAt": "2026-08-29T00:00:00Z",
+            "payload": validPayload,
+        ])
+        client.dispatchRuntimeEventForTests([
+            "schemaVersion": 1,
+            "type": "response.completed",
+            "eventId": UUID().uuidString,
+            "requestId": requestID.uuidString,
+            "traceId": traceID.uuidString,
+            "sentAt": "2026-08-29T00:00:01Z",
+            "payload": ["text": "记好了。", "verified": true],
+        ])
+        for try await _ in parked.turn.events {}
+
+        let lines = String(decoding: try Data(contentsOf: storeURL), as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+        let events = try lines.compactMap {
+            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        let matchingEvents = events.filter { event in
+            guard event["name"] as? String == "memory.remembered",
+                  let attributes = event["attributes"] as? [String: Any] else {
+                return false
+            }
+            return attributes["memoryIdHash"] as? String
+                == "e5855ff48799c52c9ccf80b82bab9492c347a316876dbeaafef22b0bd4fac13d"
+        }
+        #expect(matchingEvents.count == 1)
+        let event = try #require(matchingEvents.first)
+        #expect(event["name"] as? String == "memory.remembered")
+        #expect(event["status"] as? String == "ok")
+        let attributes = try #require(event["attributes"] as? [String: Any])
+        #expect(Set(attributes.keys) == ["memoryIdHash", "scopeHash"])
+        #expect(attributes["memoryIdHash"] as? String == "e5855ff48799c52c9ccf80b82bab9492c347a316876dbeaafef22b0bd4fac13d")
+        #expect(attributes["scopeHash"] as? String == "a09241bf50effd414d486080ad08f20e5ecab3a8fb014b26e56842328fec0200")
+        let matchingLine = String(data: try JSONSerialization.data(withJSONObject: event), encoding: .utf8) ?? ""
+        #expect(!matchingLine.contains(memoryID.uuidString))
+        #expect(!matchingLine.contains("秘密项目"))
+        #expect(!matchingLine.contains("private-receipt"))
+    }
+
     @Test @MainActor func blankClickLabelYieldsTheActionInsteadOfFailingTheTurn() async throws {
         let client = YishuAgentRuntimeClient()
         let requestID = UUID()
