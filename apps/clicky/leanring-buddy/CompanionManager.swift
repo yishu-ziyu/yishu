@@ -2669,6 +2669,7 @@ final class CompanionManager: ObservableObject {
             heldWindowNumber: held?.activeWindowNumber,
             currentWindowNumber: current.activeWindowNumber,
             capturedAt: held?.capturedAtUptimeNanoseconds,
+            screenshotCapturedAt: held?.context.screenshotCapturedAtUptimeNanoseconds,
             now: DispatchTime.now().uptimeNanoseconds
         )
         defer { clearHeldSceneCapture() }

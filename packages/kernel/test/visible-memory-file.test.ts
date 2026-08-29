@@ -146,7 +146,7 @@ test("remember and extract write the visible file; forget removes the bullet", a
   await runExtractionPass({
     queue,
     truth: kernel.memory!.truth,
-    store: kernel.store,
+    store: kernel.memory!.extraction,
     model,
     visible,
   });

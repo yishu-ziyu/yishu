@@ -83,6 +83,8 @@ export interface ConversationLedger {
   open(input: {
     conversationId: string;
     expectedScope: SessionScope;
+    /** Filter non-completed turns before applying the visible history cap. */
+    completedOnly?: boolean;
   }): Promise<ConversationOpenResult>;
 
   archivePersonal(input: {
@@ -166,6 +168,7 @@ export function createConversationLedger(store: YishuStorePort): ConversationLed
       const turns = await store.listConversationTurns(conversation.id);
       const visibleTurns = turns
         .filter((turn) => {
+          if (input.completedOnly === true && turn.status !== "completed") return false;
           const hasUser = turn.userInput !== undefined && turn.userInput.trim().length > 0;
           const hasAssistant =
             turn.assistantOutput !== undefined && turn.assistantOutput.trim().length > 0;

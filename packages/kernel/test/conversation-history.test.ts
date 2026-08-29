@@ -97,6 +97,15 @@ async function exerciseConversationLedger(store: YishuStorePort): Promise<void> 
       sessionScope: { kind: "personal" },
     });
   }
+  for (let index = 0; index < 5; index += 1) {
+    await store.upsertConversationTurn({
+      id: `capped-failed-${index}`,
+      conversationId: "capped-personal",
+      userInput: `失败轮 ${index}`,
+      status: "failed",
+      sessionScope: { kind: "personal" },
+    });
+  }
 
   const privateList = await ledger.list({ sessionScope: { kind: "private" } });
   assert.deepEqual(privateList, []);
@@ -163,12 +172,14 @@ async function exerciseConversationLedger(store: YishuStorePort): Promise<void> 
   const capped = await ledger.open({
     conversationId: "capped-personal",
     expectedScope: { kind: "personal" },
+    completedOnly: true,
   });
   assert.equal(capped.ok, true);
   if (!capped.ok) return;
   assert.equal(capped.turns.length, 20);
   assert.equal(capped.turns[0]?.userInput, "用户句 5");
   assert.equal(capped.turns[19]?.userInput, "用户句 24");
+  assert.equal(capped.turns.every((turn) => turn.status === "completed"), true);
   assert.equal(capped.turns.some((turn) => turn.id === "empty-turn"), false);
 
   assert.deepEqual(

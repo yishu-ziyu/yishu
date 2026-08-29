@@ -172,6 +172,7 @@ export function mapEverOSSearchHits(
     : [];
   const selected: RecalledMemory[] = [];
   let totalChars = 0;
+  const requestedProjectId = everosProjectId(scopeKey, identity);
 
   const push = (item: RecalledMemory | undefined): void => {
     if (item === undefined) return;
@@ -185,7 +186,11 @@ export function mapEverOSSearchHits(
 
   for (const episode of episodes) {
     if (selected.length >= MEMORY_RECALL_MAX_ITEMS) break;
-    const projectId = asString(episode.project_id) ?? everosProjectId(scopeKey, identity);
+    // The EverOS response contract includes project_id on every episode. Treat
+    // an omitted or mismatched value as malformed instead of inheriting the
+    // requested scope, which could turn a cross-project hit into a valid one.
+    const projectId = asString(episode.project_id);
+    if (projectId === undefined || projectId !== requestedProjectId) continue;
     const scope = memoryScopeFromEverOSProject(projectId, identity);
     const capturedAt = capturedAtOf(episode.timestamp);
     const facts = Array.isArray(episode.atomic_facts)

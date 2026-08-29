@@ -20,6 +20,11 @@ struct OnboardingProgress: Codable {
 
 enum YishuOnboardingStore {
     private static let key = "yishu.onboarding.progress"
+    static var testDefaults: UserDefaults?
+
+    private static var defaults: UserDefaults {
+        testDefaults ?? .standard
+    }
 
     static var isActivated: Bool {
         load()?.milestone == .verifiedActionCompleted
@@ -28,7 +33,7 @@ enum YishuOnboardingStore {
     }
 
     static func load() -> OnboardingProgress? {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        guard let data = defaults.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(OnboardingProgress.self, from: data)
     }
 
@@ -41,7 +46,7 @@ enum YishuOnboardingStore {
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
         )
         if let data = try? JSONEncoder().encode(progress) {
-            UserDefaults.standard.set(data, forKey: key)
+            defaults.set(data, forKey: key)
         }
         QualityEventRecorder.record(
             name: milestone == .verifiedActionCompleted ? "onboarding.first_verified_action" : "onboarding.step_completed",

@@ -7,7 +7,6 @@
  * duplicate a fact.
  */
 
-import type { YishuStorePort } from "../store/yishu-store.js";
 import type { MemoryClaim } from "../store/types.js";
 import { assertPersistableMemoryFields } from "../store/ledger-safety.js";
 import { MemoryTruthLayer } from "./truth-layer.js";
@@ -35,6 +34,28 @@ export interface MemoryExtractionOutput {
  */
 export interface MemoryExtractionModel {
   extract(input: MemoryExtractionInput): Promise<MemoryExtractionOutput>;
+}
+
+export interface ExtractedMemoryInput {
+  readonly claim: string;
+  readonly capturedAt: string;
+  readonly scope: string;
+  readonly confidence: number;
+  readonly lastConfirmedAt: string;
+  readonly supersedes: string | null;
+  readonly tags: readonly string[];
+  readonly truthRef?: string;
+}
+
+/**
+ * The only durable index operations needed by the extraction worker.
+ * Keeping this port here prevents the worker from depending on the complete
+ * product store surface (and keeps provider/runtime details out of Kernel).
+ */
+export interface MemoryExtractionStorePort {
+  searchExistingClaims(scopeKey: string): Promise<readonly MemoryClaim[]>;
+  addExtractedMemory(input: ExtractedMemoryInput): Promise<MemoryClaim>;
+  confirmMemory(id: string, confirmedAt: string): Promise<boolean>;
 }
 
 /** Deterministic small-talk set (ADR 0016 #5); whole-utterance equality. */
@@ -65,7 +86,7 @@ export interface ExtractionRunStats {
 interface ExtractionDeps {
   readonly queue: ExtractionQueuePort;
   readonly truth: MemoryTruthLayer;
-  readonly store: YishuStorePort;
+  readonly store: MemoryExtractionStorePort;
   readonly model: MemoryExtractionModel;
   readonly visible?: VisibleMemoryFile;
   readonly now?: () => Date;
@@ -76,8 +97,11 @@ interface ExistingFactView {
   readonly byId: Map<string, MemoryClaim>;
 }
 
-async function loadExistingFacts(store: YishuStorePort, scopeKey: string): Promise<ExistingFactView> {
-  const claims = (await store.searchMemory("", { scope: scopeKey, minConfidence: 0 }))
+async function loadExistingFacts(
+  store: MemoryExtractionStorePort,
+  scopeKey: string,
+): Promise<ExistingFactView> {
+  const claims = (await store.searchExistingClaims(scopeKey))
     .filter((claim) => claim.retiredAt === undefined);
   const byId = new Map(claims.map((claim) => [claim.id, claim]));
   return {
@@ -164,9 +188,8 @@ async function processOne(deps: ExtractionDeps, turnId: string): Promise<Process
       confirmedAt: snapshot.capturedAt,
     });
     if (result === "created") {
-      await deps.store.addMemory({
+      await deps.store.addExtractedMemory({
         claim: candidate.trim(),
-        source: "extraction",
         capturedAt: snapshot.capturedAt,
         scope: snapshot.scopeKey,
         confidence: 0.6,

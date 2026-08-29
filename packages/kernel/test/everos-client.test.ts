@@ -195,6 +195,57 @@ describe("EverOSHttpClient", () => {
     assert.equal(hits.length, 0);
   });
 
+  it("drops search hits whose project id does not exactly match the requested scope", () => {
+    const hits = mapEverOSSearchHits({
+      data: {
+        episodes: [
+          {
+            id: "ep_wrong_project",
+            summary: "来自另一个项目的记忆",
+            timestamp: "2026-08-18T00:00:00.000Z",
+            project_id: "project-a",
+          },
+          {
+            id: "ep_wrong_identity",
+            summary: "来自另一个身份分区的记忆",
+            timestamp: "2026-08-18T00:00:00.000Z",
+            project_id: "other-personal",
+          },
+          {
+            id: "ep_missing_project",
+            summary: "缺少分区字段的记忆",
+            timestamp: "2026-08-18T00:00:00.000Z",
+          },
+          {
+            id: "ep_personal",
+            summary: "当前个人分区的记忆",
+            timestamp: "2026-08-18T00:00:00.000Z",
+            project_id: "personal",
+          },
+        ],
+      },
+    }, "personal");
+
+    assert.deepEqual(hits.map((row) => row.id), ["ep_personal"]);
+  });
+
+  it("preserves exact project-scope mapping", () => {
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const hits = mapEverOSSearchHits({
+      data: {
+        episodes: [{
+          id: "ep_project",
+          summary: "当前项目的记忆",
+          timestamp: "2026-08-18T00:00:00.000Z",
+          project_id: projectId,
+        }],
+      },
+    }, `project:${projectId}`);
+
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]?.scope, `project:${projectId}`);
+  });
+
   it("rejects a user identity that collides with the assistant sender", () => {
     assert.throws(() => new EverOSHttpClient({
       baseUrl: "http://127.0.0.1:18765",

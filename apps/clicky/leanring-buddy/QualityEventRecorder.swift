@@ -2,6 +2,7 @@ import Foundation
 
 enum QualityEventRecorder {
     static var paused = false
+    static var testStoreURL: URL?
 
     private static let allowlist: Set<String> = [
         "appCategory", "actionKind", "providerId", "modelId", "errorCode",
@@ -52,6 +53,7 @@ enum QualityEventRecorder {
     }
 
     private static func storeURL() -> URL {
+        if let testStoreURL { return testStoreURL }
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Yishu", isDirectory: true)
             .appendingPathComponent("Diagnostics", isDirectory: true)

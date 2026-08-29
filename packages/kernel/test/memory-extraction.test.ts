@@ -59,6 +59,28 @@ async function makeDeps(t: TestContext) {
   return { kernel, memory: kernel.memory! };
 }
 
+test("memory layer exposes the extraction-only store port", async (t) => {
+  const { memory } = await makeDeps(t);
+  const capturedAt = "2026-08-15T10:42:00.000Z";
+  const claim = await memory.extraction.addExtractedMemory({
+    claim: "用户偏好要点列表",
+    capturedAt,
+    scope: "personal",
+    confidence: 0.6,
+    lastConfirmedAt: capturedAt,
+    supersedes: null,
+    tags: [],
+  });
+  assert.equal(claim.source, "extraction");
+
+  const existing = await memory.extraction.searchExistingClaims("personal");
+  assert.deepEqual(existing.map((row) => row.id), [claim.id]);
+  assert.equal(
+    await memory.extraction.confirmMemory(claim.id, "2026-08-16T10:42:00.000Z"),
+    true,
+  );
+});
+
 test("episode append is idempotent per turn id (crash replay safe)", async (t) => {
   const { memory } = await makeDeps(t);
   const entry = {
@@ -86,7 +108,7 @@ test("pipeline writes episode + active fact with truthRef, then replay adds noth
   const stats = await runExtractionPass({
     queue,
     truth: memory.truth,
-    store: kernel.store,
+    store: memory.extraction,
     model: scriptedModel({ newFacts: ["用户偏好要点列表"], confirmedFactIds: [] }, calls),
     visible: memory.visible,
   });
@@ -112,7 +134,7 @@ test("pipeline writes episode + active fact with truthRef, then replay adds noth
   await runExtractionPass({
     queue,
     truth: memory.truth,
-    store: kernel.store,
+    store: memory.extraction,
     model: scriptedModel({ newFacts: ["用户偏好要点列表"], confirmedFactIds: [] }),
   });
   const after = await kernel.store.searchMemory("", { scope: "personal", minConfidence: 0 });
@@ -130,7 +152,7 @@ test("greeting turns skip the model but keep their episode", async (t) => {
   const stats = await runExtractionPass({
     queue,
     truth: memory.truth,
-    store: kernel.store,
+    store: memory.extraction,
     model: scriptedModel({ newFacts: ["x"], confirmedFactIds: [] }, calls),
   });
   assert.equal(stats.skippedModel, 1);
@@ -150,7 +172,7 @@ test("sensitive candidates are discarded; nothing reaches markdown or index", as
   const stats = await runExtractionPass({
     queue,
     truth: memory.truth,
-    store: kernel.store,
+    store: memory.extraction,
     model: scriptedModel({
       newFacts: ["api_key=sk-abcdefgh12345678", "用户喜欢深色模式"],
       confirmedFactIds: [],
@@ -193,7 +215,7 @@ test("confirmed_fact_ids bump lastConfirmedAt instead of creating rows", async (
   const stats = await runExtractionPass({
     queue,
     truth: memory.truth,
-    store: kernel.store,
+    store: memory.extraction,
     model: scriptedModel({
       newFacts: [],
       confirmedFactIds: [seeded[0]!.id],
@@ -218,15 +240,15 @@ test("model failures retry within bounds and park as failed for replay", async (
     },
   };
   const first = await runExtractionPass({
-    queue, truth: memory.truth, store: kernel.store, model: failing,
+    queue, truth: memory.truth, store: memory.extraction, model: failing,
   });
   assert.equal(first.failed, 0, "first failure stays retryable");
   const second = await runExtractionPass({
-    queue, truth: memory.truth, store: kernel.store, model: failing,
+    queue, truth: memory.truth, store: memory.extraction, model: failing,
   });
   assert.equal(second.failed, 0, "second failure stays retryable");
   const third = await runExtractionPass({
-    queue, truth: memory.truth, store: kernel.store, model: failing,
+    queue, truth: memory.truth, store: memory.extraction, model: failing,
   });
   assert.equal(third.failed, 1, "third failure parks as failed");
   const row = await queue.getRow("turn-fail");
@@ -236,7 +258,7 @@ test("model failures retry within bounds and park as failed for replay", async (
   const recovered = await runExtractionPass({
     queue,
     truth: memory.truth,
-    store: kernel.store,
+    store: memory.extraction,
     model: scriptedModel({ newFacts: ["用户回来了"], confirmedFactIds: [] }),
   });
   assert.equal(recovered.failed, 0);

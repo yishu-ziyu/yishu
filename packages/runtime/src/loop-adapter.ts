@@ -27,13 +27,16 @@ import {
 import { createDesktopLoopState, type DesktopLoopState } from "./desktop/desktop-loop.js";
 import {
   authorizedTextForUtterance,
-  computerActionCompletionText,
+  assertContextFrameFresh,
+  ContextFrameFreshnessError,
   desktopActionBudgetForTurn,
   digestComputerControlAction,
   nextDesktopObservation,
   observationFromContextFrame,
+  projectComputerActionTerminal,
   rememberUnknownCommit,
   shouldRunCompatibilityComputerAction,
+  shouldBufferComputerModelText,
   unknownCommitBlocksRetry,
   withFreshObservation,
 } from "./desktop/computer-turn.js";
@@ -91,38 +94,16 @@ import {
 } from "@yishu/kernel";
 import { markTrustedExternalReceipt } from "./trusted-task-receipt.js";
 import { emptyResearchCompletionTrace, noteResearchTool, researchCompletionFields } from "./research/research-completion-gate.js";
+import {
+  deferredSignal,
+  SteerReplacementFailedBeforeStartError,
+  type DeferredSignal,
+  type SteerCycle,
+} from "./runtime-turn-primitives.js";
 
 type RuntimeModel = ResolvedModel;
 const SESSION_ABORT_TIMEOUT_MS = 2_000;
 const INTERRUPTION_STEER_TIMEOUT_MS = 30_000;
-
-interface DeferredSignal {
-  readonly promise: Promise<void>;
-  resolve(): void;
-  reject(error: Error): void;
-}
-
-interface SteerCycle {
-  readonly generation: number;
-  readonly submitted: DeferredSignal;
-  readonly supersededSignal: DeferredSignal;
-  readonly deadlineAt: number;
-  operation?: Promise<void>;
-  text?: string;
-  userObserved?: boolean;
-  assistantStarted?: boolean;
-  superseded?: boolean;
-}
-
-function deferredSignal(): DeferredSignal {
-  let resolve!: () => void;
-  let reject!: (error: Error) => void;
-  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
 
 async function abortSessionWithin(session: ModelSession): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -143,7 +124,7 @@ interface ActiveComputerTurn {
   basisFrameId: string;
   directComputerAction: boolean;
   authorizedText?: string;
-  allowedActionSequence: Array<"set_text" | "left_click">;
+  allowedActionSequence?: Array<"set_text" | "left_click">;
   actionBudget: number;
   frontmostTarget?: {
     targetBundleId: string;
@@ -176,13 +157,6 @@ type InterruptDecision = {
   generation: number;
   reason: "generation_mismatch" | "effect_already_dispatched" | "terminal";
 };
-
-class SteerReplacementFailedBeforeStartError extends Error {
-  constructor() {
-    super("Pi replacement failed before producing an assistant response.");
-    this.name = "SteerReplacementFailedBeforeStartError";
-  }
-}
 
 function assistantMessageIdentity(message: AssistantMessageIdentity | undefined): string | undefined {
   if (message?.role !== "assistant"
@@ -609,13 +583,14 @@ export interface YishuLoopRuntimeAdapterOptions {
   modelRuntimePromise?: Promise<ModelProviderRuntime>;
   createSession?: typeof createYishuAgentSession;
   interruptionSteerTimeoutMs?: number;
+  now?: () => Date;
 }
 
 export class YishuLoopRuntimeAdapter implements AgentRuntime {
-  private readonly workingDirectory: string;
   private readonly modelRuntimePromise: Promise<ModelProviderRuntime>;
   private readonly createSession: typeof createYishuAgentSession;
   private readonly interruptionSteerTimeoutMs: number;
+  private readonly now: () => Date;
   readonly authService: YishuAuthService;
   private readonly sessions = new Map<string, ModelSession>();
   private readonly activeSessionByRequestId = new Map<string, ModelSession>();
@@ -652,10 +627,10 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     private readonly computerUsePort: ComputerUsePort = new UnavailableComputerUsePort(),
     options: YishuLoopRuntimeAdapterOptions = {},
   ) {
-    this.workingDirectory = workingDirectory;
     this.createSession = options.createSession ?? createYishuAgentSession;
     this.interruptionSteerTimeoutMs = options.interruptionSteerTimeoutMs
       ?? INTERRUPTION_STEER_TIMEOUT_MS;
+    this.now = options.now ?? (() => new Date());
     // Keep provider/model state in this process. In particular, do not read
     // or write any global model catalog. OAuth state is product-owned under
     // Yishu/Auth/auth.json instead. The registry is OAuth-only by
@@ -944,11 +919,15 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     const authorizedText = intentAllowsEffect
       ? authorizedTextForUtterance(command.payload.utterance)
       : undefined;
-    const allowedActionSequence: Array<"set_text" | "left_click"> = [];
     const actionBudget = desktopActionBudgetForTurn({
       utterance: command.payload.utterance,
       intentAllowsEffect,
     });
+    const bufferComputerModelText = shouldBufferComputerModelText({
+      intentAllowsEffect,
+      actionBudget,
+    });
+    let computerActionAttempted = false;
     const generationState = new PiTurnGenerationState(
       directComputerAction,
       true,
@@ -983,13 +962,14 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         emitVisibleDelta(generation, generationState.output.push(
           generation,
           event.assistantMessageEvent.delta,
-          generationState.isDirectAction(generation),
+          bufferComputerModelText || generationState.isDirectAction(generation),
         ));
       }
 
       if (event.type === "tool_execution_start") {
         const generation = generationState.generationForToolStart(event.toolCallId);
         if (!generationState.accepts(generation)) return;
+        if (event.toolName === "computer_control") computerActionAttempted = true;
         emit(runtimeEvent("tool.started", command.requestId, command.traceId, {
           toolName: event.toolName,
           generation,
@@ -1025,7 +1005,6 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       basisFrameId: command.payload.contextFrame.frameId,
       directComputerAction,
       ...(authorizedText !== undefined ? { authorizedText } : {}),
-      allowedActionSequence,
       actionBudget,
       ...(observedFrontmost?.bundleIdentifier && observedFrontmost.processIdentifier > 0
         ? {
@@ -1050,6 +1029,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     let restoreTools: (() => void) | undefined;
     try {
       await this.activeComputerTurn.run(computerTurn, async () => {
+        assertContextFrameFresh(command.payload.contextFrame, this.now());
         restoreTools = this.activateToolsForTurn(
           session,
           this.sessionToolPolicy(command.payload.conversationId ?? command.requestId),
@@ -1133,17 +1113,25 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
 
         if (this.isRequestCancelled(command.requestId)) return;
 
-        if (generationState.isDirectAction(generation) && computerTurn.actionCount > 0) {
-          emitVisibleDelta(generation, this.conciseActionResult(computerTurn.lastResult));
-        } else {
-          emitVisibleDelta(generation, completedOutput.visibleDelta);
-        }
+        const terminal = projectComputerActionTerminal({
+          directComputerAction: generationState.isDirectAction(generation),
+          actionCount: computerTurn.actionCount,
+          allActionsVerified: computerTurn.allActionsVerified,
+          bufferComputerModelText,
+          computerActionAttempted,
+          ...(computerTurn.lastResult === undefined
+            ? {}
+            : { lastResult: computerTurn.lastResult }),
+          modelVisibleDelta: completedOutput.visibleDelta,
+        });
+        emitVisibleDelta(generation, terminal.visibleDelta);
 
         const spokenText = generationState.text(generation);
-        const authoritativeText = generationState.isDirectAction(generation)
-          || computerTurn.actionCount > 0
-          ? spokenText
-          : attachObservationalPointDirective(spokenText, completedOutput.pointing);
+        const authoritativeText = terminal.receiptProjectionText
+          ?? (generationState.isDirectAction(generation)
+            || terminal.hasComputerAction
+            ? spokenText
+            : attachObservationalPointDirective(spokenText, completedOutput.pointing));
         if (authoritativeText.trim().length === 0) {
           const error = new Error("Pi completed the turn without a user-visible response.");
           Object.assign(error, {
@@ -1193,8 +1181,12 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
           ? "steer_replacement_failed_before_start"
           : isFirstByteTimeoutError(error)
             ? "first_byte_timeout"
-            : "pi_turn_failed",
-        message: safeRuntimeErrorMessage(error),
+            : error instanceof ContextFrameFreshnessError
+              ? error.code
+              : "pi_turn_failed",
+        message: error instanceof ContextFrameFreshnessError
+          ? error.message
+          : safeRuntimeErrorMessage(error),
         generation: Math.max(
           generationState.currentGeneration,
           generationState.output.acceptanceFloor,
@@ -1536,10 +1528,6 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       activeTurn.allActionsVerified = false;
       throw error;
     }
-  }
-
-  private conciseActionResult(result: ComputerActionResult | undefined): string {
-    return computerActionCompletionText(result);
   }
 
   private resolveModelPreference(rawPreference: ModelPreference | undefined): ModelPreference {

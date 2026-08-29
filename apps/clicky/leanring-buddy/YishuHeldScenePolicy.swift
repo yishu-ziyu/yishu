@@ -15,8 +15,10 @@ struct YishuHeldSceneIdentity: Equatable {
 }
 
 enum YishuHeldScenePolicy {
-    /// Matches ContextFrame evidence lifetime. App/display/window change still wins.
+    /// Metadata/scene evidence lifetime. App/display/window change still wins.
     static let maxAgeNanoseconds: UInt64 = 30_000_000_000
+    /// A held scene may reuse its JPEG only while the image itself is recent.
+    static let maxScreenshotAgeNanoseconds: UInt64 = 5_000_000_000
 
     /// Same frontmost app, display arrangement, and focused window.
     /// Missing window numbers on both sides still match (window list can be empty);
@@ -53,6 +55,7 @@ enum YishuHeldScenePolicy {
         heldWindowNumber: Int?,
         currentWindowNumber: Int?,
         capturedAt: UInt64?,
+        screenshotCapturedAt: UInt64?,
         now: UInt64
     ) -> YishuHeldSceneDecision {
         if requiresActiveWindowOnly {
@@ -67,6 +70,13 @@ enum YishuHeldScenePolicy {
             return .recaptureMissingBasis
         }
         guard now >= capturedAt, now - capturedAt <= maxAgeNanoseconds else {
+            return .recaptureStale
+        }
+        guard let screenshotCapturedAt else {
+            return .recaptureMissingBasis
+        }
+        guard now >= screenshotCapturedAt,
+              now - screenshotCapturedAt <= maxScreenshotAgeNanoseconds else {
             return .recaptureStale
         }
         let held = YishuHeldSceneIdentity(

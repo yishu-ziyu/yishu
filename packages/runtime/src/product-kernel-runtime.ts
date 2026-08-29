@@ -10,7 +10,6 @@ import {
   deriveTurnIntentFrame,
   taskExecutionContractForIntent,
   RELATIVE_TIME_REMINDER_CLARIFY_SPEECH,
-  isVisibleFactSuppressed,
   recallFromVisibleFacts,
   readLegacyFactClaims,
   sanitizeVisibleText,
@@ -101,6 +100,7 @@ import type { EverOSPendingSessionStore } from "./everos-pending-sessions.js";
 import { ingestVerifiedTaskLearning } from "./everos-task-learning.js";
 import {
   GENERATION_EVENT_TYPES,
+  acceptScopedDerivedMemories,
   asRecord,
   boundedConversationHistory,
   contextWatchIdFromEvidence,
@@ -500,7 +500,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     await runExtractionPass({
       queue: memory.queue,
       truth: memory.truth,
-      store: this.kernel.store,
+      store: memory.extraction,
       model: this.extractionModel,
       visible: memory.visible,
     });
@@ -3182,20 +3182,23 @@ export class ProductKernelRuntime implements AgentRuntime {
   ): Promise<PromptConversationTurn[]> {
     if (state.sessionScope.kind === "private") return [];
     try {
-      const conversation = await this.kernel.store.getConversation(state.conversationId);
-      if (
-        !conversation
-        || conversation.status === "archived"
-        || !sessionScopesEqual(conversation.sessionScope, state.sessionScope)
-      ) {
+      const opened = await this.kernel.conversations.open({
+        conversationId: state.conversationId,
+        expectedScope: state.sessionScope,
+        completedOnly: true,
+      });
+      if (!opened.ok) {
         return [];
       }
-      const turns = await this.kernel.store.listConversationTurns(state.conversationId);
+      const turns = opened.turns
+        .filter((turn) => turn.status === "completed")
+        .map((turn) => ({
+          ...turn,
+          conversationId: opened.conversation.id,
+          sessionScope: opened.conversation.sessionScope,
+        }));
       return boundedConversationHistory(
-        turns.filter((turn) => (
-          turn.status === "completed"
-          && sessionScopesEqual(turn.sessionScope, state.sessionScope)
-        )).sort((left, right) => left.sequence - right.sequence),
+        turns.sort((left, right) => left.sequence - right.sequence),
       );
     } catch {
       return [];
@@ -3318,11 +3321,8 @@ export class ProductKernelRuntime implements AgentRuntime {
 
     if (!derivedRecallAllowed) return merged;
 
-    const currentAuthority = authority;
     const acceptedDerived = (rows: readonly RecalledMemory[]): RecalledMemory[] =>
-      currentAuthority === undefined
-        ? [...rows]
-        : rows.filter((row) => !isVisibleFactSuppressed(currentAuthority, row.claim));
+      acceptScopedDerivedMemories(rows, scope, authority);
 
     if (this.everos !== undefined) {
       try {
@@ -3330,9 +3330,6 @@ export class ProductKernelRuntime implements AgentRuntime {
       } catch {
         // Derived profile facts are optional; a miss must not skip other memory.
       }
-    }
-
-    if (this.everos !== undefined) {
       try {
         pushAll(acceptedDerived(await this.everos.search({
           scopeKey: scope,

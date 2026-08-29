@@ -126,6 +126,57 @@ export function desktopActionBudgetForTurn(input: {
   return computerActionLimitForUtterance(input.utterance);
 }
 
+export function shouldBufferComputerModelText(input: {
+  intentAllowsEffect: boolean;
+  actionBudget: number;
+}): boolean {
+  return input.intentAllowsEffect && input.actionBudget > 0;
+}
+
+const CONTEXT_FRAME_CLOCK_SKEW_MS = 5_000;
+
+export class ContextFrameFreshnessError extends Error {
+  constructor(
+    readonly code: "context_frame_invalid" | "context_frame_expired" | "context_frame_from_future",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ContextFrameFreshnessError";
+  }
+}
+
+export function assertContextFrameFresh(contextFrame: ContextFrame, now = new Date()): void {
+  const nowMs = now.getTime();
+  const capturedAtMs = Date.parse(contextFrame.capturedAt);
+  const expiresAtMs = Date.parse(contextFrame.expiresAt);
+  if (!Number.isFinite(nowMs) || !Number.isFinite(capturedAtMs) || !Number.isFinite(expiresAtMs)) {
+    throw new ContextFrameFreshnessError(
+      "context_frame_invalid",
+      "ContextFrame time boundaries are invalid.",
+    );
+  }
+  if (expiresAtMs <= nowMs) {
+    throw new ContextFrameFreshnessError(
+      "context_frame_expired",
+      "ContextFrame expired before the model prompt was admitted.",
+    );
+  }
+  // The product's context-watch contract tolerates only a bounded clock
+  // skew. A materially future frame cannot be trusted as current evidence.
+  if (capturedAtMs > nowMs + CONTEXT_FRAME_CLOCK_SKEW_MS) {
+    throw new ContextFrameFreshnessError(
+      "context_frame_from_future",
+      "ContextFrame capturedAt is too far in the future.",
+    );
+  }
+  if (expiresAtMs <= capturedAtMs) {
+    throw new ContextFrameFreshnessError(
+      "context_frame_invalid",
+      "ContextFrame time boundaries are invalid.",
+    );
+  }
+}
+
 export function observationFromContextFrame(frame: ContextFrame): DesktopObservation {
   return {
     observationId: frame.frameId,
@@ -143,6 +194,39 @@ export function observationFromContextFrame(frame: ContextFrame): DesktopObserva
       ...(target.enabled === undefined || target.enabled === null ? {} : { enabled: target.enabled }),
     })),
     warnings: frame.warnings,
+  };
+}
+
+export interface ComputerActionTerminalProjection {
+  readonly hasComputerAction: boolean;
+  readonly visibleDelta: string;
+  readonly receiptProjectionText?: string;
+}
+
+export function projectComputerActionTerminal(input: {
+  directComputerAction: boolean;
+  actionCount: number;
+  allActionsVerified: boolean;
+  bufferComputerModelText: boolean;
+  computerActionAttempted: boolean;
+  lastResult?: ComputerActionResult;
+  modelVisibleDelta: string;
+}): ComputerActionTerminalProjection {
+  const hasComputerAction = input.actionCount > 0;
+  const shouldProjectReceipt = (hasComputerAction && input.allActionsVerified !== true)
+    || (input.bufferComputerModelText && input.computerActionAttempted && !hasComputerAction);
+  const receiptProjectionText = shouldProjectReceipt
+    ? computerActionCompletionText(input.lastResult)
+    : undefined;
+  const visibleDelta = input.directComputerAction && hasComputerAction
+    ? computerActionCompletionText(input.lastResult)
+    : shouldProjectReceipt
+      ? computerActionCompletionText(input.lastResult)
+      : input.modelVisibleDelta;
+  return {
+    hasComputerAction,
+    visibleDelta,
+    ...(receiptProjectionText === undefined ? {} : { receiptProjectionText }),
   };
 }
 
