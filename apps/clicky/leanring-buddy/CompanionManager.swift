@@ -3433,7 +3433,12 @@ final class CompanionManager: ObservableObject {
         }
         let pointingParse = Self.parsePointingCoordinates(from: finalText)
         let spokenOverlayText = pointingParse.spokenText
-        if !isDirectClickTurn, presentationTranscript == transcript {
+        if YishuObservationalPointingPolicy.shouldPublish(
+            from: .runtimeCompletion,
+            hasCoordinate: pointingParse.coordinate != nil,
+            isDirectClickTurn: isDirectClickTurn,
+            presentationTranscriptMatches: presentationTranscript == transcript
+        ) {
             beginObservationalPointing(
                 from: pointingParse,
                 screenCaptures: screenCaptures,
@@ -3603,14 +3608,6 @@ final class CompanionManager: ObservableObject {
             detectedElementScreenLocation = nil
             detectedElementDisplayFrame = nil
             voiceState = .responding
-        } else if beginObservationalPointing(
-            from: parseResult,
-            screenCaptures: screenCaptures,
-            isDirectClickTurn: isDirectClickTurn
-        ) {
-            print("🎯 奕枢 pointing target resolved")
-        } else {
-            print("🎯 奕枢 response has no pointing target")
         }
 
         // Runtime/local streaming may have been buffered for a direct click;

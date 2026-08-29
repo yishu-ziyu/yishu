@@ -705,6 +705,49 @@ struct leanring_buddyTests {
         #expect(spaced.elementLabel == "日期")
     }
 
+    @Test func observationalPointingIsPublishedOnlyByRuntimeCompletion() {
+        #expect(
+            YishuObservationalPointingPolicy.shouldPublish(
+                from: .runtimeCompletion,
+                hasCoordinate: true,
+                isDirectClickTurn: false,
+                presentationTranscriptMatches: true
+            )
+        )
+        #expect(
+            !YishuObservationalPointingPolicy.shouldPublish(
+                from: .responsePresentation,
+                hasCoordinate: true,
+                isDirectClickTurn: false,
+                presentationTranscriptMatches: true
+            )
+        )
+        #expect(
+            !YishuObservationalPointingPolicy.shouldPublish(
+                from: .runtimeCompletion,
+                hasCoordinate: false,
+                isDirectClickTurn: false,
+                presentationTranscriptMatches: true
+            )
+        )
+        #expect(
+            !YishuObservationalPointingPolicy.shouldPublish(
+                from: .runtimeCompletion,
+                hasCoordinate: true,
+                isDirectClickTurn: true,
+                presentationTranscriptMatches: true
+            )
+        )
+        #expect(
+            !YishuObservationalPointingPolicy.shouldPublish(
+                from: .runtimeCompletion,
+                hasCoordinate: true,
+                isDirectClickTurn: false,
+                presentationTranscriptMatches: false
+            )
+        )
+    }
+
     @Test func speechTextKeepsVisibleSourcesButDoesNotReadURLs() {
         let presentationText = """
         1. Apple 调整了硬件出货。
