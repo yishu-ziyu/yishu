@@ -54,6 +54,7 @@ private struct VoiceTurnOrigin {
 
 private struct YishuRuntimeVoiceResponse {
     let text: String
+    let verified: Bool
     let speechAlreadyPresented: Bool
     let presentationTranscript: String
     let allowsScreenEffects: Bool
@@ -201,6 +202,13 @@ private final class VoiceTurnTiming {
         let loggedReason = phase == "asr_complete" && !hasValidReleaseOrigin
             ? "unknown_origin"
             : reason
+        if phase == "context_capture",
+           let contextReason = ClickyContextResolutionReason(rawValue: reason) {
+            ClickyAnalytics.trackContextResolution(
+                reason: contextReason,
+                sourceDimensionsAvailable: sourceDimensions != nil && sourceDimensions != "unavailable"
+            )
+        }
         CompanionManager.logVoicePhase(
             turnID: traceID,
             phase: phase,
@@ -814,6 +822,7 @@ final class CompanionManager: ObservableObject {
                     : YishuPersonalNotesCopy.forgot(item.summary)
             } catch {
                 // Keep the original row on any failure (do not remove).
+                YishuMemoryQualityEvents.recordForgotten(memoryID: item.id, scope: item.scope, status: "failed")
                 self.memoryNotice = error.localizedDescription.isEmpty
                     ? YishuPersonalNotesCopy.forgetFailed
                     : error.localizedDescription
@@ -2432,7 +2441,6 @@ final class CompanionManager: ObservableObject {
             )
             // ContextTrail append happens in Node ProductKernelRuntime on turn.start
             // (screenshot bytes stripped). Background samples use trail.observe.
-
             guard ownsVoiceTurn(turnToken) else { return }
             do {
                 turnVisualPhase = .reasoning
@@ -2452,6 +2460,7 @@ final class CompanionManager: ObservableObject {
                         : [],
                     timing: timing,
                     speechAlreadyPresented: response.speechAlreadyPresented,
+                    verified: response.verified,
                     turnToken: turnToken
                 )
             } catch is CancellationError {
@@ -2544,6 +2553,7 @@ final class CompanionManager: ObservableObject {
                                 : [],
                             timing: timing,
                             speechAlreadyPresented: response.speechAlreadyPresented,
+                            verified: response.verified,
                             turnToken: turnToken
                         )
                         return
@@ -2567,10 +2577,8 @@ final class CompanionManager: ObservableObject {
                 }
                 await presentRuntimeFailure(turnToken: turnToken, error: error)
             }
-
         }
     }
-
     static func rejectedSteerTranscript(from error: Error) -> String? {
         guard let runtimeError = error as? YishuAgentRuntimeClientError,
               case let .turnSteerRejected(message, _) = runtimeError else {
@@ -3132,7 +3140,6 @@ final class CompanionManager: ObservableObject {
         } catch {}
         return .handled(result)
     }
-
     /// Sample app/window/AX into ContextTrail every ~5s without screenshots.
     private func startContextTrailSampling() {
         trailSampleTask?.cancel()
@@ -3144,7 +3151,6 @@ final class CompanionManager: ObservableObject {
             }
         }
     }
-
     private func observeContextTrailSampleIfAllowed() {
         // Private sessions must not collect the evidence locally and rely on a
         // later Node filter. The trust boundary sits before Swift collection.
@@ -3182,7 +3188,6 @@ final class CompanionManager: ObservableObject {
             }
             startContextTrailSampling()
         }
-
         let turn = try yishuAgentRuntimeClient.startTurn(
             utterance: transcript,
             contextFrame: contextFrame,
@@ -3192,7 +3197,6 @@ final class CompanionManager: ObservableObject {
         activeRuntimeRequestId = turn.requestId
         activeRuntimePresentationTranscript = transcript
         responseOverlayManager.showOverlayAndBeginStreaming()
-
         defer {
             if activeRuntimeRequestId == turn.requestId {
                 activeRuntimeRequestId = nil
@@ -3200,11 +3204,11 @@ final class CompanionManager: ObservableObject {
                 activeTurnEffectInFlight = false
             }
         }
-
         var presentationReducer = YishuRuntimePresentationReducer()
         var usedMemories: [YishuMemoryUsedItem] = []
         var isDirectClickTurn = YishuDirectClickResolver.isDirectClickIntent(transcript)
         var presentationTranscript = transcript
+        var responseVerified = false
         var didStartStreamingSpeech = false
         var didSpeakSearchCover = false
         var didSpeakAnswer = false
@@ -3397,9 +3401,10 @@ final class CompanionManager: ObservableObject {
                             timing?.mark("tts_start", reason: "streaming_sentence")
                         }
                     }
-                case let .completed(text, _, _):
+                case let .completed(text, verified, _):
                     updateTurnVisualPhase(for: event)
                     stopCoverSpeech()
+                    responseVerified = verified
                     presentationReducer.completeCurrent(with: text)
                 case .cancelled:
                     updateTurnVisualPhase(for: event)
@@ -3417,7 +3422,6 @@ final class CompanionManager: ObservableObject {
                 )
             }
         }
-
         try Task.checkCancellation()
         let finalText = Self.scrubToolMarkup(
             from: presentationReducer.authoritativeText
@@ -3467,18 +3471,17 @@ final class CompanionManager: ObservableObject {
         }
         return YishuRuntimeVoiceResponse(
             text: finalText,
+            verified: responseVerified,
             speechAlreadyPresented: speechAlreadyPresented,
             presentationTranscript: presentationTranscript,
             allowsScreenEffects: presentationTranscript == transcript
         )
     }
-
     /// Drop panel + bubble source together. Call on every context boundary.
     func clearMemorySourceNotice() {
         memorySourceNotice = nil
         responseOverlayManager.updateMemorySourceText(nil)
     }
-
     private func applyMemorySourceNotice(_ notice: String) {
         let trimmed = notice.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
@@ -3488,7 +3491,6 @@ final class CompanionManager: ObservableObject {
         memorySourceNotice = trimmed
         responseOverlayManager.updateMemorySourceText(trimmed)
     }
-
     /// Short user-visible source line: which memory, when saved, and how it was saved.
     static func formatMemorySourceNotice(_ items: [YishuMemoryUsedItem]) -> String {
         YishuMemorySourcePolicy.formatNotice(items)
@@ -3510,9 +3512,7 @@ final class CompanionManager: ObservableObject {
             print("⚠️ 奕枢 Runtime failure notice TTS unavailable")
         }
     }
-
     static let genericRuntimeFailureMessage = "这轮没有完成。你再说一遍，或者换个说法。"
-
     static func spokenRuntimeFailureMessage(for error: Error) -> String {
         if let runtimeError = error as? YishuAgentRuntimeClientError,
            let description = runtimeError.errorDescription,
@@ -3528,10 +3528,10 @@ final class CompanionManager: ObservableObject {
         screenCaptures: [CompanionScreenCapture],
         timing: VoiceTurnTiming? = nil,
         speechAlreadyPresented: Bool = false,
+        verified: Bool = false,
         turnToken: UUID
     ) async throws {
         guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
-
         // Visual surfaces and history consume the same scrubbed text. TTS
         // derives a separate readable version later so links remain visible
         // without being spelled out aloud.
@@ -3627,7 +3627,7 @@ final class CompanionManager: ObservableObject {
             sourceDimensions: Self.telemetryDimensions(for: screenCaptures)
         )
 
-        ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+        ClickyAnalytics.trackAIResponseReceived(response: spokenText, verified: verified, verifiedActionResult: activeTurnLastComputerActionResult)
 
         let ttsText = Self.speechText(from: spokenText)
         switch YishuSpokenReplyBudget.route(
@@ -3991,6 +3991,7 @@ final class CompanionManager: ObservableObject {
                 + "code=\(result.code.rawValue) "
                 + "attempt=\(attemptID) "
                 + "receipt=\(receiptID)"
+        ClickyAnalytics.trackComputerActionCompleted(result: result)
         Self.computerActionLogger.notice("\(message, privacy: .public)")
     }
 

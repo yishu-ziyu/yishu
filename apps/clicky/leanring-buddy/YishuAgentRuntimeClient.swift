@@ -2190,9 +2190,12 @@ final class YishuAgentRuntimeClient {
                 traceId: traceId,
                 payload: payload
             )
+        case "product.action.completed":
+            YishuMemoryQualityEvents.recordRememberedIfValid(payload: payload, scope: currentSessionScope)
         case "memory.used":
             let items = Self.parseMemoryUsedItems(payload)
             if !items.isEmpty {
+                items.forEach { YishuMemoryQualityEvents.recordUsed(memoryID: $0.id, scope: $0.scope) }
                 continuation.yield(.memoryUsed(items, generation: generation))
             }
         case "response.completed":
@@ -2472,6 +2475,7 @@ final class YishuAgentRuntimeClient {
                 return
             }
             let alreadyGone = (payload["alreadyGone"] as? Bool) ?? false
+            YishuMemoryQualityEvents.recordForgotten(memoryID: memoryId, scope: "personal")
             finishHistoryRequest(
                 requestId,
                 value: YishuMemoryForgetResult(memoryId: memoryId, alreadyGone: alreadyGone)
@@ -2502,6 +2506,7 @@ final class YishuAgentRuntimeClient {
                 source: (payload["source"] as? String) ?? "conversation",
                 scope: (payload["scope"] as? String) ?? "personal"
             )
+            YishuMemoryQualityEvents.recordRemembered(memoryID: item.id, scope: item.scope)
             finishHistoryRequest(
                 requestId,
                 value: YishuMemoryRememberResult(item: item, confirmed: true)

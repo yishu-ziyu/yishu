@@ -3,6 +3,27 @@ import Testing
 @testable import Clicky
 
 struct YishuPersonalNotesTests {
+    @Test func memoryAccessibilityIdentifiersUseStableOpaqueHashes() {
+        let id = UUID(uuidString: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8")!
+        let hash = YishuMemoryQualityEvents.memoryIDHash(id)
+
+        #expect(hash == "e5855ff48799c52c9ccf80b82bab9492c347a316876dbeaafef22b0bd4fac13d")
+        #expect(
+            YishuMemoryQualityEvents.cardAccessibilityIdentifier(for: id)
+                == "yishu-memory-card-\(hash)"
+        )
+        #expect(
+            YishuMemoryQualityEvents.forgetAccessibilityIdentifier(for: id)
+                == "yishu-memory-forget-\(hash)"
+        )
+        #expect(!YishuMemoryQualityEvents.cardAccessibilityIdentifier(for: id).contains(id.uuidString))
+        #expect(
+            YishuMemoryQualityEvents.memoryIDHash(
+                UUID(uuidString: "6BA7B811-9DAD-11D1-80B4-00C04FD430C8")!
+            ) != hash
+        )
+    }
+
     @Test func emptyOrWhitespaceTextDoesNotCreate() {
         #expect(YishuPersonalNoteWritePolicy.shouldCreate("") == false)
         #expect(YishuPersonalNoteWritePolicy.shouldCreate("   \n\t") == false)
