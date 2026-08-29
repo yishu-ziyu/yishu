@@ -20,6 +20,7 @@ import {
   type TurnSteerCommand,
 } from "../src/protocol.js";
 import type { AgentRuntime, RuntimeEventSink } from "../src/runtime-port.js";
+import type { TurnContextProviderFactory } from "../src/model-loop/index.js";
 import { buildGroundedPrompt } from "../src/context-prompt.js";
 import { contextFrameToTrailSource } from "../src/trail-source.js";
 import { makeTurnStartCommand } from "./fixtures.js";
@@ -3528,6 +3529,35 @@ class CapturingRuntime implements AgentRuntime {
   async dispose(): Promise<void> {}
 }
 
+class MemoryAssemblyCapturingRuntime implements AgentRuntime {
+  lastMemory: string | undefined;
+  private contextFactory: TurnContextProviderFactory | undefined;
+
+  setTurnContextProviderFactory(factory: TurnContextProviderFactory): void {
+    this.contextFactory = factory;
+  }
+
+  async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    const scopeKind = command.payload.sessionScope?.kind ?? "personal";
+    const conversationId = command.payload.conversationId ?? command.requestId;
+    this.lastMemory = await this.contextFactory?.(scopeKind, conversationId)
+      .assembleTurnMemory?.(command.payload.utterance);
+    emit(runtimeEvent("turn.started", command.requestId, command.traceId, { runtime: "capture" }));
+    emit(runtimeEvent("response.completed", command.requestId, command.traceId, {
+      text: `echo:${command.payload.utterance}`,
+      verified: true,
+    }));
+  }
+
+  async steerTurn(): Promise<void> {}
+  async cancelTurn(command: TurnCancelCommand, emit: RuntimeEventSink): Promise<void> {
+    emit(runtimeEvent("turn.cancelled", command.requestId, command.traceId, {
+      reason: command.payload.reason ?? "user_cancelled",
+    }));
+  }
+  async dispose(): Promise<void> {}
+}
+
 test("ordinary personal turn recalls related memory, emits memory.used, does not attach onto the command", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const now = "2026-08-08T12:00:00.000Z";
@@ -3666,6 +3696,39 @@ test("project scope does not read personal memories", async () => {
   };
   await runtime.startTurn(command, (event) => events.push(event));
   assert.ok(!events.some((event) => event.type === "memory.used"));
+});
+
+test("project scope does not read or inject the single personal visible memory file", async (t) => {
+  const memoryDir = await mkdtemp(path.join(tmpdir(), "yishu-vis-project-recall-pkr-"));
+  const kernel = createYishuKernel({ storeBackend: "memory", memoryDir });
+  assert.ok(kernel.memory);
+  await writeFile(
+    kernel.memory.visible.filePath,
+    "# 记忆\n\n- 验收回答先给结论\n",
+    "utf8",
+  );
+
+  const capturing = new MemoryAssemblyCapturingRuntime();
+  const runtime = new ProductKernelRuntime(capturing, kernel);
+  t.after(async () => {
+    await runtime.dispose();
+    await rm(memoryDir, { recursive: true, force: true });
+  });
+  await runtime.initialize();
+  const events: RuntimeEvent[] = [];
+  const command = makeCommand("我希望你怎么回答？");
+  delete command.payload.modelPreference;
+  command.payload.conversationId = randomUUID();
+  command.payload.sessionScope = {
+    kind: "project",
+    projectId: "44444444-4444-4444-8444-444444444444",
+    projectLabel: "隔离项目",
+  };
+
+  await runtime.startTurn(command, (event) => events.push(event));
+
+  assert.equal(events.some((event) => event.type === "memory.used"), false);
+  assert.equal(capturing.lastMemory, undefined);
 });
 
 test("retired memory is not recalled on ordinary turns", async () => {

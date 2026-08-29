@@ -51,7 +51,7 @@ export function createRememberAction(
       const input = ctx.input;
       let truthRef: string | undefined;
       if (visible !== undefined) {
-        await visible.appendFacts([input.claim]);
+        await visible.appendFacts([input.claim], input.scope);
       }
       // The markdown line is the truth; write it before the index row so a
       // crash between the two leaves a rebuildable gap, not a lost fact.

@@ -26,6 +26,7 @@ LEGACY_INSTALL_APP="/Applications/Clicky.app"
 YISHU_CLICKY_DERIVED_DATA="${YISHU_CLICKY_DERIVED_DATA:-$YISHU_REPO_ROOT_DEFAULT/.build/clicky-derived-data}"
 YISHU_RUNTIME_ROOT="${YISHU_RUNTIME_ROOT:-$YISHU_REPO_ROOT_DEFAULT}"
 YISHU_NODE_SOURCE="${YISHU_NODE_SOURCE:-$(command -v node || true)}"
+YISHU_BUILD_PROVENANCE_HELPER="$YISHU_REPO_ROOT_DEFAULT/script/build-provenance.mjs"
 
 if [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
   export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
@@ -49,7 +50,20 @@ resolve_derived_app() {
   echo "$candidate"
 }
 
+capture_build_provenance() {
+  if [[ ! -f "$YISHU_BUILD_PROVENANCE_HELPER" ]]; then
+    echo "Yishu build provenance helper missing: $YISHU_BUILD_PROVENANCE_HELPER" >&2
+    return 1
+  fi
+  if [[ ! -x "$YISHU_NODE_SOURCE" ]]; then
+    echo "Yishu Node executable missing: $YISHU_NODE_SOURCE" >&2
+    return 1
+  fi
+  "$YISHU_NODE_SOURCE" "$YISHU_BUILD_PROVENANCE_HELPER" --repo-root "$YISHU_REPO_ROOT_DEFAULT"
+}
+
 bundle_yishu_runtime() {
+  local build_provenance_start="$1"
   local app runtime_deploy bundle_root entitlements node_entitlements node_source
   app="$(resolve_derived_app)"
 
@@ -151,6 +165,17 @@ bundle_yishu_runtime() {
   rm -f -- "$voice_proxy_bundle/.dev.vars" "$voice_proxy_bundle/.env"
   echo "Bundled YishuVoiceProxy (no secrets)"
 
+  local build_provenance_end
+  build_provenance_end="$(capture_build_provenance)"
+  if [[ "$build_provenance_end" != "$build_provenance_start" ]]; then
+    echo "Build provenance changed during build; refusing to sign ${APP_PRODUCT_NAME}.app" >&2
+    exit 1
+  fi
+  local build_manifest="$app/Contents/Resources/YishuBuildManifest.json"
+  mkdir -p -- "$(dirname "$build_manifest")"
+  printf '%s\n' "$build_provenance_start" >"$build_manifest"
+  echo "Embedded YishuBuildManifest.json (source and commit verified)"
+
   codesign -d --entitlements "$entitlements" --xml "$app"
   codesign \
     --force \
@@ -169,6 +194,8 @@ bundle_yishu_runtime() {
 
 build() {
   need_identity
+  local build_provenance_start
+  build_provenance_start="$(capture_build_provenance)"
   echo "Building $SCHEME ($CONFIG) signed as: $IDENTITY"
   xcodebuild \
     -project "$PROJECT" \
@@ -182,7 +209,7 @@ build() {
     ENABLE_DEBUG_DYLIB=NO \
     OTHER_CODE_SIGN_FLAGS="--timestamp=none" \
     build
-  bundle_yishu_runtime
+  bundle_yishu_runtime "$build_provenance_start"
 }
 
 # Formal install only. Dev/DerivedData builds must never match this path.
@@ -469,7 +496,7 @@ open_app() {
 # ---------------------------------------------------------------------------
 run_local_self_test() {
   local failures=0
-  local tmpdir dev_stub formal_stub
+  local tmpdir dev_stub formal_stub provenance_snapshot
 
   assert_true() {
     local name="$1"
@@ -505,6 +532,22 @@ run_local_self_test() {
     bash -c "[[ \"$FORMAL_APP_EXE\" == /Applications/奕枢.app/Contents/MacOS/奕枢 ]]"
   assert_false "derived-data path must not equal formal exe" \
     bash -c "[[ \"$YISHU_CLICKY_DERIVED_DATA/Build/Products/Debug/${APP_PRODUCT_NAME}.app/Contents/MacOS/${APP_PRODUCT_NAME}\" == \"$FORMAL_APP_EXE\" ]]"
+
+  # 1b) Build provenance snapshot is safe, complete, and deterministic in shape.
+  if provenance_snapshot="$(capture_build_provenance)" \
+    && "$YISHU_NODE_SOURCE" -e '
+      const value = JSON.parse(process.argv[1]);
+      const valid = value.schemaVersion === 1
+        && typeof value.commit === "string" && /^[0-9a-f]{40}$/.test(value.commit)
+        && typeof value.worktreeDirty === "boolean"
+        && typeof value.sourceInputHash === "string" && /^[0-9a-f]{64}$/.test(value.sourceInputHash);
+      process.exit(valid ? 0 : 1);
+    ' "$provenance_snapshot"; then
+    echo "PASS: build provenance snapshot has safe manifest shape"
+  else
+    echo "FAIL: build provenance snapshot is unavailable or malformed" >&2
+    failures=$((failures + 1))
+  fi
 
   # 2) No *executable* pgrep/pkill -x Clicky (comments and this self-test may mention the ban).
   # Only flag lines that invoke the tools, not prose in echo/assert strings.

@@ -378,10 +378,11 @@ export class VisibleMemoryFile {
   }
 
   /**
-   * Append facts that are not already in the file. Never rewrites a line
-  * the user already has (including user-authored lines).
-  */
-  async appendFacts(facts: readonly string[]): Promise<number> {
+   * Append personal facts that are not already in the file. Project-scoped
+   * claims stay in their scoped Truth/index and never enter this one file.
+   */
+  async appendFacts(facts: readonly string[], scope = "personal"): Promise<number> {
+    if (scope.trim() !== "personal") return 0;
     await this.reconcileAuthority();
     const addedCount = await withPathLock(this.filePath, async () => {
       let current = await this.readText();

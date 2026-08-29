@@ -10,9 +10,18 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  BUILD_PROVENANCE_SCHEMA_VERSION,
+  sourceInputHash,
+} from "./build-provenance.mjs";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_APP_PATH = "/Applications/奕枢.app";
+const DEFAULT_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_BUNDLE_IDENTIFIER = "com.yishu.yishu-buddy";
+const BUILD_MANIFEST_RELATIVE_PATH = "Contents/Resources/YishuBuildManifest.json";
+const FULL_COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const REQUIRED_FILES = {
   runtimePackage: {
     relativePath: "Contents/Resources/YishuRuntime/runtime/package.json",
@@ -38,6 +47,7 @@ function parseArguments(rawArguments) {
   let appPath;
   let repoRoot;
   let requireRunning = false;
+  let requireCleanProvenance = false;
 
   for (let index = 0; index < rawArguments.length; index += 1) {
     const argument = rawArguments[index];
@@ -46,6 +56,10 @@ function parseArguments(rawArguments) {
     }
     if (argument === "--require-running") {
       requireRunning = true;
+      continue;
+    }
+    if (argument === "--require-clean-provenance") {
+      requireCleanProvenance = true;
       continue;
     }
     if (argument === "--repo-root") {
@@ -80,6 +94,7 @@ function parseArguments(rawArguments) {
     appPath: path.resolve(appPath ?? DEFAULT_APP_PATH),
     repoRoot: repoRoot === undefined ? undefined : path.resolve(repoRoot),
     requireRunning,
+    requireCleanProvenance,
     help: false,
   };
 }
@@ -92,6 +107,7 @@ function printHelp() {
     "  --app-path PATH       App bundle to inspect",
     "  --repo-root PATH      Compare packages/runtime/src with bundled runtime/src",
     "  --require-running     Require exactly one matching app process",
+    "  --require-clean-provenance  Reject a manifest built from a dirty worktree",
     "  --help                Show this help",
     "",
   ].join("\n"));
@@ -158,6 +174,119 @@ function sha256File(filePath) {
   } catch {
     return null;
   }
+}
+
+function currentGitHead(repoRoot) {
+  const result = runCommand(
+    commandFor("YISHU_VERIFY_GIT_BIN", "git"),
+    ["-C", repoRoot, "rev-parse", "--verify", "HEAD"],
+  );
+  const head = result.exitCode === 0 ? result.stdout.trim() : "";
+  return FULL_COMMIT_PATTERN.test(head) ? head : null;
+}
+
+function readBuildManifest(manifestPath) {
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+      return { manifest: null, status: "failed", reason: "manifest_shape_invalid" };
+    }
+    const expectedKeys = ["commit", "schemaVersion", "sourceInputHash", "worktreeDirty"];
+    const actualKeys = Object.keys(manifest).sort();
+    expectedKeys.sort();
+    const keysMatch = actualKeys.length === expectedKeys.length
+      && actualKeys.every((key, index) => key === expectedKeys[index]);
+    const shapePassed = keysMatch
+      && manifest.schemaVersion === BUILD_PROVENANCE_SCHEMA_VERSION
+      && typeof manifest.commit === "string"
+      && FULL_COMMIT_PATTERN.test(manifest.commit)
+      && typeof manifest.worktreeDirty === "boolean"
+      && typeof manifest.sourceInputHash === "string"
+      && SHA256_PATTERN.test(manifest.sourceInputHash);
+    return {
+      manifest: shapePassed ? manifest : null,
+      status: shapePassed ? "passed" : "failed",
+      reason: shapePassed ? undefined : "manifest_shape_invalid",
+    };
+  } catch {
+    return { manifest: null, status: "failed", reason: "manifest_missing" };
+  }
+}
+
+function failedBuildProvenanceCheck(reason, requireCleanProvenance) {
+  return {
+    status: "failed",
+    reason,
+    manifest: {
+      status: "failed",
+      path: BUILD_MANIFEST_RELATIVE_PATH,
+      reason,
+    },
+    commit: { status: "failed", reason },
+    sourceInputHash: { status: "failed", reason },
+    worktreeDirty: null,
+    clean: {
+      status: "failed",
+      required: requireCleanProvenance,
+      reason,
+    },
+  };
+}
+
+function checkBuildProvenance(appPath, repoRoot, requireCleanProvenance) {
+  const manifestPath = pathWithinApp(appPath, BUILD_MANIFEST_RELATIVE_PATH);
+  const parsed = readBuildManifest(manifestPath);
+  if (!parsed.manifest) {
+    return failedBuildProvenanceCheck(parsed.reason, requireCleanProvenance);
+  }
+
+  const currentHead = currentGitHead(repoRoot);
+  let currentSourceInputHash = null;
+  try {
+    currentSourceInputHash = sourceInputHash(repoRoot);
+  } catch {
+    // Keep the reason deliberately generic: reports must not expose source paths.
+  }
+  const commitPassed = currentHead !== null && parsed.manifest.commit === currentHead;
+  const sourceHashPassed = currentSourceInputHash !== null
+    && parsed.manifest.sourceInputHash === currentSourceInputHash;
+  const cleanPassed = !requireCleanProvenance || parsed.manifest.worktreeDirty === false;
+  let reason;
+  if (!commitPassed) {
+    reason = currentHead === null ? "current_head_unavailable" : "commit_mismatch";
+  } else if (!sourceHashPassed) {
+    reason = currentSourceInputHash === null ? "source_hash_unavailable" : "source_hash_mismatch";
+  } else if (!cleanPassed) {
+    reason = "worktree_dirty";
+  }
+  const status = commitPassed && sourceHashPassed && cleanPassed ? "passed" : "failed";
+  return {
+    status,
+    ...(reason ? { reason } : {}),
+    manifest: {
+      status: "passed",
+      path: BUILD_MANIFEST_RELATIVE_PATH,
+      schemaVersion: parsed.manifest.schemaVersion,
+      commit: parsed.manifest.commit,
+      worktreeDirty: parsed.manifest.worktreeDirty,
+      sourceInputHash: parsed.manifest.sourceInputHash,
+    },
+    commit: {
+      status: commitPassed ? "passed" : "failed",
+      actual: parsed.manifest.commit,
+      current: currentHead,
+    },
+    sourceInputHash: {
+      status: sourceHashPassed ? "passed" : "failed",
+      actual: parsed.manifest.sourceInputHash,
+      current: currentSourceInputHash,
+    },
+    worktreeDirty: parsed.manifest.worktreeDirty,
+    clean: {
+      status: cleanPassed ? "passed" : "failed",
+      required: requireCleanProvenance,
+    },
+  };
 }
 
 function pathWithinApp(appPath, relativePath) {
@@ -423,6 +552,11 @@ function verify(options) {
       status: runningPassed ? "passed" : "failed",
       required: options.requireRunning,
     },
+    provenance: checkBuildProvenance(
+      appPath,
+      options.repoRoot ?? DEFAULT_REPO_ROOT,
+      options.requireCleanProvenance,
+    ),
   };
   if (options.repoRoot !== undefined) {
     checks.runtimeSource = compareRuntimeSource(appPath, options.repoRoot);

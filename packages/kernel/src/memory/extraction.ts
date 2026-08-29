@@ -199,7 +199,7 @@ async function processOne(deps: ExtractionDeps, turnId: string): Promise<Process
         truthRef: deps.truth.truthRefFor(snapshot.scopeKey, factId),
       });
       if (deps.visible !== undefined) {
-        await deps.visible.appendFacts([candidate.trim()]);
+        await deps.visible.appendFacts([candidate.trim()], snapshot.scopeKey);
       }
     }
   }

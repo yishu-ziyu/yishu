@@ -18,6 +18,8 @@ import {
 import { runExtractionPass, type MemoryExtractionModel } from "../src/memory/index.js";
 import { InMemoryExtractionQueue } from "../src/memory/index.js";
 
+const PROJECT_SCOPE = "project:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
 async function tempVisible(prefix: string): Promise<{ file: VisibleMemoryFile; dir: string }> {
   const dir = await mkdtemp(path.join(tmpdir(), prefix));
   return { dir, file: new VisibleMemoryFile(path.join(dir, "记忆.md")) };
@@ -160,6 +162,55 @@ test("remember and extract write the visible file; forget removes the bullet", a
   assert.equal(forgotten.status, "verified");
   assert.doesNotMatch(await visible.readText(), /周四把钥匙放在抽屉/);
   assert.match(await visible.readText(), /用户偏好要点列表/);
+});
+
+test("the single visible file keeps project-scoped memories out", async (t) => {
+  const memoryDir = await mkdtemp(path.join(tmpdir(), "yishu-vis-scope-"));
+  t.after(() => rm(memoryDir, { recursive: true, force: true }));
+  const kernel = createYishuKernel({ storeBackend: "memory", memoryDir });
+  const visible = kernel.memory?.visible;
+  assert.ok(visible);
+
+  const projectRemembered = await kernel.registry.invoke("remember", {
+    caller: "voice",
+    input: { claim: "项目记忆不应进入个人可见文件", scope: PROJECT_SCOPE },
+  });
+  assert.equal(projectRemembered.status, "verified");
+
+  const queue = new InMemoryExtractionQueue();
+  await queue.enqueue({
+    turnId: "22222222-2222-2222-2222-222222222222",
+    conversationId: "project-conversation",
+    scopeKey: PROJECT_SCOPE,
+    utterance: "项目偏好也不应投影",
+    replyText: "收到。",
+    providerId: "openai",
+    modelId: "gpt-test",
+    capturedAt: "2026-08-18T11:00:00.000Z",
+  });
+  const model: MemoryExtractionModel = {
+    async extract() {
+      return { newFacts: ["项目抽取记忆不应进入个人可见文件"], confirmedFactIds: [] };
+    },
+  };
+  await runExtractionPass({
+    queue,
+    truth: kernel.memory!.truth,
+    store: kernel.memory!.extraction,
+    model,
+    visible,
+  });
+
+  const personalRemembered = await kernel.registry.invoke("remember", {
+    caller: "voice",
+    input: { claim: "个人记忆仍可进入可见文件", scope: "personal" },
+  });
+  assert.equal(personalRemembered.status, "verified");
+
+  const text = await visible.readText();
+  assert.doesNotMatch(text, /项目记忆不应进入个人可见文件/u);
+  assert.doesNotMatch(text, /项目抽取记忆不应进入个人可见文件/u);
+  assert.match(text, /个人记忆仍可进入可见文件/u);
 });
 
 test("deleted visible facts suppress semantically similar restatements, not unrelated ones", async (t) => {
