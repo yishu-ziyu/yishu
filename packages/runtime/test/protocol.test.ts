@@ -38,6 +38,7 @@ import {
   workspaceRevokeCommandSchema,
   LOCAL_GROK_BASE_URL,
   LOCAL_GROK_PROVIDER,
+  modelRoutingSchema,
   modelPreferenceSchema,
   runtimeEvent,
   sessionScopeSchema,
@@ -418,6 +419,77 @@ test("OAuth model preferences accept only the current Pi catalog mapping", () =>
     provider: "xai",
     model: "grok-4.5",
   });
+});
+
+test("model routing accepts strict profiled and fixed choices while legacy turns stay valid", () => {
+  const profiles = {
+    realtimeConversation: { provider: LOCAL_GROK_PROVIDER, model: "MiniMax-M3" },
+    screenCollaboration: { provider: "xai", model: "grok-4.5" },
+    deepTask: { provider: "openai-codex", model: "gpt-5.5" },
+  } as const;
+  const auto = { mode: "auto", profiles } as const;
+  const fixed = {
+    mode: "fixed_model",
+    preference: { provider: "openai-codex", model: "gpt-5.4" },
+  } as const;
+
+  assert.deepEqual(modelRoutingSchema.parse(auto), auto);
+  assert.deepEqual(modelRoutingSchema.parse(fixed), fixed);
+
+  const routed = makeTurnStartCommand();
+  routed.payload.modelRouting = auto;
+  assert.deepEqual(clientCommandSchema.parse(routed).payload.modelRouting, auto);
+
+  const legacy = makeTurnStartCommand();
+  legacy.payload.modelPreference = profiles.screenCollaboration;
+  assert.equal(clientCommandSchema.parse(legacy).payload.modelRouting, undefined);
+  assert.deepEqual(
+    clientCommandSchema.parse(legacy).payload.modelPreference,
+    profiles.screenCollaboration,
+  );
+});
+
+test("model routing rejects incomplete profiles and configuration escape hatches", () => {
+  const profiles = {
+    realtimeConversation: { provider: LOCAL_GROK_PROVIDER, model: "MiniMax-M3" },
+    screenCollaboration: { provider: "xai", model: "grok-4.5" },
+    deepTask: { provider: "openai-codex", model: "gpt-5.5" },
+  } as const;
+
+  assert.throws(() => modelRoutingSchema.parse({
+    mode: "auto",
+    profiles: {
+      realtimeConversation: profiles.realtimeConversation,
+      screenCollaboration: profiles.screenCollaboration,
+    },
+  }));
+  assert.throws(() => modelRoutingSchema.parse({
+    mode: "auto",
+    profiles,
+    baseUrl: "https://attacker.example/v1",
+  }));
+  assert.throws(() => modelRoutingSchema.parse({
+    mode: "screen_collaboration",
+    profiles: { ...profiles, apiKey: "secret" },
+  }));
+  assert.throws(() => modelRoutingSchema.parse({
+    mode: "fixed_model",
+    preference: {
+      provider: LOCAL_GROK_PROVIDER,
+      model: "MiniMax-M3",
+      baseUrl: "https://attacker.example/v1",
+    },
+  }));
+  assert.throws(() => clientCommandSchema.parse({
+    ...makeTurnStartCommand(),
+    payload: {
+      ...makeTurnStartCommand().payload,
+      modelRouting: {
+        mode: "fixed_model",
+        preference: { provider: "arbitrary", model: "anything" },
+      },
+    },
+  }));
 });
 
 test("OAuth auth commands are typed and reject API-key/provider escape hatches", () => {

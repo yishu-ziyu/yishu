@@ -14,12 +14,21 @@ import type {
   TurnIntentFrame,
   VisibleMemoryAuthoritySnapshot,
 } from "@yishu/kernel";
-import { isVisibleFactSuppressed, sanitizeVisibleText } from "@yishu/kernel";
+import {
+  deriveTurnIntentFrame,
+  isVisibleFactSuppressed,
+  sanitizeVisibleText,
+} from "@yishu/kernel";
 import type { ContextFrame, ConversationId, RuntimeEvent, TurnStartCommand } from "./protocol.js";
 import type { RuntimeEventSink } from "./runtime-port.js";
 import type { StatusBarToolState } from "./model-loop/index.js";
 import type { PromptConversationTurn, PromptMemorySnippet } from "./context-prompt.js";
-import type { CurrentPageNoteResult, DelegatedTaskPresenceUpdate } from "./delegation.js";
+import {
+  isCurrentPageActionsNoteUtterance,
+  type CurrentPageNoteResult,
+  type DelegatedTaskPresenceUpdate,
+} from "./delegation.js";
+import type { ResolvedModelRouting } from "./model-routing.js";
 
 type TerminalKind = "completed" | "cancelled" | "failed";
 
@@ -27,6 +36,22 @@ const CONVERSATION_HISTORY_MAX_TURNS = 10;
 const CONVERSATION_HISTORY_TEXT_BYTES = 5_000;
 const CONTEXT_WATCH_OBSERVATION_MAX_AGE_MS = 30_000;
 const CONTEXT_WATCH_CLOCK_SKEW_MS = 5_000;
+
+export function intentForUtterance(
+  utterance: string,
+  contextFrame: ContextFrame,
+): TurnIntentFrame {
+  const objective = sanitizeVisibleText(utterance, "task objective")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 160);
+  return deriveTurnIntentFrame(utterance, {
+    contextFrame,
+    currentPageNote: isCurrentPageActionsNoteUtterance(utterance),
+    objective,
+  });
+}
+
 export const GENERATION_EVENT_TYPES = new Set<RuntimeEvent["type"]>([
   "turn.started",
   "response.delta",
@@ -74,6 +99,8 @@ export interface TurnLedgerState {
   terminalDelivered: boolean;
   ledgerError?: unknown;
   readonly intent: TurnIntentFrame;
+  /** Effective model choice for model-routed turns only. */
+  readonly modelRouting?: ResolvedModelRouting;
   contract?: TaskExecutionContract;
   /** Product action name when this turn was routed to the kernel registry. */
   productAction?: string;
@@ -282,6 +309,8 @@ export function sanitizeClientEvent(event: RuntimeEvent): RuntimeEvent | undefin
       return withClientPayload(event, pickSafe(payload, [
         "runtime",
         "capabilityProfile",
+        "routingMode",
+        "resolvedRoute",
         "provider",
         "model",
         "generation",
@@ -781,7 +810,15 @@ export function projectionFor(event: RuntimeEvent): {
     case "turn.started":
       return {
         type: "turn.started",
-        payload: pickSafe(event.payload, ["runtime", "capabilityProfile", "provider", "model", "generation"]),
+        payload: pickSafe(event.payload, [
+          "runtime",
+          "capabilityProfile",
+          "routingMode",
+          "resolvedRoute",
+          "provider",
+          "model",
+          "generation",
+        ]),
       };
     case "tool.started":
       return {
@@ -837,13 +874,30 @@ function pickSafe(
 export function enrichEvent(event: RuntimeEvent, state: TurnLedgerState): RuntimeEvent {
   const payload = asRecord(event.payload);
   const generation = safeGeneration(payload.generation) ?? state.generation;
+  const routing = event.type === "turn.started" ? state.modelRouting : undefined;
+  const trustedPayload = { ...payload };
+  if (routing === undefined) {
+    delete trustedPayload.routingMode;
+    delete trustedPayload.resolvedRoute;
+  }
   return {
     ...event,
     requestId: state.command.requestId,
     traceId: state.traceId,
     conversationId: state.conversationId as ConversationId,
     payload: GENERATION_EVENT_TYPES.has(event.type)
-      ? { ...payload, generation }
+      ? {
+          ...trustedPayload,
+          ...(routing === undefined
+            ? {}
+            : {
+                routingMode: routing.routingMode,
+                resolvedRoute: routing.resolvedRoute,
+                provider: routing.preference.provider,
+                model: routing.preference.model,
+              }),
+          generation,
+        }
       : payload,
   };
 }

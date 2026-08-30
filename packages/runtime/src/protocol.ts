@@ -400,6 +400,33 @@ export const modelPreferenceSchema = z.union([
   authModelPreferenceSchema,
 ]);
 
+export const modelRoutingProfilesSchema = z.object({
+  realtimeConversation: modelPreferenceSchema,
+  screenCollaboration: modelPreferenceSchema,
+  deepTask: modelPreferenceSchema,
+}).strict();
+
+const profiledModelRoutingSchema = z.object({
+  mode: z.enum([
+    "auto",
+    "realtime_conversation",
+    "screen_collaboration",
+    "deep_task",
+  ]),
+  profiles: modelRoutingProfilesSchema,
+}).strict();
+
+const fixedModelRoutingSchema = z.object({
+  mode: z.literal("fixed_model"),
+  preference: modelPreferenceSchema,
+}).strict();
+
+/** Product-owned routing policy. It carries model IDs, never endpoints or credentials. */
+export const modelRoutingSchema = z.union([
+  profiledModelRoutingSchema,
+  fixedModelRoutingSchema,
+]);
+
 export const turnStartCommandSchema = z.object({
   schemaVersion: z.literal(PROTOCOL_VERSION),
   type: z.literal("turn.start"),
@@ -411,6 +438,7 @@ export const turnStartCommandSchema = z.object({
     contextFrame: contextFrameSchema,
     capabilityProfile: capabilityProfileSchema.default("conversation"),
     modelPreference: modelPreferenceSchema.optional(),
+    modelRouting: modelRoutingSchema.optional(),
     conversationId: conversationIdSchema.optional(),
     /** Optional for v1 clients; absence is the legacy personal scope. */
     sessionScope: sessionScopeSchema.optional(),
@@ -772,6 +800,8 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
 export type ContextFrame = z.infer<typeof contextFrameSchema>;
 export type CapabilityProfile = z.infer<typeof capabilityProfileSchema>;
 export type ModelPreference = z.infer<typeof modelPreferenceSchema>;
+export type ModelRoutingProfiles = z.infer<typeof modelRoutingProfilesSchema>;
+export type ModelRouting = z.infer<typeof modelRoutingSchema>;
 export type ConversationId = z.infer<typeof conversationIdSchema>;
 export type SessionScope = z.infer<typeof sessionScopeSchema>;
 export type { AuthModelPreference };

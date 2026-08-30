@@ -53,7 +53,7 @@ struct YishuMemoryUsedItem: Equatable, Identifiable {
 }
 
 enum YishuRuntimeTurnEvent {
-    case started(generation: Int)
+    case started(route: YishuResolvedModelRoute?, generation: Int)
     case responseDelta(text: String, generation: Int)
     case toolStarted(name: String, generation: Int)
     case toolCompleted(name: String, isError: Bool, generation: Int)
@@ -64,7 +64,7 @@ enum YishuRuntimeTurnEvent {
 
     var generation: Int {
         switch self {
-        case let .started(generation),
+        case let .started(_, generation),
              let .responseDelta(_, generation),
              let .toolStarted(_, generation),
              let .toolCompleted(_, _, generation),
@@ -958,12 +958,18 @@ final class YishuAgentRuntimeClient {
         contextFrame: YishuContextFrame,
         modelProvider: String,
         model: String,
+        modelRouting: YishuModelRouting,
         capabilityProfile: String = "conversation"
     ) throws -> YishuRuntimeTurn {
         guard let modelPreference = Self.modelPreference(
             provider: modelProvider,
             model: model
         ) else {
+            throw YishuAgentRuntimeClientError.unsupportedModel
+        }
+        guard modelRouting.allPreferences.allSatisfy({ preference in
+            Self.supportsModel(provider: preference.provider, model: preference.model)
+        }) else {
             throw YishuAgentRuntimeClientError.unsupportedModel
         }
 
@@ -993,7 +999,8 @@ final class YishuAgentRuntimeClient {
                 capabilityProfile: capabilityProfile,
                 conversationId: currentConversationId,
                 sessionScope: currentSessionScope,
-                modelPreference: modelPreference
+                modelPreference: modelPreference,
+                modelRouting: modelRouting
             )
         )
 
@@ -2155,7 +2162,10 @@ final class YishuAgentRuntimeClient {
 
         switch type {
         case "turn.started":
-            continuation.yield(.started(generation: generation))
+            continuation.yield(.started(
+                route: YishuResolvedModelRoute.decode(payload),
+                generation: generation
+            ))
         case "response.delta":
             if let text = payload["text"] as? String {
                 continuation.yield(.responseDelta(text: text, generation: generation))
@@ -3286,29 +3296,6 @@ private struct YishuRuntimeConfiguration {
     let nodeExecutable: URL
     let runtimeEntry: URL
     let workingDirectory: URL
-}
-
-struct YishuModelPreference: Encodable, Equatable {
-    let provider: String
-    let model: String
-}
-
-private struct YishuTurnStartCommand: Encodable {
-    let schemaVersion: Int
-    let type: String
-    let requestId: UUID
-    let traceId: UUID
-    let sentAt: Date
-    let payload: YishuTurnStartPayload
-}
-
-private struct YishuTurnStartPayload: Encodable {
-    let utterance: String
-    let contextFrame: YishuContextFrame
-    let capabilityProfile: String
-    let conversationId: UUID
-    let sessionScope: YishuSessionScope
-    let modelPreference: YishuModelPreference
 }
 
 private struct YishuTurnCancelCommand: Encodable {

@@ -311,7 +311,7 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
-    private let responseOverlayManager = CompanionResponseOverlayManager()
+    let responseOverlayManager = CompanionResponseOverlayManager()
     var responseOverlayViewModel: CompanionResponseOverlayViewModel {
         responseOverlayManager.viewModel
     }
@@ -887,22 +887,9 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    private static let selectedModelDefaultsKey = "selectedClaudeModel"
-    private static let selectedModelProviderDefaultsKey = "selectedModelProvider"
-
-    private static let bootSelection: (provider: String, model: String) = {
-        let resolved = YishuConversationModelCatalog.resolvedSelection(
-            storedModel: UserDefaults.standard.string(forKey: selectedModelDefaultsKey),
-            storedProvider: UserDefaults.standard.string(forKey: selectedModelProviderDefaultsKey)
-        )
-        UserDefaults.standard.set(resolved.provider, forKey: selectedModelProviderDefaultsKey)
-        UserDefaults.standard.set(resolved.model, forKey: selectedModelDefaultsKey)
-        return resolved
-    }()
-
-    @Published private(set) var selectedModelProvider: String = CompanionManager.bootSelection.provider
-
-    @Published private(set) var selectedModel: String = CompanionManager.bootSelection.model
+    @Published var selectedModelProvider = YishuModelRoutingBootstrap.fixedPreference.provider
+    @Published var selectedModel = YishuModelRoutingBootstrap.fixedPreference.model
+    @Published var modelRoutingSettings = YishuModelRoutingBootstrap.settings
 
     var configuredAuthModels: [YishuAuthModel] {
         YishuAuthProvider.allCases.flatMap { provider -> [YishuAuthModel] in
@@ -917,25 +904,6 @@ final class CompanionManager: ObservableObject {
 
     var conversationModelSections: [(title: String, models: [YishuConversationModelOption])] {
         YishuConversationModelCatalog.sections(authModels: configuredAuthModels)
-    }
-
-    var selectedModelLabel: String {
-        guard let option = availableConversationModels.first(where: {
-            $0.provider == selectedModelProvider && $0.model == selectedModel
-        }) else {
-            return "\(selectedModel) · 需登录"
-        }
-        return YishuAccountSurfaceCopy.selectedLine(label: option.label, source: option.sourceLabel)
-    }
-
-    func setSelectedModel(_ option: YishuConversationModelOption) {
-        guard availableConversationModels.contains(option) else { return }
-        selectedModelProvider = option.provider
-        selectedModel = option.model
-        UserDefaults.standard.set(option.provider, forKey: Self.selectedModelProviderDefaultsKey)
-        UserDefaults.standard.set(option.model, forKey: Self.selectedModelDefaultsKey)
-        UserDefaults.standard.set(true, forKey: "clicky.chatModel.userPicked.v1")
-        print("🧠 奕枢 model → \(option.provider)/\(option.model)")
     }
 
     /// User preference for whether Yishu's thinking-orb should be shown.
@@ -3192,7 +3160,8 @@ final class CompanionManager: ObservableObject {
             utterance: transcript,
             contextFrame: contextFrame,
             modelProvider: selectedModelProvider,
-            model: selectedModel
+            model: selectedModel,
+            modelRouting: runtimeModelRouting
         )
         activeRuntimeRequestId = turn.requestId
         activeRuntimePresentationTranscript = transcript
@@ -3286,8 +3255,12 @@ final class CompanionManager: ObservableObject {
                     )
                 }
                 switch event {
-                case let .started(generation):
+                case let .started(route, generation):
                     guard generation == presentationReducer.generation else { continue }
+                    presentResolvedModelRoute(
+                        route,
+                        isProductActionTurn: isDirectClickTurn || activeTurnConsumedComputerAction
+                    )
                     updateTurnVisualPhase(for: event)
                 case let .toolStarted(name, generation):
                     guard generation == presentationReducer.generation else { continue }
@@ -3325,6 +3298,7 @@ final class CompanionManager: ObservableObject {
                     // the final model text must not replay it via a POINT tag.
                     activeTurnConsumedComputerAction = true
                     activeTurnEffectInFlight = true
+                    responseOverlayManager.updateRoutingMetadataText(nil)
                     updateTurnVisualPhase(for: event)
                     timing?.mark(
                         "pi_action_arrival",

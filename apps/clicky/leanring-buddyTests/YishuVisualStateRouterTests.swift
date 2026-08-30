@@ -61,7 +61,7 @@ struct YishuVisualStateRouterTests {
             scope: "personal"
         )
 
-        #expect(YishuVisualStateRouter.route(turnEvent: .started(generation: 1)) == .reasoning)
+        #expect(YishuVisualStateRouter.route(turnEvent: .started(route: nil, generation: 1)) == .reasoning)
         #expect(YishuVisualStateRouter.route(turnEvent: .responseDelta(text: "你好", generation: 1)) == .composingResponse)
         #expect(YishuVisualStateRouter.route(turnEvent: .toolStarted(name: "search", generation: 1)) == .usingTool)
         #expect(YishuVisualStateRouter.route(turnEvent: .toolCompleted(name: "search", isError: false, generation: 1)) == .confirmingToolResult)
@@ -128,7 +128,7 @@ struct YishuVisualStateRouterTests {
         #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .composing)
         machine.setTurnPhase(.observingContext)
         #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .searching)
-        machine.apply(turnEvent: .started(generation: 1))
+        machine.apply(turnEvent: .started(route: nil, generation: 1))
         #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .solving)
         machine.apply(turnEvent: .toolStarted(name: "search", generation: 1))
         #expect(machine.visualState(voiceState: .processing, delegatedTasks: []) == .working)

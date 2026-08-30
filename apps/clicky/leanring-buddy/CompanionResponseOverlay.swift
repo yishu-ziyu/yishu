@@ -44,6 +44,8 @@ enum YishuObservationalPointingPolicy {
 @MainActor
 final class CompanionResponseOverlayViewModel: ObservableObject {
     @Published var streamingResponseText: String = ""
+    /// Optional per-turn Runtime route receipt shown only for ordinary answers.
+    @Published var routingMetadataText: String = ""
     /// Optional durable-memory source line shown under the answer.
     @Published var memorySourceText: String = ""
     @Published var presentationPhase: CompanionResponsePresentationPhase = .hidden
@@ -67,6 +69,7 @@ final class CompanionResponseOverlayManager {
     func showThinking() {
         cancelScheduledHide()
         viewModel.streamingResponseText = ""
+        viewModel.routingMetadataText = ""
         viewModel.memorySourceText = ""
 
         withAnimation(.easeOut(duration: 0.14)) {
@@ -91,6 +94,12 @@ final class CompanionResponseOverlayManager {
         viewModel.memorySourceText = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
+    func updateRoutingMetadataText(_ text: String?) {
+        viewModel.routingMetadataText = String(
+            (text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").prefix(180)
+        )
+    }
+
     func finishStreaming() {
         cancelScheduledHide()
 
@@ -108,6 +117,7 @@ final class CompanionResponseOverlayManager {
     func showStaticMessage(_ text: String, autoHideAfter seconds: TimeInterval = 6) {
         cancelScheduledHide()
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        viewModel.routingMetadataText = ""
         viewModel.memorySourceText = ""
         viewModel.streamingResponseText = trimmed
         withAnimation(.easeOut(duration: 0.18)) {
@@ -125,6 +135,7 @@ final class CompanionResponseOverlayManager {
         cancelScheduledHide()
         viewModel.presentationPhase = .hidden
         viewModel.streamingResponseText = ""
+        viewModel.routingMetadataText = ""
         viewModel.memorySourceText = ""
     }
 
@@ -136,6 +147,7 @@ final class CompanionResponseOverlayManager {
         // Keep the final glyphs alive until the opacity transition finishes.
         let clearWorkItem = DispatchWorkItem { [weak self] in
             self?.viewModel.streamingResponseText = ""
+            self?.viewModel.routingMetadataText = ""
             self?.viewModel.memorySourceText = ""
         }
         clearTextWorkItem = clearWorkItem
@@ -180,6 +192,13 @@ struct CompanionResponsePresenceView: View {
                     ? "…"
                     : viewModel.streamingResponseText
             )
+
+            if !viewModel.routingMetadataText.isEmpty {
+                Text(viewModel.routingMetadataText)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary.opacity(0.88))
+                    .lineLimit(1)
+            }
 
             if !viewModel.memorySourceText.isEmpty {
                 Text(viewModel.memorySourceText)

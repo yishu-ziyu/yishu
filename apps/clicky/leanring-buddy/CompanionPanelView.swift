@@ -876,8 +876,8 @@ struct CompanionPanelView: View {
         .padding(.top, 4)
     }
 
-    /// Menu-style Picker often fails inside nonactivating NSPanel.
-    /// Use explicit tappable rows so model switch always works.
+    /// Menu-style pickers often fail inside a nonactivating NSPanel. Keep one
+    /// explicit settings surface for both routing mode and each mode's model.
     private var chatModelPickerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button(action: {
@@ -891,13 +891,13 @@ struct CompanionPanelView: View {
                         .foregroundColor(DS.Colors.textTertiary)
                         .frame(width: 16)
 
-                    Text("对话模型")
+                    Text("模型路由")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
 
                     Spacer()
 
-                    Text(companionManager.selectedModelLabel)
+                    Text(companionManager.modelRoutingHeaderLabel)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(DS.Colors.accent)
                         .lineLimit(1)
@@ -909,90 +909,156 @@ struct CompanionPanelView: View {
             }
             .buttonStyle(.plain)
             .pointerCursor()
-            .accessibilityLabel("对话模型")
-            .accessibilityValue(companionManager.selectedModelLabel)
+            .accessibilityLabel("模型路由")
+            .accessibilityValue(companionManager.modelRoutingHeaderLabel)
 
             if isModelListExpanded {
                 let featuredLocal = YishuConversationModelCatalog.featuredLocalModels(
-                    selectedModel: companionManager.selectedModel,
-                    selectedProvider: companionManager.selectedModelProvider
+                    selectedModel: companionManager.configuredRoutingModel,
+                    selectedProvider: companionManager.configuredRoutingModelProvider
                 )
                 let moreLocal = YishuConversationModelCatalog.moreLocalModels(
-                    selectedModel: companionManager.selectedModel,
-                    selectedProvider: companionManager.selectedModelProvider
+                    selectedModel: companionManager.configuredRoutingModel,
+                    selectedProvider: companionManager.configuredRoutingModelProvider
                 )
                 let authSections = YishuConversationModelCatalog.authSections(
                     authModels: companionManager.configuredAuthModels
                 )
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(YishuAccountSurfaceCopy.localGrokSource)
+                        Text("工作方式")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundColor(DS.Colors.textTertiary)
                             .padding(.top, 2)
                         VStack(spacing: 4) {
-                            ForEach(featuredLocal) { model in
-                                modelChoiceRow(model)
+                            ForEach(YishuModelRoutingMode.allCases) { mode in
+                                routingModeChoiceRow(mode)
                             }
                         }
-                        if !moreLocal.isEmpty {
-                            Button(action: {
-                                withAnimation(.easeOut(duration: 0.15)) {
-                                    isMoreLocalModelsExpanded.toggle()
-                                }
-                            }) {
-                                HStack {
-                                    Text("更多本机模型")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundColor(DS.Colors.textSecondary)
-                                    Spacer()
-                                    Image(systemName: isMoreLocalModelsExpanded ? "chevron.up" : "chevron.down")
-                                        .font(.system(size: 10, weight: .semibold))
-                                        .foregroundColor(DS.Colors.textTertiary)
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                            }
-                            .buttonStyle(.plain)
-                            .pointerCursor()
-                            .accessibilityLabel("更多本机模型")
-                            .accessibilityValue(isMoreLocalModelsExpanded ? "已展开" : "已收起")
 
-                            if isMoreLocalModelsExpanded {
-                                VStack(spacing: 4) {
-                                    ForEach(moreLocal) { model in
-                                        modelChoiceRow(model)
-                                    }
+                        Text(companionManager.modelRoutingMode.helperText)
+                            .font(.system(size: 10))
+                            .foregroundColor(DS.Colors.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if companionManager.modelRoutingMode == .auto {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ForEach(YishuModelRoutingProfile.allCases, id: \.rawValue) { profile in
+                                    Text(companionManager.modelRoutingSummary(for: profile))
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundColor(DS.Colors.textSecondary)
+                                        .lineLimit(1)
                                 }
                             }
-                        }
-                        ForEach(authSections, id: \.title) { section in
-                            Text(section.title)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color.white.opacity(0.03))
+                            )
+                        } else {
+                            Divider()
+                                .background(DS.Colors.borderSubtle)
+
+                            Text(YishuAccountSurfaceCopy.localGrokSource)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundColor(DS.Colors.textTertiary)
                                 .padding(.top, 2)
                             VStack(spacing: 4) {
-                                ForEach(section.models) { model in
+                                ForEach(featuredLocal) { model in
                                     modelChoiceRow(model)
                                 }
                             }
+                            if !moreLocal.isEmpty {
+                                Button(action: {
+                                    withAnimation(.easeOut(duration: 0.15)) {
+                                        isMoreLocalModelsExpanded.toggle()
+                                    }
+                                }) {
+                                    HStack {
+                                        Text("更多本机模型")
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundColor(DS.Colors.textSecondary)
+                                        Spacer()
+                                        Image(systemName: isMoreLocalModelsExpanded ? "chevron.up" : "chevron.down")
+                                            .font(.system(size: 10, weight: .semibold))
+                                            .foregroundColor(DS.Colors.textTertiary)
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 6)
+                                }
+                                .buttonStyle(.plain)
+                                .pointerCursor()
+                                .accessibilityLabel("更多本机模型")
+                                .accessibilityValue(isMoreLocalModelsExpanded ? "已展开" : "已收起")
+
+                                if isMoreLocalModelsExpanded {
+                                    VStack(spacing: 4) {
+                                        ForEach(moreLocal) { model in
+                                            modelChoiceRow(model)
+                                        }
+                                    }
+                                }
+                            }
+                            ForEach(authSections, id: \.title) { section in
+                                Text(section.title)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(DS.Colors.textTertiary)
+                                    .padding(.top, 2)
+                                VStack(spacing: 4) {
+                                    ForEach(section.models) { model in
+                                        modelChoiceRow(model)
+                                    }
+                                }
+                            }
+                            Text("本机 Grok 不用登录。ChatGPT / xAI 登录后会出现在这张表里。")
+                                .font(.system(size: 10))
+                                .foregroundColor(DS.Colors.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 4)
                         }
-                        Text("本机 Grok 不用登录。ChatGPT / xAI 登录后会出现在这张表里。")
-                            .font(.system(size: 10))
-                            .foregroundColor(DS.Colors.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, 4)
                     }
                 }
-                .frame(maxHeight: isMoreLocalModelsExpanded ? 260 : 180)
+                .frame(maxHeight: isMoreLocalModelsExpanded ? 310 : 250)
             }
         }
         .padding(.vertical, 2)
     }
 
+    private func routingModeChoiceRow(_ mode: YishuModelRoutingMode) -> some View {
+        let isSelected = companionManager.modelRoutingMode == mode
+        return Button(action: {
+            companionManager.setModelRoutingMode(mode)
+            if mode == .auto {
+                isMoreLocalModelsExpanded = false
+            }
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isSelected ? DS.Colors.accent : DS.Colors.textTertiary)
+                    .frame(width: 16)
+
+                Text(mode.displayName)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textSecondary)
+
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? DS.Colors.accent.opacity(0.14) : Color.white.opacity(0.03))
+            )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
     private func modelChoiceRow(_ option: YishuConversationModelOption) -> some View {
-        let isSelected = companionManager.selectedModelProvider == option.provider
-            && companionManager.selectedModel == option.model
+        let isSelected = companionManager.configuredRoutingModelProvider == option.provider
+            && companionManager.configuredRoutingModel == option.model
         return Button(action: {
             companionManager.setSelectedModel(option)
         }) {
