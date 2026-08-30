@@ -7,12 +7,10 @@ import {
   normalizeSessionScope,
   sessionScopeKey,
   sessionScopesEqual,
-  deriveTurnIntentFrame,
   taskExecutionContractForIntent,
   RELATIVE_TIME_REMINDER_CLARIFY_SPEECH,
   recallFromVisibleFacts,
   readLegacyFactClaims,
-  sanitizeVisibleText,
   everosMessagesForTurn,
   isEverOSProfileMemory,
   assertPersistableMemoryText,
@@ -98,6 +96,7 @@ import { openStagehandDriver } from "./stagehand-browser-driver.js";
 import { EverOSIngestionCoordinator } from "./everos-ingestion.js";
 import type { EverOSPendingSessionStore } from "./everos-pending-sessions.js";
 import { ingestVerifiedTaskLearning } from "./everos-task-learning.js";
+import { recordConversationModel, resolveTurnModelRouting } from "./model-routing.js";
 import {
   GENERATION_EVENT_TYPES,
   acceptScopedDerivedMemories,
@@ -110,6 +109,7 @@ import {
   eventText,
   formatEngineStatusBar,
   freshObservedBundleId,
+  intentForUtterance,
   isRecord,
   ledgerText,
   mapInnerInterruptRejection,
@@ -161,21 +161,6 @@ async function settlesWithin(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
-}
-
-function intentForUtterance(
-  utterance: string,
-  contextFrame: ContextFrame,
-): TurnIntentFrame {
-  const objective = sanitizeVisibleText(utterance, "task objective")
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 160);
-  return deriveTurnIntentFrame(utterance, {
-    contextFrame,
-    currentPageNote: isCurrentPageActionsNoteUtterance(utterance),
-    objective,
-  });
 }
 
 function trustedExternalVerification(
@@ -344,6 +329,8 @@ export class ProductKernelRuntime implements AgentRuntime {
   private readonly activeTurns = new Map<string, TurnLedgerState>();
   private readonly activeTurnOperations = new Set<Promise<void>>();
   private readonly conversationAdmissionTails = new Map<string, Promise<void>>();
+  /** Last effective model per Main conversation; a change forces cold Kernel-history rebuild. */
+  private readonly conversationModelKeys = new Map<string, string>();
   private trailObservationTail: Promise<void> = Promise.resolve();
   /** Runtime side of delegated execution; public like `kernel` for tests/UI seams. */
   readonly delegation: DelegationCoordinator;
@@ -1140,6 +1127,7 @@ export class ProductKernelRuntime implements AgentRuntime {
         // then grant bounded cleanup time before the replacement is admitted.
         previous.supersedeRequested = true;
         this.releaseInnerConversationSession(previous.conversationId);
+        this.conversationModelKeys.delete(previous.conversationId.toLowerCase());
         await settlesWithin(this.cancelTurn({
           schemaVersion: command.schemaVersion,
           type: "turn.cancel",
@@ -1155,8 +1143,13 @@ export class ProductKernelRuntime implements AgentRuntime {
         command.payload.utterance,
         command.payload.contextFrame,
       );
-      state = {
+      const modelRouting = resolveTurnModelRouting(
         command,
+        intent,
+        isCurrentPageActionsNoteUtterance(command.payload.utterance),
+      );
+      state = {
+        command: modelRouting.command,
         conversationId,
         traceId: command.traceId,
         emit,
@@ -1176,6 +1169,9 @@ export class ProductKernelRuntime implements AgentRuntime {
         innerStarted: false,
         terminalDelivered: false,
         intent,
+        ...(modelRouting.decision === undefined
+          ? {}
+          : { modelRouting: modelRouting.decision }),
         contract: taskExecutionContractForIntent(intent),
       };
       this.activeRequestIds.add(command.requestId);
@@ -1386,6 +1382,11 @@ export class ProductKernelRuntime implements AgentRuntime {
   }
 
   private async runInnerTurn(state: TurnLedgerState): Promise<void> {
+    if (recordConversationModel(
+      this.conversationModelKeys,
+      state.conversationId,
+      state.command.payload.modelPreference,
+    )) this.releaseInnerConversationSession(state.conversationId);
     const tracker = state.durable
       ? new RuntimeTaskProgressTracker(this.kernel.taskTruth, state.command, state.contract)
       : undefined;
