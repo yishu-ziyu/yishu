@@ -175,10 +175,14 @@ struct YishuModelRoutingSettings: Equatable {
     ) -> YishuModelRoutingSettings {
         let storedMode = defaults.string(forKey: YishuModelRoutingDefaults.modeKey)
             .flatMap(YishuModelRoutingMode.init(rawValue:))
-        let mode = storedMode
-            ?? (defaults.bool(forKey: YishuModelRoutingDefaults.legacyUserPickedKey)
-                ? .fixedModel
-                : .auto)
+        let mode: YishuModelRoutingMode
+        if let storedMode {
+            mode = storedMode
+        } else if defaults.bool(forKey: YishuModelRoutingDefaults.legacyUserPickedKey) {
+            mode = .fixedModel
+        } else {
+            mode = .auto
+        }
         defaults.set(mode.rawValue, forKey: YishuModelRoutingDefaults.modeKey)
 
         var loaded: [YishuModelRoutingProfile: YishuModelPreference] = [:]

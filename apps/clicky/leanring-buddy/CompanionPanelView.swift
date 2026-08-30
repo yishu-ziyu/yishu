@@ -913,17 +913,6 @@ struct CompanionPanelView: View {
             .accessibilityValue(companionManager.modelRoutingHeaderLabel)
 
             if isModelListExpanded {
-                let featuredLocal = YishuConversationModelCatalog.featuredLocalModels(
-                    selectedModel: companionManager.configuredRoutingModel,
-                    selectedProvider: companionManager.configuredRoutingModelProvider
-                )
-                let moreLocal = YishuConversationModelCatalog.moreLocalModels(
-                    selectedModel: companionManager.configuredRoutingModel,
-                    selectedProvider: companionManager.configuredRoutingModelProvider
-                )
-                let authSections = YishuConversationModelCatalog.authSections(
-                    authModels: companionManager.configuredAuthModels
-                )
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("工作方式")
@@ -959,6 +948,19 @@ struct CompanionPanelView: View {
                         } else {
                             Divider()
                                 .background(DS.Colors.borderSubtle)
+
+                            let selectedModel = companionManager.modelPickerPreference
+                            let featuredLocal = YishuConversationModelCatalog.featuredLocalModels(
+                                selectedModel: selectedModel.model,
+                                selectedProvider: selectedModel.provider
+                            )
+                            let moreLocal = YishuConversationModelCatalog.moreLocalModels(
+                                selectedModel: selectedModel.model,
+                                selectedProvider: selectedModel.provider
+                            )
+                            let authSections = YishuConversationModelCatalog.authSections(
+                                authModels: companionManager.configuredAuthModels
+                            )
 
                             Text(YishuAccountSurfaceCopy.localGrokSource)
                                 .font(.system(size: 10, weight: .semibold))
@@ -1027,57 +1029,54 @@ struct CompanionPanelView: View {
 
     private func routingModeChoiceRow(_ mode: YishuModelRoutingMode) -> some View {
         let isSelected = companionManager.modelRoutingMode == mode
-        return Button(action: {
+        return selectionChoiceRow(
+            label: mode.displayName,
+            isSelected: isSelected
+        ) {
             companionManager.setModelRoutingMode(mode)
             if mode == .auto {
                 isMoreLocalModelsExpanded = false
             }
-        }) {
-            HStack(spacing: 8) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isSelected ? DS.Colors.accent : DS.Colors.textTertiary)
-                    .frame(width: 16)
-
-                Text(mode.displayName)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                    .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textSecondary)
-
-                Spacer()
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isSelected ? DS.Colors.accent.opacity(0.14) : Color.white.opacity(0.03))
-            )
         }
-        .buttonStyle(.plain)
-        .pointerCursor()
     }
 
     private func modelChoiceRow(_ option: YishuConversationModelOption) -> some View {
-        let isSelected = companionManager.configuredRoutingModelProvider == option.provider
-            && companionManager.configuredRoutingModel == option.model
-        return Button(action: {
+        let selectedModel = companionManager.modelPickerPreference
+        let isSelected = selectedModel.provider == option.provider
+            && selectedModel.model == option.model
+        return selectionChoiceRow(
+            label: option.label,
+            detail: option.sourceLabel,
+            isSelected: isSelected
+        ) {
             companionManager.setSelectedModel(option)
-        }) {
+        }
+    }
+
+    private func selectionChoiceRow(
+        label: String,
+        detail: String? = nil,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(isSelected ? DS.Colors.accent : DS.Colors.textTertiary)
                     .frame(width: 16)
 
-                Text(option.label)
+                Text(label)
                     .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
                     .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textSecondary)
 
                 Spacer()
 
-                Text(option.sourceLabel)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
-
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 7)

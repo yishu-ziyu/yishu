@@ -875,30 +875,34 @@ export function enrichEvent(event: RuntimeEvent, state: TurnLedgerState): Runtim
   const payload = asRecord(event.payload);
   const generation = safeGeneration(payload.generation) ?? state.generation;
   const routing = event.type === "turn.started" ? state.modelRouting : undefined;
+  if (!GENERATION_EVENT_TYPES.has(event.type)) {
+    return {
+      ...event,
+      requestId: state.command.requestId,
+      traceId: state.traceId,
+      conversationId: state.conversationId as ConversationId,
+      payload,
+    };
+  }
+
   const trustedPayload = { ...payload };
   if (routing === undefined) {
     delete trustedPayload.routingMode;
     delete trustedPayload.resolvedRoute;
+  } else {
+    trustedPayload.routingMode = routing.routingMode;
+    trustedPayload.resolvedRoute = routing.resolvedRoute;
+    trustedPayload.provider = routing.preference.provider;
+    trustedPayload.model = routing.preference.model;
   }
+  trustedPayload.generation = generation;
+
   return {
     ...event,
     requestId: state.command.requestId,
     traceId: state.traceId,
     conversationId: state.conversationId as ConversationId,
-    payload: GENERATION_EVENT_TYPES.has(event.type)
-      ? {
-          ...trustedPayload,
-          ...(routing === undefined
-            ? {}
-            : {
-                routingMode: routing.routingMode,
-                resolvedRoute: routing.resolvedRoute,
-                provider: routing.preference.provider,
-                model: routing.preference.model,
-              }),
-          generation,
-        }
-      : payload,
+    payload: trustedPayload,
   };
 }
 

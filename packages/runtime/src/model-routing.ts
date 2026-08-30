@@ -13,6 +13,8 @@ export type ResolvedModelRoute =
   | "deep_task"
   | "fixed_model";
 
+type ProfiledModelRoute = Exclude<ResolvedModelRoute, "fixed_model">;
+
 export interface ResolvedModelRouting {
   readonly routingMode: ModelRouting["mode"];
   readonly resolvedRoute: ResolvedModelRoute;
@@ -42,13 +44,12 @@ export function resolveModelRouting(
 ): ResolvedModelRouting | undefined {
   const routing = input.routing;
   if (routing === undefined) {
-    return input.legacyPreference === undefined
-      ? undefined
-      : {
-          routingMode: "fixed_model",
-          resolvedRoute: "fixed_model",
-          preference: input.legacyPreference,
-        };
+    if (input.legacyPreference === undefined) return undefined;
+    return {
+      routingMode: "fixed_model",
+      resolvedRoute: "fixed_model",
+      preference: input.legacyPreference,
+    };
   }
 
   if (routing.mode === "fixed_model") {
@@ -62,15 +63,27 @@ export function resolveModelRouting(
   const requiresScreenCollaboration = input.intent.effect === "external"
     || input.currentPageNote
     || isScreenDependentUtterance(input.utterance);
-  const resolvedRoute = routing.mode === "auto"
-    ? requiresScreenCollaboration ? "screen_collaboration" : "realtime_conversation"
-    : routing.mode;
+  let resolvedRoute: ProfiledModelRoute;
+  if (routing.mode === "auto") {
+    resolvedRoute = requiresScreenCollaboration
+      ? "screen_collaboration"
+      : "realtime_conversation";
+  } else {
+    resolvedRoute = routing.mode;
+  }
 
-  const preference = resolvedRoute === "screen_collaboration"
-    ? routing.profiles.screenCollaboration
-    : resolvedRoute === "deep_task"
-      ? routing.profiles.deepTask
-      : routing.profiles.realtimeConversation;
+  let preference: ModelPreference;
+  switch (resolvedRoute) {
+    case "screen_collaboration":
+      preference = routing.profiles.screenCollaboration;
+      break;
+    case "deep_task":
+      preference = routing.profiles.deepTask;
+      break;
+    case "realtime_conversation":
+      preference = routing.profiles.realtimeConversation;
+      break;
+  }
 
   return {
     routingMode: routing.mode,
@@ -93,13 +106,16 @@ export function resolveTurnModelRouting(
     currentPageNote,
   });
   if (decision === undefined) return { command };
+  if (command.payload.modelRouting === undefined) {
+    return { command, decision };
+  }
+
+  const routedCommand: TurnStartCommand = {
+    ...command,
+    payload: { ...command.payload, modelPreference: decision.preference },
+  };
   return {
-    command: command.payload.modelRouting === undefined
-      ? command
-      : {
-          ...command,
-          payload: { ...command.payload, modelPreference: decision.preference },
-        },
+    command: routedCommand,
     decision,
   };
 }

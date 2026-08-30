@@ -22,12 +22,8 @@ extension CompanionManager {
         modelRoutingSettings.configuredPreference(fixedPreference: fixedModelPreference)
     }
 
-    var configuredRoutingModelProvider: String {
-        configuredRoutingModelPreference?.provider ?? selectedModelProvider
-    }
-
-    var configuredRoutingModel: String {
-        configuredRoutingModelPreference?.model ?? selectedModel
+    var modelPickerPreference: YishuModelPreference {
+        configuredRoutingModelPreference ?? fixedModelPreference
     }
 
     func modelRoutingSummary(for profile: YishuModelRoutingProfile) -> String {
