@@ -800,6 +800,98 @@ export const workspaceApproveCommandSchema = z.object({
   }).strict(),
 }).strict();
 
+const automationCronTriggerSchema = z.object({
+  type: z.literal("cron"),
+  schedule: z.string().trim().min(1).max(120),
+}).strict();
+const automationLocalTriggerSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("app_transition"),
+    app: z.string().trim().min(1).max(120),
+    transition: z.enum(["foreground", "background"]),
+  }).strict(),
+  z.object({ type: z.literal("file_change"), path: z.string().trim().min(1).max(512) }).strict(),
+  z.object({ type: z.literal("system_resume") }).strict(),
+]);
+const automationTriggerMemberSchema = z.union([automationCronTriggerSchema, automationLocalTriggerSchema]);
+const automationTriggerSchema = z.union([
+  automationTriggerMemberSchema,
+  z.object({
+    type: z.literal("group"),
+    listeners: z.array(automationTriggerMemberSchema).min(1).max(8),
+  }).strict(),
+]);
+
+export const automationListCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("automation.list"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({}).default({}),
+});
+
+export const automationCreateCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("automation.create"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    name: z.string().trim().min(1).max(80),
+    prompt: z.string().trim().min(1).max(2000),
+    trigger: automationTriggerSchema,
+  }).strict(),
+});
+
+export const automationUpdateCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("automation.update"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    automationId: z.string().trim().min(1).max(64),
+    name: z.string().trim().min(1).max(80),
+    prompt: z.string().trim().min(1).max(2000),
+    trigger: automationTriggerSchema,
+  }).strict(),
+});
+
+export const automationSetEnabledCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("automation.setEnabled"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    automationId: z.string().trim().min(1).max(64),
+    isEnabled: z.boolean(),
+  }).strict(),
+});
+
+export const automationRunNowCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("automation.runNow"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    automationId: z.string().trim().min(1).max(64),
+  }).strict(),
+});
+
+export const automationDeleteCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("automation.delete"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    automationId: z.string().trim().min(1).max(64),
+  }).strict(),
+});
+
 export const clientCommandSchema = z.discriminatedUnion("type", [
   turnStartCommandSchema,
   turnInterruptCommandSchema,
@@ -827,6 +919,12 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   workspaceRevokeCommandSchema,
   workspaceListCommandSchema,
   workspaceApproveCommandSchema,
+  automationListCommandSchema,
+  automationCreateCommandSchema,
+  automationUpdateCommandSchema,
+  automationSetEnabledCommandSchema,
+  automationRunNowCommandSchema,
+  automationDeleteCommandSchema,
 ]);
 
 export type ContextFrame = z.infer<typeof contextFrameSchema>;
@@ -868,6 +966,12 @@ export type WorkspaceGrantCommand = z.infer<typeof workspaceGrantCommandSchema>;
 export type WorkspaceRevokeCommand = z.infer<typeof workspaceRevokeCommandSchema>;
 export type WorkspaceListCommand = z.infer<typeof workspaceListCommandSchema>;
 export type WorkspaceApproveCommand = z.infer<typeof workspaceApproveCommandSchema>;
+export type AutomationListCommand = z.infer<typeof automationListCommandSchema>;
+export type AutomationCreateCommand = z.infer<typeof automationCreateCommandSchema>;
+export type AutomationUpdateCommand = z.infer<typeof automationUpdateCommandSchema>;
+export type AutomationSetEnabledCommand = z.infer<typeof automationSetEnabledCommandSchema>;
+export type AutomationRunNowCommand = z.infer<typeof automationRunNowCommandSchema>;
+export type AutomationDeleteCommand = z.infer<typeof automationDeleteCommandSchema>;
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 
 /**
@@ -923,7 +1027,12 @@ export type RuntimeEventType =
   | "workspace.revoked"
   | "workspace.listed"
   | "workspace.approved"
-  | "workspace.failed";
+  | "workspace.failed"
+  | "automation.listed"
+  | "automation.mutated"
+  | "automation.run.started"
+  | "automation.run.finished"
+  | "automation.failed";
 
 export interface RuntimeEvent<Payload = Record<string, unknown>> {
   schemaVersion: typeof PROTOCOL_VERSION;

@@ -34,6 +34,19 @@ export { createCheckpointLedger } from "./checkpoint/checkpoint.js";
 export type { CheckpointLedger, TaskCheckpoint, CheckpointStep } from "./checkpoint/checkpoint.js";
 export { createAutomationLedger } from "./automation/automation-rule.js";
 export type { AutomationLedger, AutomationRule, ToolGrant, AutomationBudget } from "./automation/automation-rule.js";
+export * from "./automation/automation-types.js";
+export {
+  computeNextRunAt,
+  describeSchedule,
+  describeTrigger,
+  dueAutomations,
+  formatTimestamp,
+  normalizeSchedule,
+  parseCron,
+  parseEveryIntervalMs,
+} from "./automation/automation-schedule.js";
+export { FileAutomationStore, defaultRoutinesRootPath } from "./automation/automation-store.js";
+export { buildAutomationWakePrompt, renderAutomationRuntimeStatusReminder, summarizeSchedule, AUTOMATION_STATUS_PROMPT_MARKER } from "./automation/automation-wake.js";
 export { createProjectContinuity } from "./project/project-continuity.js";
 export type { ProjectContinuity, ProjectFact } from "./project/project-continuity.js";
 

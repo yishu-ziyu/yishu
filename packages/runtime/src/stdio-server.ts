@@ -73,6 +73,9 @@ const runtime = createAgentRuntime(runtimeMode, { computerUse: computerUsePort }
 const authService = (runtime as AgentRuntime & { authService?: YishuAuthService }).authService;
 
 if (runtime instanceof ProductKernelRuntime) {
+  // Attach before initialize so the scheduler's first tick cannot emit into a
+  // missing sink.
+  runtime.setAutomationEmitSink((event) => emit(event));
   // Recovery owns durable task/result reconciliation. Do not accept commands
   // or claim readiness while that state is still ambiguous. A blocked store
   // must not leave an immortal process that never becomes ready.
@@ -499,6 +502,108 @@ lineReader.on("line", (line) => {
       emit(runtimeEvent("workspace.failed", command.requestId, command.traceId, {
         code: "product_kernel_disabled",
         message: "这次没有改废纸篓许可。",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "automation.list") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.listAutomations(command, emit).catch((error) => {
+        emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+          code: "automation_list_failed",
+          message: safeRuntimeErrorMessage(error, "暂时无法读取例程。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "automation.list requires product kernel.",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "automation.create") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.createAutomation(command, emit).catch((error) => {
+        emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+          code: "automation_create_failed",
+          message: safeRuntimeErrorMessage(error, "这次没有建好例程。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "automation.create requires product kernel.",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "automation.update") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.updateAutomation(command, emit).catch((error) => {
+        emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+          code: "automation_update_failed",
+          message: safeRuntimeErrorMessage(error, "这次没有改好例程。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "automation.update requires product kernel.",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "automation.setEnabled") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.setAutomationEnabled(command, emit).catch((error) => {
+        emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+          code: "automation_set_enabled_failed",
+          message: safeRuntimeErrorMessage(error, "这次没有切换例程状态。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "automation.setEnabled requires product kernel.",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "automation.runNow") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.runAutomationNow(command, emit).catch((error) => {
+        emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+          code: "automation_run_failed",
+          message: safeRuntimeErrorMessage(error, "这次没有运行例程。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "automation.runNow requires product kernel.",
+      }));
+    }
+    return;
+  }
+
+  if (command.type === "automation.delete") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.deleteAutomation(command, emit).catch((error) => {
+        emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+          code: "automation_delete_failed",
+          message: safeRuntimeErrorMessage(error, "这次没有删掉例程。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "automation.delete requires product kernel.",
       }));
     }
     return;

@@ -782,6 +782,7 @@ struct CompanionPanelView: View {
             ) {
                 speechSpeedSection
                 speechEmotionSection
+                YishuRoutinesSection(companionManager: companionManager)
                 chatModelPickerSection
                 ProviderAccountsView(viewModel: accountViewModel)
                 showYishuCursorToggleRow
