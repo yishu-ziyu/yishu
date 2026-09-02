@@ -18,6 +18,8 @@ import {
   type CreateNoteExecutor,
   type CreateNoteRequest,
   type ScheduleTimeReminderExecutor,
+  type EmailDefaultStore,
+  type OpenEmailExecutor,
   type FinderHistoryBackExecutor,
   type ConversationEvent,
   type ConversationTurn,
@@ -26,6 +28,7 @@ import {
   type EverOSMemoryPort,
   type TrailSourceFrame,
   type ConversationArchiveFailureReason,
+  type ConversationRestoreFailureReason,
   type ConversationOpenFailureReason,
   type SessionScope,
   type TaskExecutionContract,
@@ -40,6 +43,7 @@ import type {
   HistoryDeleteCommand,
   HistoryListCommand,
   HistoryOpenCommand,
+  HistoryRestoreCommand,
   MemoryForgetCommand,
   MemoryListCommand,
   MemoryRememberCommand,
@@ -307,6 +311,27 @@ function wireHistoryArchiveFailure(reason: ConversationArchiveFailureReason): {
   }
 }
 
+function wireHistoryRestoreFailure(reason: ConversationRestoreFailureReason): {
+  code: string;
+  message: string;
+} {
+  switch (reason) {
+    case "private":
+      return {
+        code: "private_session_not_restorable",
+        message: "不保存的对话没有历史，也无需恢复。",
+      };
+    case "scope_not_supported":
+      return { code: "scope_not_supported", message: "只能恢复「我的」历史对话。" };
+    case "not_found":
+      return { code: "conversation_not_found", message: "找不到这段对话。" };
+    case "scope_mismatch":
+      return { code: "scope_mismatch", message: "这段对话不在当前范围。" };
+    case "restore_failed":
+      return { code: "history_restore_failed", message: "恢复失败，对话仍保持归档。" };
+  }
+}
+
 /**
  * Product layer wrapper around the Pi AgentRuntime or its protocol test double.
  *
@@ -331,6 +356,8 @@ export class ProductKernelRuntime implements AgentRuntime {
   private readonly conversationAdmissionTails = new Map<string, Promise<void>>();
   /** Last effective model per Main conversation; a change forces cold Kernel-history rebuild. */
   private readonly conversationModelKeys = new Map<string, string>();
+  /** One live conversational slot: Her asked this conversation which email provider to use. */
+  private readonly awaitingEmailProvider = new Set<string>();
   private trailObservationTail: Promise<void> = Promise.resolve();
   /** Runtime side of delegated execution; public like `kernel` for tests/UI seams. */
   readonly delegation: DelegationCoordinator;
@@ -677,6 +704,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       const items = await this.kernel.conversations.list({
         sessionScope,
         ...(command.payload.limit !== undefined ? { limit: command.payload.limit } : {}),
+        ...(command.payload.includeArchived === true ? { includeArchived: true } : {}),
       });
       emit(runtimeEvent("history.listed", command.requestId, command.traceId, {
         sessionScope,
@@ -807,6 +835,54 @@ export class ProductKernelRuntime implements AgentRuntime {
       emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
         code: "history_delete_failed",
         message: "删除失败，原对话仍保留。",
+      }));
+    }
+  }
+
+  /**
+   * Un-archive one personal history row (status back to active). Emits only
+   * after the store confirms success so the UI can move the row safely.
+   * Product policy lives on kernel.conversations; this method maps wire in/out.
+   */
+  async restoreHistory(command: HistoryRestoreCommand, emit: RuntimeEventSink): Promise<void> {
+    if (this.disposed) {
+      emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
+        code: "runtime_disposed",
+        message: "ProductKernelRuntime has been disposed.",
+      }));
+      return;
+    }
+    try {
+      const expectedScope = normalizeSessionScope(command.payload.sessionScope);
+      const result = await this.kernel.conversations.restorePersonal({
+        conversationId: command.payload.conversationId,
+        expectedScope,
+      });
+      if (!result.ok) {
+        emit(runtimeEvent(
+          "history.failed",
+          command.requestId,
+          command.traceId,
+          wireHistoryRestoreFailure(result.reason),
+        ));
+        return;
+      }
+      emit(runtimeEvent(
+        "history.restored",
+        command.requestId,
+        command.traceId,
+        {
+          conversationId: result.conversationId,
+          status: result.status,
+          sessionScope: result.sessionScope,
+          alreadyActive: result.alreadyActive,
+        },
+        result.conversationId,
+      ));
+    } catch {
+      emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
+        code: "history_restore_failed",
+        message: "恢复失败，对话仍保持归档。",
       }));
     }
   }
@@ -1139,10 +1215,14 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
 
       this.activateTrailScope(sessionScope);
+      const conversationKey = conversationId.toLowerCase();
+      const wasAwaitingEmailProvider = this.awaitingEmailProvider.has(conversationKey);
       const intent = intentForUtterance(
         command.payload.utterance,
         command.payload.contextFrame,
+        { awaitingEmailProvider: wasAwaitingEmailProvider },
       );
+      if (wasAwaitingEmailProvider) this.awaitingEmailProvider.delete(conversationKey);
       const modelRouting = resolveTurnModelRouting(
         command,
         intent,
@@ -1612,6 +1692,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     const actionRoute = route.action === "finder_history_back"
       || route.action === "create_note"
       || route.action === "schedule_time_reminder"
+      || route.action === "open_email"
       ? {
           ...route,
           input: {
@@ -1645,6 +1726,11 @@ export class ProductKernelRuntime implements AgentRuntime {
           ? { createNote: this.createNoteExecutor(state) }
           : actionRoute.action === "schedule_time_reminder"
             ? { scheduleTimeReminder: this.scheduleTimeReminderExecutor(state) }
+          : actionRoute.action === "open_email"
+            ? {
+                openEmail: this.openEmailExecutor(state),
+                emailDefaults: this.emailDefaultStore(),
+              }
           : undefined;
       receipt = await this.kernel.registry.invoke(actionRoute.action, {
         caller: "voice",
@@ -1767,6 +1853,16 @@ export class ProductKernelRuntime implements AgentRuntime {
         this.emitCreatedContextWatchPresence(receipt.output);
       }
 
+      if (actionRoute.action === "open_email") {
+        const output = asRecord(receipt.output);
+        const conversationKey = state.conversationId.toLowerCase();
+        if (output.needsClarification === true) {
+          this.awaitingEmailProvider.add(conversationKey);
+        } else {
+          this.awaitingEmailProvider.delete(conversationKey);
+        }
+      }
+
       const speech = formatProductActionSpeech(
         actionRoute.action,
         receipt.status,
@@ -1837,6 +1933,64 @@ export class ProductKernelRuntime implements AgentRuntime {
           y: 0,
           targetBundleId: request.targetBundleId,
           targetPid: request.targetPid,
+        }, {
+          requestId: state.command.requestId,
+          traceId: state.traceId,
+          intentId: request.intentId,
+          attemptId: request.attemptId,
+          basisFrameId: request.basisFrameId,
+          effectClass: "navigation",
+        }, signal);
+      },
+    };
+  }
+
+  private emailDefaultStore(): EmailDefaultStore {
+    return {
+      resolve: async (signal) => {
+        if (signal?.aborted) return undefined;
+        const provider = await this.kernel.memories.resolveDefaultEmailProvider();
+        if (signal?.aborted) return undefined;
+        return provider;
+      },
+      remember: async (provider, signal) => {
+        if (signal?.aborted) return false;
+        if (await this.kernel.memories.resolveDefaultEmailProvider() === provider) return true;
+        const receipt = await this.kernel.registry.invoke("remember", {
+          caller: "system",
+          input: {
+            claim: "默认邮箱：Google",
+            scope: "personal",
+            confidence: 1,
+            source: "user_correction",
+            tags: ["personal_default", "key:email.provider", `value:${provider}`],
+          },
+          ...(signal === undefined ? {} : { signal }),
+        });
+        return receipt.status === "verified";
+      },
+    };
+  }
+
+  private openEmailExecutor(state: TurnLedgerState): OpenEmailExecutor {
+    return {
+      perform: async (request, signal) => {
+        if (!this.computerUsePort) {
+          return {
+            succeeded: false,
+            verified: false,
+            provider: request.provider,
+            status: "failed",
+            code: "runtime_error",
+            method: "unknown",
+            message: "The macOS destination bridge is unavailable.",
+          };
+        }
+        return this.computerUsePort.perform({
+          action: "open_destination",
+          x: 0,
+          y: 0,
+          destinationId: "email.google",
         }, {
           requestId: state.command.requestId,
           traceId: state.traceId,
@@ -2713,6 +2867,7 @@ export class ProductKernelRuntime implements AgentRuntime {
     this.pendingStartTraceByRequestId.clear();
     this.cancelledPendingRequestIds.clear();
     this.activeTurns.clear();
+    this.awaitingEmailProvider.clear();
     if (disposeError !== undefined) throw disposeError;
   }
 

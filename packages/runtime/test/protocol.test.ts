@@ -727,6 +727,26 @@ test("left_click accepts numbered target ids without pixels", () => {
   assert.throws(() => computerActionSchema.parse({ action: "left_click", x: 10 }));
 });
 
+test("open_destination accepts only the product-owned Gmail destination", () => {
+  assert.deepEqual(computerActionSchema.parse({
+    action: "open_destination",
+    x: 0,
+    y: 0,
+    destinationId: "email.google",
+  }), {
+    action: "open_destination",
+    x: 0,
+    y: 0,
+    destinationId: "email.google",
+  });
+  assert.throws(() => computerActionSchema.parse({
+    action: "open_destination",
+    x: 0,
+    y: 0,
+    destinationId: "https://example.com",
+  }));
+});
+
 test("grounded prompt lists numbered AX targets for click-by-id", () => {
   const command = makeTurnStartCommand();
   command.payload.contextFrame.numberedTargets = [

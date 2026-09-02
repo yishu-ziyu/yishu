@@ -1,5 +1,6 @@
 import type { ZodType } from "zod";
 import type { SessionScope } from "../session-scope.js";
+import type { EmailDefaultStore, OpenEmailExecutor } from "./email-types.js";
 
 /** Who initiated the action invocation. */
 export type CallerKind =
@@ -375,6 +376,8 @@ export interface ActionInvokeDeps {
   finderHistoryBack?: FinderHistoryBackExecutor;
   createNote?: CreateNoteExecutor;
   scheduleTimeReminder?: ScheduleTimeReminderExecutor;
+  openEmail?: OpenEmailExecutor;
+  emailDefaults?: EmailDefaultStore;
   browser?: BrowserExecutor;
 }
 

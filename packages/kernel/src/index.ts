@@ -63,6 +63,8 @@ export type {
   ConversationLedger,
   ConversationOpenFailureReason,
   ConversationOpenResult,
+  ConversationRestoreFailureReason,
+  ConversationRestoreResult,
   VisibleConversation,
   VisibleConversationTurn,
 } from "./conversation/ledger.js";

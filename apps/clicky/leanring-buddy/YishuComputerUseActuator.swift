@@ -37,6 +37,8 @@ enum YishuComputerUseActuator {
         _ authorizationFence: AuthorizationFence
     ) async -> YishuTimeReminderScheduleOutcome
 
+    typealias DestinationExecutor = @MainActor (_ url: URL) -> Bool
+
     /// One reusable commit point for AXSet/AXPress/CGEvent. Keeping the fence
     /// adjacent to the irreversible call makes cancellation testable without
     /// manufacturing real Accessibility elements in unit tests.
@@ -776,7 +778,8 @@ enum YishuComputerUseActuator {
         authorizationFence: @escaping AuthorizationFence = { true },
         notesExecutor: NotesExecutor? = nil,
         sourceWindowValidator: @escaping SourceWindowValidator = sourceWindowStillMatches,
-        timeReminderExecutor: TimeReminderExecutor? = nil
+        timeReminderExecutor: TimeReminderExecutor? = nil,
+        destinationExecutor: DestinationExecutor? = nil
     ) async -> YishuComputerActionResult {
         let receiptId = UUID().uuidString
         let attemptId = request.attemptId ?? UUID().uuidString
@@ -804,6 +807,15 @@ enum YishuComputerUseActuator {
                         authorizationFence: fence
                     )
                 }
+            )
+        }
+        if request.action == "open_destination" {
+            return performOpenDestination(
+                request,
+                receiptId: receiptId,
+                attemptId: attemptId,
+                authorizationFence: authorizationFence,
+                executor: destinationExecutor ?? { NSWorkspace.shared.open($0) }
             )
         }
         if request.action == "finder_history_back" {
@@ -1382,6 +1394,54 @@ enum YishuComputerUseActuator {
             return .unknownAfterSubmission
         }
         return .created(noteId: noteId, title: readTitle, plaintext: plaintext)
+    }
+
+    private static func performOpenDestination(
+        _ request: YishuComputerActionRequest,
+        receiptId: String,
+        attemptId: String,
+        authorizationFence: @escaping AuthorizationFence,
+        executor: DestinationExecutor
+    ) -> YishuComputerActionResult {
+        guard request.basisFrameId.flatMap(UUID.init(uuidString:)) != nil,
+              request.destinationId == "email.google",
+              let url = URL(string: "https://mail.google.com/") else {
+            return failed(
+                "The destination request is invalid.",
+                code: .targetStale,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard let opened = authorizedCommit(authorizationFence, operation: {
+            executor(url)
+        }) else {
+            return failed(
+                "The destination open request was cancelled before submission.",
+                code: .cancelled,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        guard opened else {
+            return failed(
+                "macOS did not accept the destination open request.",
+                code: .runtimeError,
+                receiptId: receiptId,
+                attemptId: attemptId
+            )
+        }
+        return YishuComputerActionResult(
+            succeeded: true,
+            verified: true,
+            message: "macOS accepted the canonical Gmail destination.",
+            evidence: "destination=email.google",
+            status: .verified,
+            method: .nativeCommand,
+            code: .verifiedURLReady,
+            receiptId: receiptId,
+            attemptId: attemptId
+        )
     }
 
     private static func performFinderHistoryBack(

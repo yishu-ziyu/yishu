@@ -68,3 +68,62 @@ enum YishuSpeechSpeed {
         return String(format: "%.1f×", clamped)
     }
 }
+
+/// User-facing speech emotion for MiniMax TTS (`voice_setting.emotion`).
+/// "自动" stores the empty string and sends no emotion parameter, so the
+/// provider renders emotion from the content itself (speech-2.8 renders mood
+/// and interjections from text). Invalid stored values fail open to auto so
+/// bad UserDefaults never break a speak request.
+enum YishuSpeechEmotion {
+    /// UserDefaults key (not a secret; safe to store with other app prefs).
+    static let userDefaultsKey = "yishu.speechEmotion.v1"
+    static let autoRawValue = ""
+
+    /// MiniMax t2a_v2 supported emotion set.
+    static let supportedRawValues: [String] = [
+        "happy", "sad", "angry", "fearful", "disgusted", "surprised", "neutral",
+    ]
+
+    struct Option: Equatable, Identifiable {
+        let rawValue: String
+        let label: String
+        var id: String { rawValue }
+    }
+
+    static let options: [Option] = [
+        Option(rawValue: autoRawValue, label: "自动"),
+        Option(rawValue: "happy", label: "开心"),
+        Option(rawValue: "sad", label: "悲伤"),
+        Option(rawValue: "angry", label: "愤怒"),
+        Option(rawValue: "fearful", label: "恐惧"),
+        Option(rawValue: "disgusted", label: "厌恶"),
+        Option(rawValue: "surprised", label: "惊讶"),
+        Option(rawValue: "neutral", label: "中性"),
+    ]
+
+    static func normalized(_ raw: String?) -> String {
+        guard let raw else { return autoRawValue }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return autoRawValue }
+        return supportedRawValues.contains(trimmed) ? trimmed : autoRawValue
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> String {
+        normalized(defaults.string(forKey: userDefaultsKey))
+    }
+
+    static func store(_ raw: String, in defaults: UserDefaults = .standard) {
+        defaults.set(normalized(raw), forKey: userDefaultsKey)
+    }
+
+    /// Value sent on the wire; nil means "no emotion parameter" (auto).
+    static func wireValue(from defaults: UserDefaults = .standard) -> String? {
+        let value = load(from: defaults)
+        return value.isEmpty ? nil : value
+    }
+
+    static func displayLabel(for raw: String) -> String {
+        let normalizedRaw = normalized(raw)
+        return options.first { $0.rawValue == normalizedRaw }?.label ?? "自动"
+    }
+}

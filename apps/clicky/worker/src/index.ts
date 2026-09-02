@@ -474,6 +474,23 @@ const MINIMAX_TTS_SPEED_MIN = 0.5;
 const MINIMAX_TTS_SPEED_MAX = 2.0;
 const MINIMAX_TTS_SPEED_DEFAULT = 1.0;
 
+/** MiniMax t2a_v2 voice_setting.emotion allowlist. Invalid → omitted (auto). */
+const MINIMAX_TTS_EMOTIONS = new Set([
+  "happy",
+  "sad",
+  "angry",
+  "fearful",
+  "disgusted",
+  "surprised",
+  "neutral",
+]);
+
+function resolveTtsEmotion(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const value = raw.trim();
+  return MINIMAX_TTS_EMOTIONS.has(value) ? value : undefined;
+}
+
 function clampSpeechSpeed(raw: unknown): number {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(n)) return MINIMAX_TTS_SPEED_DEFAULT;
@@ -508,6 +525,7 @@ async function handleTTS(request: Request, env: Env): Promise<Response> {
   const incoming = (await request.json()) as {
     text?: string;
     model_id?: string;
+    emotion?: string;
   };
   const text = (incoming.text || "").trim();
   if (!text) {
@@ -529,6 +547,9 @@ async function handleTTS(request: Request, env: Env): Promise<Response> {
       : env.MINIMAX_TTS_SPEED || 1.0
   );
   const volume = Number(env.MINIMAX_TTS_VOLUME || 1.0);
+  // Per-request emotion from the app; invalid/absent → provider auto-renders
+  // mood from the text itself.
+  const emotion = resolveTtsEmotion(incoming.emotion);
 
   const response = await fetch(ttsURL, {
     method: "POST",
@@ -547,6 +568,7 @@ async function handleTTS(request: Request, env: Env): Promise<Response> {
         speed,
         vol: Number.isFinite(volume) ? volume : 1.0,
         pitch: 0,
+        ...(emotion ? { emotion } : {}),
       },
       audio_setting: {
         sample_rate: highQuality ? 44100 : 32000,

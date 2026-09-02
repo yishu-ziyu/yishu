@@ -368,6 +368,23 @@ lineReader.on("line", (line) => {
     return;
   }
 
+  if (command.type === "history.restore") {
+    if (runtime instanceof ProductKernelRuntime) {
+      void runtime.restoreHistory(command, emit).catch((error) => {
+        emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
+          code: "history_restore_failed",
+          message: safeRuntimeErrorMessage(error, "恢复失败，对话仍保持归档。"),
+        }));
+      });
+    } else {
+      emit(runtimeEvent("history.failed", command.requestId, command.traceId, {
+        code: "product_kernel_disabled",
+        message: "history.restore requires product kernel (YISHU_PRODUCT_KERNEL not off).",
+      }));
+    }
+    return;
+  }
+
   if (command.type === "memory.list") {
     if (runtime instanceof ProductKernelRuntime) {
       void runtime.listMemories(command, emit).catch((error) => {

@@ -13,7 +13,8 @@ export type ProductActionName =
   | "watch_app_return"
   | "finder_history_back"
   | "create_note"
-  | "schedule_time_reminder";
+  | "schedule_time_reminder"
+  | "open_email";
 
 export interface ProductUtteranceRoute {
   action: ProductActionName;
@@ -32,6 +33,10 @@ export function routeProductUtterance(
   const text = utterance.trim();
   if (text.length === 0) return null;
   const lower = text.toLowerCase();
+
+  if (isOpenEmailCommand(text)) {
+    return { action: "open_email", input: {}, confidence: 0.99 };
+  }
 
   const timeReminder = parseRelativeTimeReminder(text);
   if (timeReminder) {
@@ -190,12 +195,47 @@ export function routeProductUtterance(
   return null;
 }
 
+/** A provider reply is actionable only while Runtime owns a live clarification. */
+export function emailProviderFromClarificationReply(
+  utterance: string,
+): "google" | undefined {
+  const text = utterance.trim();
+  if (text.length === 0 || text.length > 80 || /[?？]/u.test(text)) return undefined;
+  if (/(?:不是|不用|不要|别|not\s+google)/iu.test(text)) return undefined;
+  return /(?:google\s*(?:邮箱|mail)?|gmail|谷歌邮箱)/iu.test(text)
+    ? "google"
+    : undefined;
+}
+
+function isOpenEmailCommand(text: string): boolean {
+  if (/[?？]/u.test(text)
+    || /(?:吗|么|能不能|可不可以|是否)\s*[。.!！]*$/u.test(text)
+    || /(?:不要|别|不用|不必)/u.test(text)) return false;
+  return /^(?:(?:请|麻烦|帮我|请帮我|给我|帮我一下)\s*)?(?:打开|开一下|看一下|查看)(?:我的)?邮箱[。.!！]*$/u.test(text)
+    || /^(?:please\s+)?open\s+(?:my\s+)?(?:email|inbox)\s*[.!]*$/iu.test(text);
+}
+
 /** Spoken Chinese/English summary after a product action receipt. */
 export function formatProductActionSpeech(
   action: ProductActionName,
   status: string,
   output: unknown,
 ): string {
+  if (action === "open_email") {
+    const result = output as {
+      succeeded?: boolean;
+      verified?: boolean;
+      learned?: boolean;
+      needsClarification?: boolean;
+    } | null;
+    if (result?.needsClarification) return "你平时用哪个邮箱？";
+    if (result?.verified && result.learned) {
+      return "已经打开 Gmail，以后你说‘打开邮箱’我就直接来这里。";
+    }
+    if (result?.verified) return "已经打开 Gmail。";
+    if (result?.succeeded) return "已经请求打开 Gmail。";
+    return "这次没有打开邮箱。";
+  }
   if (action === "schedule_time_reminder") {
     const result = output as {
       succeeded?: boolean;

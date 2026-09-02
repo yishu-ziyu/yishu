@@ -70,6 +70,26 @@ export type ConversationArchiveResult =
       reason: ConversationArchiveFailureReason;
     };
 
+export type ConversationRestoreFailureReason =
+  | "private"
+  | "not_found"
+  | "scope_mismatch"
+  | "scope_not_supported"
+  | "restore_failed";
+
+export type ConversationRestoreResult =
+  | {
+      ok: true;
+      conversationId: string;
+      status: "active";
+      sessionScope: SessionScope;
+      alreadyActive: boolean;
+    }
+  | {
+      ok: false;
+      reason: ConversationRestoreFailureReason;
+    };
+
 /**
  * Product history list / open / personal archive.
  * Returns user-visible rows only; never raw events or protocol types.
@@ -78,6 +98,8 @@ export interface ConversationLedger {
   list(input: {
     sessionScope: SessionScope;
     limit?: number;
+    /** Include archived rows (history window "已归档" section). */
+    includeArchived?: boolean;
   }): Promise<readonly ConversationListItem[]>;
 
   open(input: {
@@ -91,6 +113,11 @@ export interface ConversationLedger {
     conversationId: string;
     expectedScope: SessionScope;
   }): Promise<ConversationArchiveResult>;
+
+  restorePersonal(input: {
+    conversationId: string;
+    expectedScope: SessionScope;
+  }): Promise<ConversationRestoreResult>;
 }
 
 function toVisibleConversation(conversation: {
@@ -147,6 +174,7 @@ export function createConversationLedger(store: YishuStorePort): ConversationLed
       return store.listConversations({
         sessionScope,
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        ...(input.includeArchived === true ? { includeArchived: true } : {}),
       });
     },
 
@@ -210,6 +238,36 @@ export function createConversationLedger(store: YishuStorePort): ConversationLed
         status: archived.status,
         sessionScope: archived.sessionScope,
         alreadyArchived: existing.status === "archived",
+      };
+    },
+
+    async restorePersonal(input) {
+      const expectedScope = normalizeSessionScope(input.expectedScope);
+      if (expectedScope.kind === "private") {
+        return { ok: false, reason: "private" };
+      }
+      if (expectedScope.kind !== "personal") {
+        return { ok: false, reason: "scope_not_supported" };
+      }
+      const existing = await store.getConversation(input.conversationId);
+      if (!existing) {
+        return { ok: false, reason: "not_found" };
+      }
+      if (!sessionScopesEqual(existing.sessionScope, expectedScope)) {
+        return { ok: false, reason: "scope_mismatch" };
+      }
+      const restored = await store.restoreConversation(existing.id, {
+        expectedScope,
+      });
+      if (!restored || restored.status !== "active") {
+        return { ok: false, reason: "restore_failed" };
+      }
+      return {
+        ok: true,
+        conversationId: restored.id,
+        status: "active",
+        sessionScope: restored.sessionScope,
+        alreadyActive: existing.status !== "archived",
       };
     },
   };

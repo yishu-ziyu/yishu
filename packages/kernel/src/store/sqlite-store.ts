@@ -1522,6 +1522,35 @@ export class SqliteYishuStore implements YishuStorePort {
     return rowToConversation(row);
   }
 
+  async restoreConversation(
+    id: string,
+    options?: { expectedScope?: SessionScope },
+  ): Promise<Conversation | null> {
+    const existing = this.db
+      .prepare(`SELECT * FROM conversations WHERE id = ? COLLATE NOCASE`)
+      .get(id) as Record<string, unknown> | undefined;
+    if (!existing) return null;
+    const conversation = rowToConversation(existing);
+    if (conversation.sessionScope.kind === "private") return null;
+    if (options?.expectedScope !== undefined) {
+      const expected = normalizeSessionScope(options.expectedScope);
+      if (!sessionScopesEqual(conversation.sessionScope, expected)) return null;
+    }
+    if (conversation.status !== "archived") {
+      return conversation;
+    }
+    const stamp = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE conversations SET status = 'active', updated_at = ? WHERE id = ? COLLATE NOCASE`,
+      )
+      .run(stamp, id);
+    const row = this.db
+      .prepare(`SELECT * FROM conversations WHERE id = ? COLLATE NOCASE`)
+      .get(id) as Record<string, unknown>;
+    return rowToConversation(row);
+  }
+
   async getMind(): Promise<YishuMindState> {
     return this.readMindState();
   }

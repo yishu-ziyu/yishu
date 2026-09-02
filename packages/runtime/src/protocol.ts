@@ -166,12 +166,21 @@ const scheduleReminderComputerActionSchema = z.object({
   body: z.string().trim().min(1).max(500),
 });
 
+/** Product-owned destination id; arbitrary model-supplied URLs never cross this wire. */
+const openDestinationComputerActionSchema = z.object({
+  action: z.literal("open_destination"),
+  x: z.literal(0),
+  y: z.literal(0),
+  destinationId: z.literal("email.google"),
+});
+
 export const computerActionSchema = z.discriminatedUnion("action", [
   leftClickComputerActionSchema,
   finderHistoryBackComputerActionSchema,
   setTextComputerActionSchema,
   createNoteComputerActionSchema,
   scheduleReminderComputerActionSchema,
+  openDestinationComputerActionSchema,
 ]);
 
 /**
@@ -227,6 +236,7 @@ export const COMPUTER_ACTION_RESULT_CODES = [
   "quartz_unverified",
   "verified_accessibility",
   "verified_system_notification",
+  "verified_url_open",
   "verified_screen",
   "direct_action_already_attempted",
   "action_limit_reached",
@@ -258,6 +268,7 @@ export const computerActionRequestedPayloadSchema = z.discriminatedUnion("action
   setTextComputerActionSchema.extend(computerActionRequestMetadata),
   createNoteComputerActionSchema.extend(computerActionRequestMetadata),
   scheduleReminderComputerActionSchema.extend(computerActionRequestMetadata),
+  openDestinationComputerActionSchema.extend(computerActionRequestMetadata),
 ]);
 
 export const computerActionResultPayloadSchema = z.object({
@@ -600,6 +611,8 @@ export const historyListCommandSchema = z.object({
     /** Defaults to personal for the "我的" entry. */
     sessionScope: sessionScopeSchema.default({ kind: "personal" }),
     limit: z.number().int().min(1).max(50).optional(),
+    /** Include archived rows for the history window "已归档" section. */
+    includeArchived: z.boolean().optional(),
   }).default({ sessionScope: { kind: "personal" } }),
 });
 
@@ -635,6 +648,24 @@ export const historyDeleteCommandSchema = z.object({
   payload: z.object({
     conversationId: conversationIdSchema,
     /** Only personal is accepted for the "我的" delete entry. */
+    sessionScope: sessionScopeSchema.default({ kind: "personal" }),
+  }),
+});
+
+/**
+ * Un-archive one personal conversation so the history window can restore a
+ * previously archived row. Turns were never removed; only the status flips
+ * back to active. Idempotent when already active.
+ */
+export const historyRestoreCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("history.restore"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({
+    conversationId: conversationIdSchema,
+    /** Only personal is accepted for the restore entry. */
     sessionScope: sessionScopeSchema.default({ kind: "personal" }),
   }),
 });
@@ -787,6 +818,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   historyListCommandSchema,
   historyOpenCommandSchema,
   historyDeleteCommandSchema,
+  historyRestoreCommandSchema,
   memoryListCommandSchema,
   memoryForgetCommandSchema,
   memoryRememberCommandSchema,
@@ -827,6 +859,7 @@ export type AuthLogoutCommand = z.infer<typeof authLogoutCommandSchema>;
 export type HistoryListCommand = z.infer<typeof historyListCommandSchema>;
 export type HistoryOpenCommand = z.infer<typeof historyOpenCommandSchema>;
 export type HistoryDeleteCommand = z.infer<typeof historyDeleteCommandSchema>;
+export type HistoryRestoreCommand = z.infer<typeof historyRestoreCommandSchema>;
 export type MemoryListCommand = z.infer<typeof memoryListCommandSchema>;
 export type MemoryForgetCommand = z.infer<typeof memoryForgetCommandSchema>;
 export type MemoryRememberCommand = z.infer<typeof memoryRememberCommandSchema>;
@@ -876,6 +909,7 @@ export type RuntimeEventType =
   | "history.listed"
   | "history.opened"
   | "history.deleted"
+  | "history.restored"
   | "history.failed"
   | "memory.listed"
   | "memory.forgotten"
