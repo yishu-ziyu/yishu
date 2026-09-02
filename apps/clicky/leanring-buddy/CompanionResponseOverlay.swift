@@ -41,9 +41,30 @@ enum YishuObservationalPointingPolicy {
     }
 }
 
+/// Reconciles the authoritative final text against the streamed text the user
+/// already watched appear. The runtime contract says deltas concatenate to the
+/// final text; when reality disagrees, prefer display stability over replacing
+/// the visible answer mid-word (which reads as the answer "restarting").
+enum YishuOverlayTextReconcilePolicy {
+    static func displayText(streamed: String, authoritative: String) -> String {
+        let streamedTrimmed = streamed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let authoritativeTrimmed = authoritative.trimmingCharacters(in: .whitespacesAndNewlines)
+        if authoritativeTrimmed.isEmpty { return streamed }
+        if streamedTrimmed.isEmpty { return authoritative }
+        if authoritativeTrimmed.hasPrefix(streamedTrimmed) { return authoritative }
+        if streamedTrimmed.hasPrefix(authoritativeTrimmed) { return streamed }
+        // Diverged: keep what the user actually watched being typed. The
+        // spoken-reply path handles a contract break independently.
+        return streamed
+    }
+}
+
 @MainActor
 final class CompanionResponseOverlayViewModel: ObservableObject {
     @Published var streamingResponseText: String = ""
+    /// Sentences already spoken aloud; they dim so the unread tail stays
+    /// visually "live" while the voice catches up with the text.
+    @Published var spokenSentenceCount = 0
     /// Optional per-turn Runtime route receipt shown only for ordinary answers.
     @Published var routingMetadataText: String = ""
     /// Optional durable-memory source line shown under the answer.
@@ -69,6 +90,7 @@ final class CompanionResponseOverlayManager {
     func showThinking() {
         cancelScheduledHide()
         viewModel.streamingResponseText = ""
+        viewModel.spokenSentenceCount = 0
         viewModel.routingMetadataText = ""
         viewModel.memorySourceText = ""
 
@@ -88,6 +110,12 @@ final class CompanionResponseOverlayManager {
             return
         }
         viewModel.presentationPhase = .response
+    }
+
+    /// One sentence left the speaker. Called from the per-turn speech pipeline
+    /// so the visible lines dim in the order the voice actually said them.
+    func advanceSpokenSentence() {
+        viewModel.spokenSentenceCount += 1
     }
 
     func updateMemorySourceText(_ text: String?) {
@@ -119,6 +147,7 @@ final class CompanionResponseOverlayManager {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         viewModel.routingMetadataText = ""
         viewModel.memorySourceText = ""
+        viewModel.spokenSentenceCount = 0
         viewModel.streamingResponseText = trimmed
         withAnimation(.easeOut(duration: 0.18)) {
             viewModel.presentationPhase = .message
@@ -135,6 +164,7 @@ final class CompanionResponseOverlayManager {
         cancelScheduledHide()
         viewModel.presentationPhase = .hidden
         viewModel.streamingResponseText = ""
+        viewModel.spokenSentenceCount = 0
         viewModel.routingMetadataText = ""
         viewModel.memorySourceText = ""
     }
@@ -147,6 +177,7 @@ final class CompanionResponseOverlayManager {
         // Keep the final glyphs alive until the opacity transition finishes.
         let clearWorkItem = DispatchWorkItem { [weak self] in
             self?.viewModel.streamingResponseText = ""
+            self?.viewModel.spokenSentenceCount = 0
             self?.viewModel.routingMetadataText = ""
             self?.viewModel.memorySourceText = ""
         }
@@ -187,10 +218,11 @@ struct CompanionResponsePresenceView: View {
 
     private var responseSurface: some View {
         VStack(alignment: .leading, spacing: 6) {
-            YishuTyperText(
+            YishuSentenceRevealText(
                 text: viewModel.streamingResponseText.isEmpty
                     ? "…"
-                    : viewModel.streamingResponseText
+                    : viewModel.streamingResponseText,
+                spokenSentenceCount: viewModel.spokenSentenceCount
             )
 
             if !viewModel.routingMetadataText.isEmpty {
@@ -271,233 +303,80 @@ struct CompanionResponsePresenceView: View {
 
 }
 
-// MARK: - Typer Reveal
+// MARK: - Sentence Reveal
 
-private struct YishuTyperText: View {
+/// Sentences fade in as they stream, split by the same boundary rules as the
+/// spoken pipeline, so a line settles exactly around when the voice reaches
+/// it. Already-spoken lines dim; the unterminated tail grows without
+/// re-animating. This replaces the old per-character typer, whose glyph
+/// layout re-animated from the first differing character whenever the
+/// authoritative final text diverged from the streamed deltas.
+private struct YishuSentenceRevealText: View {
     let text: String
+    let spokenSentenceCount: Int
 
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
-    @State private var previousCharacters: [Character] = []
-    @State private var glyphRevealStartTimes: [Int: TimeInterval] = [:]
 
-    private var normalizedCharacters: [Character] {
-        Array(text.replacingOccurrences(of: "\n", with: " "))
+    private var segments: [String] {
+        Self.displaySegments(in: text)
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { timelineContext in
-            YishuCharacterFlowLayout(horizontalSpacing: 0, verticalSpacing: 3) {
-                ForEach(Array(normalizedCharacters.enumerated()), id: \.offset) { characterIndex, character in
-                    YishuTyperGlyph(
-                        character: character,
-                        phase: revealPhase(
-                            for: characterIndex,
-                            timelineDate: timelineContext.date
-                        )
-                    )
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { segmentIndex, segment in
+                YishuSentenceLine(
+                    text: segment.replacingOccurrences(of: "\n", with: " "),
+                    isSpoken: segmentIndex < spokenSentenceCount,
+                    animateAppear: !accessibilityReduceMotion
+                )
+            }
+        }
+    }
+
+    static func displaySegments(in text: String) -> [String] {
+        var remaining = text
+        var segments: [String] = []
+        while let boundary = YishuSpokenReplyBudget.firstSentenceBoundary(
+            in: remaining,
+            isFinal: true
+        ) {
+            segments.append(String(remaining[..<boundary]))
+            remaining.removeSubrange(..<boundary)
+        }
+        let tail = remaining.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty {
+            segments.append(remaining)
+        }
+        return segments
+    }
+}
+
+private struct YishuSentenceLine: View {
+    let text: String
+    let isSpoken: Bool
+    let animateAppear: Bool
+
+    @State private var appeared = false
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 13.5, weight: .regular, design: .default))
+            .foregroundColor(
+                isSpoken
+                    ? DS.Colors.overlayResponseInk.opacity(0.72)
+                    : DS.Colors.overlayResponseInk
+            )
+            .animation(.easeOut(duration: 0.2), value: isSpoken)
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared ? 0 : 3)
+            .onAppear {
+                guard animateAppear else {
+                    appeared = true
+                    return
+                }
+                withAnimation(.easeOut(duration: 0.24)) {
+                    appeared = true
                 }
             }
-        }
-        .onAppear {
-            synchronizeRevealTimes(with: normalizedCharacters)
-        }
-        .onChange(of: text) { _ in
-            synchronizeRevealTimes(with: normalizedCharacters)
-        }
     }
-
-    private func synchronizeRevealTimes(with nextCharacters: [Character]) {
-        guard !accessibilityReduceMotion else {
-            previousCharacters = nextCharacters
-            glyphRevealStartTimes = [:]
-            return
-        }
-
-        let sharedPrefixCount = zip(previousCharacters, nextCharacters)
-            .prefix { previousCharacter, nextCharacter in
-                previousCharacter == nextCharacter
-            }
-            .count
-        let currentTime = Date.timeIntervalSinceReferenceDate
-
-        glyphRevealStartTimes = glyphRevealStartTimes.filter { characterIndex, _ in
-            characterIndex < sharedPrefixCount && characterIndex < nextCharacters.count
-        }
-
-        if sharedPrefixCount < nextCharacters.count {
-            for characterIndex in sharedPrefixCount..<nextCharacters.count {
-                let waveOffset = Double(characterIndex - sharedPrefixCount) * 0.04
-                glyphRevealStartTimes[characterIndex] = currentTime + waveOffset
-            }
-        }
-
-        previousCharacters = nextCharacters
-    }
-
-    private func revealPhase(
-        for characterIndex: Int,
-        timelineDate: Date
-    ) -> YishuTyperGlyphPhase {
-        guard !accessibilityReduceMotion,
-              let revealStartTime = glyphRevealStartTimes[characterIndex] else {
-            return .settled
-        }
-
-        let revealAge = timelineDate.timeIntervalSinceReferenceDate - revealStartTime
-        switch revealAge {
-        case ..<0:
-            return .waiting
-        case ..<0.12:
-            return .highlighted
-        case ..<0.26:
-            return .accented
-        case ..<0.52:
-            return .settling
-        default:
-            return .settled
-        }
-    }
-}
-
-private enum YishuTyperGlyphPhase {
-    case waiting
-    case highlighted
-    case accented
-    case settling
-    case settled
-}
-
-private struct YishuTyperGlyph: View {
-    let character: Character
-    let phase: YishuTyperGlyphPhase
-
-    var body: some View {
-        Text(String(character))
-            .font(.system(size: 13.5, weight: .regular, design: .default))
-            .foregroundStyle(glyphColor)
-            .opacity(glyphOpacity)
-            .scaleEffect(glyphScale, anchor: .center)
-            .background {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(glyphHighlightColor)
-                    .padding(.horizontal, -1.2)
-                    .padding(.vertical, -2)
-            }
-    }
-
-    private var glyphColor: Color {
-        switch phase {
-        case .waiting:
-            return Color.clear
-        case .highlighted:
-            return Color.white
-        case .accented:
-            return DS.Colors.overlaySpectralViolet
-        case .settling:
-            return DS.Colors.overlayCursorBlue
-        case .settled:
-            return DS.Colors.overlayResponseInk
-        }
-    }
-
-    private var glyphHighlightColor: Color {
-        switch phase {
-        case .highlighted:
-            return DS.Colors.overlayCursorBlue.opacity(0.78)
-        case .accented:
-            return DS.Colors.overlaySpectralViolet.opacity(0.14)
-        case .waiting, .settling, .settled:
-            return Color.clear
-        }
-    }
-
-    private var glyphOpacity: Double {
-        phase == .waiting ? 0 : 1
-    }
-
-    private var glyphScale: CGFloat {
-        switch phase {
-        case .waiting:
-            return 0.88
-        case .highlighted:
-            return 0.94
-        case .accented:
-            return 1.045
-        case .settling, .settled:
-            return 1
-        }
-    }
-}
-
-private struct YishuCharacterFlowLayout: Layout {
-    let horizontalSpacing: CGFloat
-    let verticalSpacing: CGFloat
-
-    func sizeThatFits(
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) -> CGSize {
-        layoutResult(proposal: proposal, subviews: subviews).size
-    }
-
-    func placeSubviews(
-        in bounds: CGRect,
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) {
-        let result = layoutResult(proposal: proposal, subviews: subviews)
-        for (characterIndex, characterOrigin) in result.characterOrigins.enumerated() {
-            subviews[characterIndex].place(
-                at: CGPoint(
-                    x: bounds.minX + characterOrigin.x,
-                    y: bounds.minY + characterOrigin.y
-                ),
-                anchor: .topLeading,
-                proposal: .unspecified
-            )
-        }
-    }
-
-    private func layoutResult(
-        proposal: ProposedViewSize,
-        subviews: Subviews
-    ) -> YishuCharacterLayoutResult {
-        let maximumLineWidth = max(proposal.width ?? 282, 1)
-        var characterOrigins: [CGPoint] = []
-        var currentX: CGFloat = 0
-        var currentY: CGFloat = 0
-        var currentLineHeight: CGFloat = 0
-        var widestLine: CGFloat = 0
-
-        for subview in subviews {
-            let characterSize = subview.sizeThatFits(.unspecified)
-            let characterWouldOverflow = currentX > 0
-                && currentX + characterSize.width > maximumLineWidth
-
-            if characterWouldOverflow {
-                widestLine = max(widestLine, currentX - horizontalSpacing)
-                currentX = 0
-                currentY += currentLineHeight + verticalSpacing
-                currentLineHeight = 0
-            }
-
-            characterOrigins.append(CGPoint(x: currentX, y: currentY))
-            currentX += characterSize.width + horizontalSpacing
-            currentLineHeight = max(currentLineHeight, characterSize.height)
-        }
-
-        widestLine = max(widestLine, max(currentX - horizontalSpacing, 0))
-        let totalHeight = subviews.isEmpty ? 0 : currentY + currentLineHeight
-        return YishuCharacterLayoutResult(
-            size: CGSize(width: min(widestLine, maximumLineWidth), height: totalHeight),
-            characterOrigins: characterOrigins
-        )
-    }
-}
-
-private struct YishuCharacterLayoutResult {
-    let size: CGSize
-    let characterOrigins: [CGPoint]
 }

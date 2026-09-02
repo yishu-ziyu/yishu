@@ -16,6 +16,8 @@ export { createNoteAction } from "./create-note.js";
 export type { CreateNoteInput } from "./create-note.js";
 export { createScheduleTimeReminderAction } from "./schedule-time-reminder.js";
 export type { ScheduleTimeReminderInput } from "./schedule-time-reminder.js";
+export { createOpenEmailAction } from "./open-email.js";
+export type { OpenEmailInput } from "./open-email.js";
 export { createRecordSuggestionAction } from "./record-suggestion.js";
 export type { RecordSuggestionInput } from "./record-suggestion.js";
 export { createSettleSuggestionAction } from "./settle-suggestion.js";

@@ -32,6 +32,14 @@ export type {
   YishuActionDefinition,
 } from "./types.js";
 
+export type {
+  EmailDefaultStore,
+  EmailProvider,
+  OpenEmailExecutor,
+  OpenEmailRequest,
+  OpenEmailResult,
+} from "./email-types.js";
+
 export { ActionCancelledError } from "./types.js";
 
 export { defineYishuAction } from "./define.js";

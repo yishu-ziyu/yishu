@@ -3,6 +3,7 @@ import type {
   MemoryListItem,
   MemoryListOptions,
 } from "../store/types.js";
+import type { EmailProvider } from "../action/email-types.js";
 import type { YishuStorePort } from "../store/yishu-store.js";
 import {
   recallRelevantMemories,
@@ -36,6 +37,8 @@ export interface MemoryLedger {
     query: string,
     options: RecallRelevantMemoriesOptions,
   ): Promise<RecalledMemory[]>;
+
+  resolveDefaultEmailProvider(): Promise<EmailProvider | undefined>;
 
   hydrateVisible(legacyClaims: readonly string[]): Promise<void>;
 }
@@ -93,6 +96,17 @@ export function createMemoryLedger(
 
     async recall(query, options) {
       return recallRelevantMemories(store, query, options);
+    },
+
+    async resolveDefaultEmailProvider() {
+      const matches = await store.searchMemory("key:email.provider", {
+        scope: "personal",
+        minConfidence: 0,
+      });
+      const active = matches.find((memory) =>
+        memory.tags.includes("personal_default")
+        && memory.tags.includes("key:email.provider"));
+      return active?.tags.includes("value:google") ? "google" : undefined;
     },
 
     async hydrateVisible(legacyClaims) {

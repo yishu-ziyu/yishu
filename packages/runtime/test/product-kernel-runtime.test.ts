@@ -110,6 +110,81 @@ test("product kernel short-circuits remember on voice utterance", async () => {
   assert.equal((await kernel.store.searchMemory("Pi")).length, 1);
 });
 
+test("email default is asked once, learned after a verified open, and reused after restart", async () => {
+  const kernel = createYishuKernel({ storeBackend: "memory" });
+  const actions: unknown[] = [];
+  const port: ComputerUsePort = {
+    async perform(action) {
+      actions.push(action);
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_url_open",
+        method: "native_command",
+        message: "Gmail was opened by macOS.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  let innerStarts = 0;
+  const inner: AgentRuntime = {
+    async startTurn() { innerStarts += 1; },
+    async cancelTurn() {},
+    async dispose() {},
+  };
+  const conversationId = randomUUID();
+  const runtime = new ProductKernelRuntime(inner, kernel, port);
+
+  const first = makeCommand("帮我打开邮箱");
+  first.payload.conversationId = conversationId;
+  const firstEvents: RuntimeEvent[] = [];
+  await runtime.startTurn(first, (event) => firstEvents.push(event));
+  assert.equal(actions.length, 0);
+  assert.equal(innerStarts, 0);
+  assert.equal(
+    firstEvents.find((event) => event.type === "response.completed")?.payload.text,
+    "你平时用哪个邮箱？",
+  );
+
+  const answer = makeCommand("我用的是 Google 邮箱");
+  answer.payload.conversationId = conversationId;
+  const answerEvents: RuntimeEvent[] = [];
+  await runtime.startTurn(answer, (event) => answerEvents.push(event));
+  assert.equal(actions.length, 1);
+  assert.deepEqual(actions[0], {
+    action: "open_destination",
+    x: 0,
+    y: 0,
+    destinationId: "email.google",
+  });
+  assert.equal(
+    answerEvents.find((event) => event.type === "response.completed")?.payload.text,
+    "已经打开 Gmail，以后你说‘打开邮箱’我就直接来这里。",
+  );
+  const defaults = (await kernel.store.searchMemory("key:email.provider", {
+    scope: "personal",
+    minConfidence: 0,
+  })).filter((memory) => memory.retiredAt === undefined);
+  assert.equal(defaults.length, 1);
+  assert.ok(defaults[0]?.tags.includes("value:google"));
+
+  await runtime.dispose();
+  const restarted = new ProductKernelRuntime(inner, kernel, port);
+  const nextDay = makeCommand("帮我打开邮箱");
+  nextDay.payload.conversationId = randomUUID();
+  const nextDayEvents: RuntimeEvent[] = [];
+  await restarted.startTurn(nextDay, (event) => nextDayEvents.push(event));
+  assert.equal(actions.length, 2);
+  assert.equal(innerStarts, 0);
+  assert.equal(
+    nextDayEvents.find((event) => event.type === "response.completed")?.payload.text,
+    "已经打开 Gmail。",
+  );
+});
+
 test("source-bound Notes request reaches the actuator but not the durable conversation record", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const inner: AgentRuntime = {

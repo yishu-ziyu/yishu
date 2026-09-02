@@ -209,6 +209,23 @@ const MINIMAX_TTS_SPEED_MIN = 0.5;
 const MINIMAX_TTS_SPEED_MAX = 2.0;
 const MINIMAX_TTS_SPEED_DEFAULT = 1.0;
 
+/** MiniMax t2a_v2 voice_setting.emotion allowlist. Invalid → omitted (auto). */
+const MINIMAX_TTS_EMOTIONS = new Set([
+  "happy",
+  "sad",
+  "angry",
+  "fearful",
+  "disgusted",
+  "surprised",
+  "neutral",
+]);
+
+function resolveTtsEmotion(raw) {
+  if (typeof raw !== "string") return undefined;
+  const value = raw.trim();
+  return MINIMAX_TTS_EMOTIONS.has(value) ? value : undefined;
+}
+
 function clampSpeechSpeed(raw) {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(n)) return MINIMAX_TTS_SPEED_DEFAULT;
@@ -661,6 +678,9 @@ async function handleTTS(req, res) {
       : env.MINIMAX_TTS_SPEED || 1.0
   );
   const volume = Number(env.MINIMAX_TTS_VOLUME || 1.0);
+  // Per-request emotion from the app; invalid/absent → provider auto-renders
+  // mood from the text itself.
+  const emotion = resolveTtsEmotion(incoming.emotion);
 
   const pending = upstreamRequest(req, res, ttsURL, {
     method: "POST",
@@ -679,6 +699,7 @@ async function handleTTS(req, res) {
         speed,
         vol: Number.isFinite(volume) ? volume : 1.0,
         pitch: 0,
+        ...(emotion ? { emotion } : {}),
       },
       audio_setting: {
         sample_rate: highQuality ? 44100 : 32000,

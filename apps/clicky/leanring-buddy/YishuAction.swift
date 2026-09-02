@@ -48,6 +48,7 @@ enum YishuActionCode: String, Codable, Equatable, Sendable {
     case notificationPermissionDenied = "notification_permission_denied"
     case notificationScheduleFailed = "notification_schedule_failed"
     case verifiedSystemNotification = "verified_system_notification"
+    case verifiedURLReady = "verified_url_open"
 }
 
 extension YishuActionCode {
@@ -82,7 +83,7 @@ enum YishuActionPolicy {
              .quartzUnverified, .verifiedAccessibility, .verifiedScreen,
              .actionLimitReached, .runtimeError, .cancelled, .timeout,
              .notificationPermissionPending, .notificationPermissionDenied,
-             .notificationScheduleFailed, .verifiedSystemNotification:
+             .notificationScheduleFailed, .verifiedSystemNotification, .verifiedURLReady:
             return false
         }
     }
@@ -117,6 +118,7 @@ struct YishuComputerActionRequest: Equatable, Sendable {
     let reminderId: String?
     let delaySeconds: Int?
     let reminderBody: String?
+    let destinationId: String?
     let targetBundleId: String?
     let targetPid: pid_t?
     let intentId: String?
@@ -145,6 +147,7 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         reminderId: String? = nil,
         delaySeconds: Int? = nil,
         reminderBody: String? = nil,
+        destinationId: String? = nil,
         targetBundleId: String? = nil,
         targetPid: pid_t? = nil,
         intentId: String? = nil,
@@ -172,6 +175,7 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         self.reminderId = reminderId
         self.delaySeconds = delaySeconds
         self.reminderBody = reminderBody
+        self.destinationId = destinationId
         self.targetBundleId = targetBundleId
         self.targetPid = targetPid
         self.intentId = intentId

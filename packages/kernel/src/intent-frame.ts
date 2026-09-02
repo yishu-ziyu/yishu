@@ -2,6 +2,7 @@ import type { ActionRisk, AuthorityLevel } from "./action/types.js";
 import {
   classifyRelativeTimeReminder,
   routeProductUtterance,
+  emailProviderFromClarificationReply,
   type ProductActionName,
   type ProductUtteranceRoute,
 } from "./utterance-router.js";
@@ -73,6 +74,8 @@ export interface DeriveTurnIntentOptions {
   readonly currentPageNote?: boolean;
   /** Sanitized display objective; raw utterance remains available to parsers. */
   readonly objective?: string;
+  /** Runtime-owned one-turn slot after Her asked which email provider to use. */
+  readonly awaitingEmailProvider?: boolean;
 }
 
 const PRODUCT_ACTION_INTENT_POLICY = {
@@ -86,6 +89,7 @@ const PRODUCT_ACTION_INTENT_POLICY = {
   finder_history_back: { effect: "external", authority: "reversible", risk: "low" },
   create_note: { effect: "external", authority: "explicit_approval", risk: "medium" },
   schedule_time_reminder: { effect: "external", authority: "explicit_approval", risk: "medium" },
+  open_email: { effect: "external", authority: "reversible", risk: "low" },
 } as const satisfies Record<ProductActionName, ProductActionIntentPolicy>;
 
 const LEADING_NEGATION = /^(?:(?:请|麻烦|帮我|请帮我)\s*)?(?:不要|别(?:再)?|无需|不(?:用|必)|禁止|do\s+not\b|don['’]?t\b|dont\b|never\b)/iu;
@@ -145,7 +149,16 @@ export function deriveTurnIntentFrame(
     });
   }
 
-  const productRoute = reminder?.kind === "schedule"
+  const clarifiedEmailProvider = options.awaitingEmailProvider === true
+    ? emailProviderFromClarificationReply(utterance)
+    : undefined;
+  const productRoute = clarifiedEmailProvider !== undefined
+    ? {
+        action: "open_email" as const,
+        input: { provider: clarifiedEmailProvider },
+        confidence: 0.99,
+      }
+    : reminder?.kind === "schedule"
     ? {
         action: "schedule_time_reminder" as const,
         input: { delaySeconds: reminder.delaySeconds, body: reminder.body },

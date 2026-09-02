@@ -8,6 +8,17 @@ import {
 } from "../src/utterance-router.js";
 
 describe("routeProductUtterance", () => {
+  it("routes a natural request to open the user's email", () => {
+    assert.deepEqual(routeProductUtterance("帮我打开邮箱"), {
+      action: "open_email",
+      input: {},
+      confidence: 0.99,
+    });
+    assert.equal(routeProductUtterance("打开我的邮箱")?.action, "open_email");
+    assert.equal(routeProductUtterance("你能帮我打开邮箱吗？"), null);
+    assert.equal(routeProductUtterance("不要打开邮箱"), null);
+  });
+
   it("routes remember_how phrases", () => {
     const r = routeProductUtterance("记住我刚才是怎么做的");
     assert.equal(r?.action, "remember_how");

@@ -45,12 +45,17 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
         YishuVoiceProxySupervisor.authorize(&request)
 
-        // Proxy accepts { text, speed } and returns raw audio/mpeg (MiniMax t2a_v2).
+        // Proxy accepts { text, speed, emotion? } and returns raw audio/mpeg
+        // (MiniMax t2a_v2). No emotion parameter → provider renders mood from
+        // the content itself.
         let clampedSpeed = YishuSpeechSpeed.clamp(speed)
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "text": text,
             "speed": clampedSpeed,
         ]
+        if let emotion = YishuSpeechEmotion.wireValue() {
+            body["emotion"] = emotion
+        }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 

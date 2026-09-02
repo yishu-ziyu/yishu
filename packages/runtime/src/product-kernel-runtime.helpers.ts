@@ -40,6 +40,7 @@ const CONTEXT_WATCH_CLOCK_SKEW_MS = 5_000;
 export function intentForUtterance(
   utterance: string,
   contextFrame: ContextFrame,
+  options: { awaitingEmailProvider?: boolean } = {},
 ): TurnIntentFrame {
   const objective = sanitizeVisibleText(utterance, "task objective")
     .replace(/\s+/gu, " ")
@@ -48,6 +49,7 @@ export function intentForUtterance(
   return deriveTurnIntentFrame(utterance, {
     contextFrame,
     currentPageNote: isCurrentPageActionsNoteUtterance(utterance),
+    ...(options.awaitingEmailProvider === true ? { awaitingEmailProvider: true } : {}),
     objective,
   });
 }
@@ -234,6 +236,7 @@ const SAFE_PRODUCT_ACTIONS = new Set([
   "finder_history_back",
   "create_note",
   "schedule_time_reminder",
+  "open_email",
 ]);
 
 const SAFE_PRODUCT_STATUSES = new Set([
@@ -467,6 +470,7 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     || payload.action === "set_text"
     || payload.action === "create_note"
     || payload.action === "schedule_reminder"
+    || payload.action === "open_destination"
     ? payload.action
     : undefined;
   if (actionId === undefined || action === undefined) {
@@ -511,6 +515,9 @@ function safeComputerActionPayload(payload: Record<string, unknown>): ClientEven
     result.text = text;
     result.targetBundleId = targetBundleId;
     result.targetPid = payload.targetPid as number;
+  } else if (action === "open_destination") {
+    if (payload.destinationId !== "email.google") return undefined;
+    result.destinationId = "email.google";
   } else if (action === "create_note") {
     const content = typeof payload.content === "string"
       && payload.content.trim().length > 0
@@ -692,7 +699,7 @@ function summarizeProductActionOutput(
     const retiredId = safeIdentifier(value.retiredId);
     return retiredId === undefined ? {} : { retiredId };
   }
-  if (actionName === "finder_history_back" || actionName === "create_note" || actionName === "schedule_time_reminder") {
+  if (actionName === "finder_history_back" || actionName === "create_note" || actionName === "schedule_time_reminder" || actionName === "open_email") {
     const result: ClientEventPayload = {};
     if (typeof value.succeeded === "boolean") result.succeeded = value.succeeded;
     if (typeof value.verified === "boolean") result.verified = value.verified;
@@ -709,6 +716,7 @@ function summarizeProductActionOutput(
       "ax_press_unverified",
       "verified_accessibility",
       "verified_system_notification",
+      "verified_url_open",
       "permission_denied",
       "notification_permission_pending",
       "notification_permission_denied",
@@ -719,7 +727,7 @@ function summarizeProductActionOutput(
       result.code = code;
     }
     const method = safeMetadata(value.method);
-    const safeMethods = actionName === "create_note" || actionName === "schedule_time_reminder"
+    const safeMethods = actionName === "create_note" || actionName === "schedule_time_reminder" || actionName === "open_email"
       ? ["native_command", "unknown"]
       : ["ax_press", "unknown"];
     if (method && safeMethods.includes(method)) result.method = method;

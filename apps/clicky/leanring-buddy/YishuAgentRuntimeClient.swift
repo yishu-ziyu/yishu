@@ -304,6 +304,12 @@ struct YishuHistoryDeleteResult: Equatable {
     let alreadyArchived: Bool
 }
 
+struct YishuHistoryRestoreResult: Equatable {
+    let conversationId: UUID
+    let status: String
+    let alreadyActive: Bool
+}
+
 @MainActor
 final class YishuAgentRuntimeClient {
     /// The app creates one runtime client alongside CompanionManager.  The
@@ -338,9 +344,17 @@ final class YishuAgentRuntimeClient {
     private var turnProjectionReducers: [UUID: YishuTurnProjectionReducer] = [:]
     private var seenTurnEventIds: [UUID: Set<UUID>] = [:]
     private var turnWatchdogTasks: [UUID: Task<Void, Never>] = [:]
+    /// Per-turn dead-air fence: any accepted runtime event proves progress and
+    /// re-arms this. A silently broken provider stream (no terminal event, no
+    /// error) must surface as a failed turn instead of a frozen overlay for
+    /// the full 3-minute foreground timeout.
+    private var turnStallWatchdogTasks: [UUID: Task<Void, Never>] = [:]
     /// Browser research (goto + observe + cite) and recapture after a click
     /// both overrun a 60s hang fence. Keep a bound; do not wait forever.
     private let foregroundTurnTimeoutNanoseconds: UInt64 = 180_000_000_000
+    /// Generous enough to cover slow tool execution: the runtime emits
+    /// tool/computer events while working, and each one re-arms the fence.
+    private let turnStallTimeoutNanoseconds: UInt64 = 30_000_000_000
 
     private struct PendingTurnInterrupt {
         let traceId: UUID
@@ -404,6 +418,7 @@ final class YishuAgentRuntimeClient {
         case list
         case open
         case delete
+        case restore
         case memoryList
         case memoryForget
         case memoryRemember
@@ -508,9 +523,11 @@ final class YishuAgentRuntimeClient {
     }
 
     /// List durable history rows for a scope (default: 我的 / personal).
+    /// `includeArchived` also returns archived rows for the history window.
     func listHistory(
         scope: YishuSessionScope = .personal,
-        limit: Int = 30
+        limit: Int = 30,
+        includeArchived: Bool = false
     ) async throws -> [YishuHistoryListItem] {
         let clamped = min(max(limit, 1), 50)
         let requestId = UUID()
@@ -536,7 +553,8 @@ final class YishuAgentRuntimeClient {
                     sentAt: Date(),
                     payload: YishuHistoryListPayload(
                         sessionScope: scope,
-                        limit: clamped
+                        limit: clamped,
+                        includeArchived: includeArchived ? true : nil
                     )
                 ))
             } catch {
@@ -588,6 +606,48 @@ final class YishuAgentRuntimeClient {
             throw YishuAgentRuntimeClientError.invalidHistoryEvent
         }
         return opened
+    }
+
+    /// Un-archive one personal history conversation so it reappears in the
+    /// active list. Only succeeds after the runtime confirms storage.
+    func restoreHistory(
+        conversationId: UUID,
+        scope: YishuSessionScope = .personal
+    ) async throws -> YishuHistoryRestoreResult {
+        let requestId = UUID()
+        let result: Any = try await withCheckedThrowingContinuation { continuation in
+            historyContinuations[requestId] = PendingHistoryRequest(
+                kind: .restore,
+                continuation: continuation,
+                timeoutTask: nil
+            )
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                await MainActor.run {
+                    self?.failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.historyTimedOut)
+                }
+            }
+            historyContinuations[requestId]?.timeoutTask = timeoutTask
+            do {
+                try send(YishuHistoryRestoreCommand(
+                    schemaVersion: yishuRuntimeProtocolVersion,
+                    type: "history.restore",
+                    requestId: requestId,
+                    traceId: UUID(),
+                    sentAt: Date(),
+                    payload: YishuHistoryRestorePayload(
+                        conversationId: conversationId,
+                        sessionScope: scope
+                    )
+                ))
+            } catch {
+                failHistoryRequest(requestId, error: error)
+            }
+        }
+        guard let restored = result as? YishuHistoryRestoreResult else {
+            throw YishuAgentRuntimeClientError.invalidHistoryEvent
+        }
+        return restored
     }
 
     /// Soft-delete one personal history conversation (archive). Only succeeds
@@ -2159,6 +2219,9 @@ final class YishuAgentRuntimeClient {
             turnProjectionReducers[requestId] = reducer
             submittedSteerMessages.removeValue(forKey: requestId)
         }
+        // Any accepted event — delta, tool, action request, memory — proves the
+        // runtime is alive and buys another quiet window.
+        armTurnStallWatchdog(requestId: requestId)
 
         switch type {
         case "turn.started":
@@ -2423,6 +2486,28 @@ final class YishuAgentRuntimeClient {
                     alreadyArchived: alreadyArchived
                 )
             )
+        case "history.restored":
+            guard pending.kind == .restore else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidHistoryEvent)
+                return
+            }
+            guard
+                let idString = payload["conversationId"] as? String,
+                let conversationId = UUID(uuidString: idString),
+                let status = payload["status"] as? String
+            else {
+                failHistoryRequest(requestId, error: YishuAgentRuntimeClientError.invalidHistoryEvent)
+                return
+            }
+            let alreadyActive = (payload["alreadyActive"] as? Bool) ?? false
+            finishHistoryRequest(
+                requestId,
+                value: YishuHistoryRestoreResult(
+                    conversationId: conversationId,
+                    status: status,
+                    alreadyActive: alreadyActive
+                )
+            )
         case "history.failed":
             let message = (payload["message"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2684,6 +2769,38 @@ final class YishuAgentRuntimeClient {
         }
     }
 
+    /// Dead-air fence for an individual turn. Rearmed by every accepted
+    /// runtime event; a turn whose stream dies without a terminal event fails
+    /// here with the same honest "等太久了" surface as a first-byte timeout.
+    private func armTurnStallWatchdog(requestId: UUID) {
+        guard turnContinuations[requestId] != nil else { return }
+        turnStallWatchdogTasks[requestId]?.cancel()
+        turnStallWatchdogTasks[requestId] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: self.turnStallTimeoutNanoseconds)
+            } catch {
+                return
+            }
+            self.stallTurn(requestId)
+        }
+    }
+
+    private func stallTurn(_ requestId: UUID) {
+        guard turnContinuations[requestId] != nil else { return }
+        if let traceId = activeTurnTraceIds[requestId] {
+            try? send(YishuTurnCancelCommand(
+                schemaVersion: yishuRuntimeProtocolVersion,
+                type: "turn.cancel",
+                requestId: requestId,
+                traceId: traceId,
+                sentAt: Date(),
+                payload: YishuTurnCancelPayload(reason: "stream-stalled")
+            ))
+        }
+        finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnTimedOut)
+    }
+
     private func timeoutTurn(_ requestId: UUID) {
         guard turnContinuations[requestId] != nil else { return }
         if let traceId = activeTurnTraceIds[requestId] {
@@ -2702,6 +2819,7 @@ final class YishuAgentRuntimeClient {
     private func finishTurn(_ requestId: UUID, throwing error: Error? = nil) {
         guard let continuation = turnContinuations.removeValue(forKey: requestId) else { return }
         turnWatchdogTasks.removeValue(forKey: requestId)?.cancel()
+        turnStallWatchdogTasks.removeValue(forKey: requestId)?.cancel()
         failTurnInterrupt(requestId, error: error ?? YishuAgentRuntimeClientError.turnInterruptUnavailable)
         activeTurnTraceIds.removeValue(forKey: requestId)
         turnProjectionReducers.removeValue(forKey: requestId)
@@ -2978,6 +3096,32 @@ final class YishuAgentRuntimeClient {
                 basisFrameId: basisFrameId,
                 effectClass: "schedule"
             )
+        case "open_destination":
+            guard doubleValue(payload["x"]) == 0,
+                  doubleValue(payload["y"]) == 0,
+                  payload["destinationId"] as? String == "email.google",
+                  let intentId = common.intentId,
+                  UUID(uuidString: intentId) != nil,
+                  let attemptId = common.attemptId,
+                  UUID(uuidString: attemptId) != nil,
+                  let basisFrameId = common.basisFrameId,
+                  UUID(uuidString: basisFrameId) != nil,
+                  common.effectClass == "navigation" else {
+                return nil
+            }
+            return YishuComputerActionRequest(
+                requestId: requestId,
+                traceId: traceId,
+                actionId: actionId,
+                action: action,
+                x: 0,
+                y: 0,
+                destinationId: "email.google",
+                intentId: intentId,
+                attemptId: attemptId,
+                basisFrameId: basisFrameId,
+                effectClass: "navigation"
+            )
         default:
             return nil
         }
@@ -3155,6 +3299,9 @@ final class YishuAgentRuntimeClient {
         let watchdogs = turnWatchdogTasks.values
         turnWatchdogTasks.removeAll()
         watchdogs.forEach { $0.cancel() }
+        let stallWatchdogs = turnStallWatchdogTasks.values
+        turnStallWatchdogTasks.removeAll()
+        stallWatchdogs.forEach { $0.cancel() }
         let interrupts = turnInterruptContinuations
         turnInterruptContinuations.removeAll()
         for pending in interrupts.values {
@@ -3458,6 +3605,22 @@ private struct YishuHistoryListCommand: Encodable {
 private struct YishuHistoryListPayload: Encodable {
     let sessionScope: YishuSessionScope
     let limit: Int
+    let includeArchived: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionScope
+        case limit
+        case includeArchived
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sessionScope, forKey: .sessionScope)
+        try container.encode(limit, forKey: .limit)
+        // Omit the key entirely when absent: the wire schema treats a null
+        // value as invalid, only a missing key means "default".
+        try container.encodeIfPresent(includeArchived, forKey: .includeArchived)
+    }
 }
 
 private struct YishuHistoryOpenCommand: Encodable {
@@ -3484,6 +3647,20 @@ private struct YishuHistoryDeleteCommand: Encodable {
 }
 
 private struct YishuHistoryDeletePayload: Encodable {
+    let conversationId: UUID
+    let sessionScope: YishuSessionScope
+}
+
+private struct YishuHistoryRestoreCommand: Encodable {
+    let schemaVersion: Int
+    let type: String
+    let requestId: UUID
+    let traceId: UUID
+    let sentAt: Date
+    let payload: YishuHistoryRestorePayload
+}
+
+private struct YishuHistoryRestorePayload: Encodable {
     let conversationId: UUID
     let sessionScope: YishuSessionScope
 }

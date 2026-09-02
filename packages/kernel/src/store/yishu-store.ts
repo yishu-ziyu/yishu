@@ -985,6 +985,16 @@ export interface YishuStorePort {
     id: string,
     options?: { expectedScope?: SessionScope },
   ): Promise<Conversation | null>
+  /**
+   * Un-archive a durable conversation (status back to active) so the
+   * history window can restore a row the user previously archived.
+   * Body and turns were never removed; only the status flips.
+   * Idempotent: non-archived rows return unchanged.
+   */
+  restoreConversation(
+    id: string,
+    options?: { expectedScope?: SessionScope },
+  ): Promise<Conversation | null>
   getMind(): Promise<YishuMindState>
   writeMindSection(
     input: MindSectionWriteInput,
@@ -2051,6 +2061,38 @@ class YishuStoreCore {
     }
   }
 
+  /**
+   * Un-archive: set status=active. Returns null when missing or when
+   * expectedScope does not match. Private rows never restore.
+   */
+  restoreConversationSync(
+    id: string,
+    options?: { expectedScope?: SessionScope },
+  ): Conversation | null {
+    this.ensureData()
+    const existing = this.data.conversations.find((candidate) =>
+      conversationIdsEqual(candidate.id, id),
+    )
+    if (!existing) return null
+    if (existing.sessionScope.kind === "private") return null
+    if (options?.expectedScope !== undefined) {
+      const expected = normalizeSessionScope(options.expectedScope)
+      if (!sessionScopesEqual(existing.sessionScope, expected)) return null
+    }
+    if (existing.status !== "archived") {
+      return {
+        ...existing,
+        sessionScope: cloneSessionScope(existing.sessionScope),
+      }
+    }
+    existing.status = "active"
+    existing.updatedAt = nowIso()
+    return {
+      ...existing,
+      sessionScope: cloneSessionScope(existing.sessionScope),
+    }
+  }
+
   getMindSync(): YishuMindState {
     this.ensureData()
     return readMindState(this.data.mind ?? emptyMindState())
@@ -2740,6 +2782,18 @@ export class YishuStore extends YishuStoreCore implements YishuStorePort {
     })
   }
 
+  async restoreConversation(
+    id: string,
+    options?: { expectedScope?: SessionScope },
+  ): Promise<Conversation | null> {
+    return this.enqueue(async () => {
+      await this.ensureLoadedUnsafe()
+      const restored = this.restoreConversationSync(id, options)
+      if (restored) await this.saveUnsafe()
+      return restored
+    })
+  }
+
   async getMind(): Promise<YishuMindState> {
     return this.enqueue(async () => {
       await this.ensureLoadedUnsafe()
@@ -3110,6 +3164,13 @@ export class InMemoryYishuStore extends YishuStoreCore implements YishuStorePort
     options?: { expectedScope?: SessionScope },
   ): Promise<Conversation | null> {
     return this.archiveConversationSync(id, options)
+  }
+
+  async restoreConversation(
+    id: string,
+    options?: { expectedScope?: SessionScope },
+  ): Promise<Conversation | null> {
+    return this.restoreConversationSync(id, options)
   }
 
   async getMind(): Promise<YishuMindState> {

@@ -140,6 +140,33 @@ struct CompanionPanelView: View {
                 .foregroundColor(DS.Colors.textTertiary)
 
             Button(action: {
+                companionManager.markNoticesSeen()
+                NotificationCenter.default.post(name: .yishuDismissPanel, object: nil)
+                YishuConversationHistoryWindowManager.shared.show(
+                    companionManager: companionManager
+                )
+            }) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(width: 20, height: 20)
+                    .background(
+                        Circle()
+                            .fill(Color.white.opacity(0.08))
+                    )
+                    .overlay(alignment: .topTrailing) {
+                        if companionManager.unreadNoticeCount > 0 {
+                            unreadNoticeBadge
+                                .offset(x: -2, y: -2)
+                        }
+                    }
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("会话历史")
+
+            Button(action: {
                 NotificationCenter.default.post(name: .yishuDismissPanel, object: nil)
             }) {
                 Image(systemName: "xmark")
@@ -158,6 +185,17 @@ struct CompanionPanelView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
+    }
+
+    /// Unseen-notice badge on the history entry: red dot carrying the count
+    /// (capped at "9+") while any task result or reminder is unread.
+    private var unreadNoticeBadge: some View {
+        Text(companionManager.unreadNoticeCount > 9 ? "9+" : "\(companionManager.unreadNoticeCount)")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 2)
+            .frame(minWidth: 8, minHeight: 8)
+            .background(Capsule().fill(DS.Colors.destructive))
     }
 
     // MARK: - Permissions Copy
@@ -743,6 +781,7 @@ struct CompanionPanelView: View {
                 isExpanded: $isAdvancedSettingsExpanded
             ) {
                 speechSpeedSection
+                speechEmotionSection
                 chatModelPickerSection
                 ProviderAccountsView(viewModel: accountViewModel)
                 showYishuCursorToggleRow
@@ -874,6 +913,76 @@ struct CompanionPanelView: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    /// Spoken-reply mood. Capsule chips instead of a menu picker for the same
+    /// nonactivating-NSPanel reason as above. "自动" sends no emotion
+    /// parameter so the voice follows the model's content.
+    private var speechEmotionSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "face.dashed")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(width: 16)
+
+                Text("说话情绪")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                Text(YishuSpeechEmotion.displayLabel(for: companionManager.speechEmotion))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundColor(DS.Colors.accent)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(0..<speechEmotionRowCount, id: \.self) { rowIndex in
+                    HStack(spacing: 6) {
+                        ForEach(speechEmotionRow(rowIndex)) { option in
+                            speechEmotionChip(option)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private var speechEmotionRowCount: Int {
+        (YishuSpeechEmotion.options.count + 3) / 4
+    }
+
+    private func speechEmotionRow(_ index: Int) -> [YishuSpeechEmotion.Option] {
+        Array(YishuSpeechEmotion.options.dropFirst(index * 4).prefix(4))
+    }
+
+    private func speechEmotionChip(_ option: YishuSpeechEmotion.Option) -> some View {
+        let isSelected = companionManager.speechEmotion == option.rawValue
+        return Button(action: {
+            companionManager.setSpeechEmotion(option.rawValue)
+        }) {
+            Text(option.label)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .foregroundColor(isSelected ? DS.Colors.textOnAccent : DS.Colors.textSecondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill(isSelected ? DS.Colors.accent : Color.clear)
+                        .overlay(
+                            Capsule().stroke(
+                                isSelected ? DS.Colors.accent : DS.Colors.borderSubtle,
+                                lineWidth: 0.8
+                            )
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .accessibilityLabel("说话情绪 \(option.label)")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
     /// Menu-style pickers often fail inside a nonactivating NSPanel. Keep one

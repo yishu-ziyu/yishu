@@ -71,6 +71,22 @@ describe("deriveTurnIntentFrame", () => {
     assert.equal(reminderQuestion.steerable, false);
   });
 
+  it("uses a pending email clarification only for a Google provider reply", () => {
+    const answer = deriveTurnIntentFrame("我用的是 Google 邮箱", {
+      awaitingEmailProvider: true,
+    });
+    assert.equal(answer.route.kind, "product_action");
+    if (answer.route.kind === "product_action") {
+      assert.equal(answer.route.value.action, "open_email");
+      assert.deepEqual(answer.route.value.input, { provider: "google" });
+    }
+
+    const unrelated = deriveTurnIntentFrame("我们先聊别的", {
+      awaitingEmailProvider: true,
+    });
+    assert.equal(unrelated.route.kind, "model");
+  });
+
   it("lets the composed current-page note intent tighten authority before execution", () => {
     const frame = deriveTurnIntentFrame(
       "把当前页面需要我做的三件事整理成一条备忘录",
@@ -112,6 +128,7 @@ describe("deriveTurnIntentFrame", () => {
       "finder_history_back",
       "create_note",
       "schedule_time_reminder",
+      "open_email",
     ];
     for (const action of actions) {
       const definition = kernel.registry.get(action);
