@@ -6,6 +6,8 @@
 
 | ID | 问题 | 根因 | 已验证处理 | Run records |
 |---|---|---|---|---|
+| P-001 | 复刻类任务范围漂移（「吸收」代替「复刻」） | 未先对齐范围就动手 | gap 表交用户勾选 → 分里程碑真 App 验收 | 2026-09-02_automation-port |
+| P-002 | 后台自发 turn 干扰用户对话 | 共用 conversationId 触发 supersede/进历史 | 独立 conversationId + private scope + 自带 emit sink 收结果 | 2026-09-02_automation-port |
 
 ## Skill impact
 
