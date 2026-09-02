@@ -1,0 +1,7 @@
+# Keep Compound Engineering artifacts isolated from the project's product docs.
+docs_root: .compound-engineering/artifacts
+
+# Use Compound Engineering as an on-demand local toolbox in this repository.
+cross_model_review_mode: off
+work_engine_mode: off
+auto_babysit: false
