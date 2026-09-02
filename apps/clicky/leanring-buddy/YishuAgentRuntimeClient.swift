@@ -208,6 +208,9 @@ enum YishuAgentRuntimeClientError: LocalizedError {
     case workspaceFailed(String)
     case workspaceTimedOut
     case invalidWorkspaceEvent
+    case automationFailed(String)
+    case automationTimedOut
+    case invalidAutomationEvent
 
     var errorDescription: String? {
         switch self {
@@ -244,6 +247,9 @@ enum YishuAgentRuntimeClientError: LocalizedError {
         case let .workspaceFailed(message): return message
         case .workspaceTimedOut: return "文件夹工作区操作超时。"
         case .invalidWorkspaceEvent: return "文件夹工作区协议无效。"
+        case let .automationFailed(message): return message
+        case .automationTimedOut: return "例程操作超时。"
+        case .invalidAutomationEvent: return "例程协议无效。"
         }
     }
 }
@@ -436,6 +442,11 @@ final class YishuAgentRuntimeClient {
     }
 
     var historyContinuations: [UUID: PendingHistoryRequest] = [:]
+    var automationContinuations: [UUID: PendingAutomationRequest] = [:]
+    /// Fired when a routine wake turn settles; the manager speaks/overlays it.
+    var onAutomationRunFinished: ((YishuAutomationRunFinishedEvent) -> Void)?
+    /// Fired after any routine mutation or run so the panel can refresh.
+    var onAutomationsChanged: (() -> Void)?
 
     private struct PendingTaskListRequest {
         let traceId: UUID
@@ -1928,6 +1939,10 @@ final class YishuAgentRuntimeClient {
         if type == "task.presence.updated" {
             guard let event = YishuDelegatedTaskPresenceEvent.decode(raw) else { return }
             onDelegatedTaskPresenceEvent?(event)
+            return
+        }
+
+        if handleAutomationEvent(type: type, requestId: requestId, payload: payload) {
             return
         }
 

@@ -37,6 +37,12 @@ import {
   type YishuKernel,
 } from "@yishu/kernel";
 import type {
+  AutomationCreateCommand,
+  AutomationDeleteCommand,
+  AutomationListCommand,
+  AutomationRunNowCommand,
+  AutomationSetEnabledCommand,
+  AutomationUpdateCommand,
   ContextFrame,
   ConversationId,
   DelegatedTaskCancelCommand,
@@ -101,6 +107,13 @@ import { EverOSIngestionCoordinator } from "./everos-ingestion.js";
 import type { EverOSPendingSessionStore } from "./everos-pending-sessions.js";
 import { ingestVerifiedTaskLearning } from "./everos-task-learning.js";
 import { recordConversationModel, resolveTurnModelRouting } from "./model-routing.js";
+import { AutomationScheduler, AUTOMATION_CONVERSATION_PREFIX } from "./automation-scheduler.js";
+import {
+  defaultRoutinesRootPath,
+  FileAutomationStore,
+  type AutomationSpec,
+  type AutomationTrigger,
+} from "@yishu/kernel";
 import {
   GENERATION_EVENT_TYPES,
   acceptScopedDerivedMemories,
@@ -378,6 +391,10 @@ export class ProductKernelRuntime implements AgentRuntime {
   private extractionDrainTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
   private readonly visibleReady: Promise<void>;
+  /** grok-bot-style routines: file store + due-cron scheduler (hidden wake turns). */
+  readonly automations: FileAutomationStore;
+  private readonly automationScheduler: AutomationScheduler;
+  private automationEmit: ((event: RuntimeEvent) => void) | undefined;
 
   /** Forward the optional auth capability without making the kernel own OAuth. */
   get authService(): YishuAuthService | undefined {
@@ -394,6 +411,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       everos?: EverOSMemoryPort;
       everosIdleMs?: number;
       everosPendingStore?: EverOSPendingSessionStore;
+      routinesDir?: string;
     } = {},
   ) {
     this.kernel = kernel;
@@ -479,8 +497,22 @@ export class ProductKernelRuntime implements AgentRuntime {
         if (recalled.length === 0) return undefined;
         return formatTurnMemoryBlock(recalled.map(toPromptMemorySnippet));
       },
-      statusBar: async (state) => formatEngineStatusBar(state),
+      statusBar: async (state) => {
+        const base = await formatEngineStatusBar(state);
+        const reminder = conversationId.startsWith(AUTOMATION_CONVERSATION_PREFIX)
+          ? this.automationScheduler?.statusReminder(
+              conversationId.slice(AUTOMATION_CONVERSATION_PREFIX.length),
+            )
+          : null;
+        return [base, reminder].filter((part): part is string => typeof part === "string" && part.length > 0).join("\n") || undefined;
+      },
     }));
+    this.automations = new FileAutomationStore(options.routinesDir ?? defaultRoutinesRootPath());
+    this.automationScheduler = new AutomationScheduler(
+      this.automations,
+      (command, emit) => this.startTurn(command, emit),
+      (event) => this.automationEmit?.(event),
+    );
     // ADR 0016 #3: write-side extraction worker. Startup drain replays
     // pending/failed rows from before a crash; every enqueue schedules the
     // next drain. Turns never wait for extraction.
@@ -593,6 +625,14 @@ export class ProductKernelRuntime implements AgentRuntime {
   async initialize(): Promise<void> {
     await this.recoveryReady;
     await this.visibleReady;
+    // Cron nextRunAt derives from lastRunAt, so routines rearm automatically
+    // after a restart; the first tick fires anything already due.
+    this.automationScheduler.start();
+  }
+
+  /** Route automation lifecycle/run events to the stdio sink. */
+  setAutomationEmitSink(sink?: (event: RuntimeEvent) => void): void {
+    this.automationEmit = sink;
   }
 
   /** One projection sink shared by delegated work and product-owned reminders. */
@@ -1153,6 +1193,99 @@ export class ProductKernelRuntime implements AgentRuntime {
         message: "暂时无法抽出口播。",
       }));
     }
+  }
+
+  // Wire and kernel trigger shapes are structurally identical; zod already
+  // validated the union and the non-empty group listener list.
+  private automationTriggerFromWire(wire: AutomationCreateCommand["payload"]["trigger"]): AutomationTrigger {
+    const trigger = wire as unknown as AutomationTrigger;
+    if (trigger.type === "group" && trigger.listeners.length === 1) return trigger.listeners[0];
+    return trigger;
+  }
+
+  async listAutomations(command: AutomationListCommand, emit: RuntimeEventSink): Promise<void> {
+    const automations = this.automations.list();
+    emit(runtimeEvent("automation.listed", command.requestId, command.traceId, { automations }));
+  }
+
+  async createAutomation(command: AutomationCreateCommand, emit: RuntimeEventSink): Promise<void> {
+    const spec: AutomationSpec = {
+      name: command.payload.name,
+      prompt: command.payload.prompt,
+      trigger: this.automationTriggerFromWire(command.payload.trigger),
+    };
+    const record = this.automations.upsert(spec);
+    if (record == null) {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "automation_create_failed",
+        message: "这次没有建好例程。",
+      }));
+      return;
+    }
+    emit(runtimeEvent("automation.mutated", command.requestId, command.traceId, {
+      action: "created",
+      automations: this.automations.list(),
+    }));
+  }
+
+  async updateAutomation(command: AutomationUpdateCommand, emit: RuntimeEventSink): Promise<void> {
+    const spec: AutomationSpec = {
+      name: command.payload.name,
+      prompt: command.payload.prompt,
+      trigger: this.automationTriggerFromWire(command.payload.trigger),
+    };
+    const record = this.automations.update(command.payload.automationId, spec);
+    if (record == null) {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "automation_update_failed",
+        message: "这次没有改好例程。",
+      }));
+      return;
+    }
+    emit(runtimeEvent("automation.mutated", command.requestId, command.traceId, {
+      action: "updated",
+      automations: this.automations.list(),
+    }));
+  }
+
+  async setAutomationEnabled(command: AutomationSetEnabledCommand, emit: RuntimeEventSink): Promise<void> {
+    const record = this.automations.setEnabled(command.payload.automationId, command.payload.isEnabled);
+    if (record == null) {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "automation_set_enabled_failed",
+        message: "这次没有切换例程状态。",
+      }));
+      return;
+    }
+    emit(runtimeEvent("automation.mutated", command.requestId, command.traceId, {
+      action: command.payload.isEnabled ? "enabled" : "disabled",
+      automations: this.automations.list(),
+    }));
+  }
+
+  async runAutomationNow(command: AutomationRunNowCommand, emit: RuntimeEventSink): Promise<void> {
+    const result = await this.automationScheduler.runNow(command.payload.automationId);
+    if (!result.accepted) {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: result.code ?? "automation_run_rejected",
+        message: result.code === "already_running" ? "这个例程正在运行。" : "没有这个例程。",
+      }));
+    }
+  }
+
+  async deleteAutomation(command: AutomationDeleteCommand, emit: RuntimeEventSink): Promise<void> {
+    const removed = this.automations.remove(command.payload.automationId);
+    if (!removed) {
+      emit(runtimeEvent("automation.failed", command.requestId, command.traceId, {
+        code: "automation_delete_failed",
+        message: "没有这个例程。",
+      }));
+      return;
+    }
+    emit(runtimeEvent("automation.mutated", command.requestId, command.traceId, {
+      action: "deleted",
+      automations: this.automations.list(),
+    }));
   }
 
   async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
@@ -2716,6 +2849,7 @@ export class ProductKernelRuntime implements AgentRuntime {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.automationScheduler.dispose();
     void this.browserSessions.dispose();
     const everosDispose = this.everosIngestion?.dispose().catch(() => undefined)
       ?? Promise.resolve();

@@ -372,6 +372,7 @@ describe("product actions via createYishuKernel", () => {
         "finder_history_back",
         "forget",
         "learn_mind_from_pattern",
+        "open_email",
         "record_learning",
         "record_suggestion",
         "remember",

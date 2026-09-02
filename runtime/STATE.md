@@ -4,6 +4,7 @@
 
 | Task ID | State file | Status | Git context | Updated at | Next action |
 |---|---|---|---|---|---|
+| 20260902-automation-port | runtime/tasks/20260902-automation-port.md | complete | main | 2026-09-02 | 已验收；后续：模型驱动例行工具、本地事件监听器 |
 
 ## 启动与写回
 

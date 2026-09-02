@@ -895,6 +895,12 @@ final class CompanionManager: ObservableObject {
                 self.enqueueDelegatedTaskReturn(event)
             }
         }
+        yishuAgentRuntimeClient.onAutomationRunFinished = { [weak self] event in
+            self?.presentAutomationRunResult(event)
+        }
+        yishuAgentRuntimeClient.onAutomationsChanged = { [weak self] in
+            self?.refreshAutomations()
+        }
         yishuAgentRuntimeClient.onLifecycleEvent = { [weak self] event in
             self?.updateRuntimeVisualPhase(for: event)
             switch event {
@@ -4367,6 +4373,87 @@ final class CompanionManager: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return nil }
         return "我看见「\(String(normalized.prefix(20)))」了。"
+    }
+
+    // MARK: - Routines (grok-bot-style standing orders)
+
+    @Published private(set) var automationRecords: [YishuAutomationRecord] = []
+    @Published var automationNotice: String?
+
+    func refreshAutomations() {
+        guard agentRuntimeAvailability == .ready else { return }
+        Task { @MainActor in
+            do {
+                self.automationRecords = try await self.yishuAgentRuntimeClient.listAutomations()
+            } catch {
+                // A failed refresh keeps the last good list; the panel shows notice.
+                self.automationNotice = "例程暂时读不到。"
+            }
+        }
+    }
+
+    func createAutomation(name: String, prompt: String, schedule: String) {
+        do {
+            try yishuAgentRuntimeClient.createAutomation(
+                name: name,
+                prompt: prompt,
+                trigger: .cron(schedule: schedule)
+            )
+            automationNotice = nil
+        } catch {
+            automationNotice = "这次没有建好例程。"
+        }
+    }
+
+    func toggleAutomation(_ record: YishuAutomationRecord, enabled: Bool) {
+        do {
+            try yishuAgentRuntimeClient.setAutomationEnabled(record.id, isEnabled: enabled)
+            automationNotice = nil
+        } catch {
+            automationNotice = "这次没有切换例程状态。"
+        }
+    }
+
+    func runAutomationNow(_ record: YishuAutomationRecord) {
+        do {
+            try yishuAgentRuntimeClient.runAutomationNow(record.id)
+            automationNotice = nil
+        } catch {
+            automationNotice = "这次没有运行例程。"
+        }
+    }
+
+    func deleteAutomation(_ record: YishuAutomationRecord) {
+        do {
+            try yishuAgentRuntimeClient.deleteAutomation(record.id)
+            automationNotice = nil
+        } catch {
+            automationNotice = "这次没有删掉例程。"
+        }
+    }
+
+    /// A routine wake turn settled: surface it the same way a spoken finding
+    /// lands — overlay card plus voice.
+    private func presentAutomationRunResult(_ event: YishuAutomationRunFinishedEvent) {
+        refreshAutomations()
+        let spoken: String
+        if event.status == "ok" {
+            if let summary = event.summary, !summary.isEmpty {
+                spoken = "例行任务「\(event.automationName)」：\(summary)"
+            } else {
+                spoken = "例行任务「\(event.automationName)」做完了，没有要补充的。"
+            }
+        } else {
+            spoken = "例行任务「\(event.automationName)」这次没做成。"
+        }
+        responseOverlayManager.showStaticMessage(spoken, autoHideAfter: 10)
+        Task { @MainActor in
+            do {
+                try await self.elevenLabsTTSClient.speakText(spoken, speed: self.speechSpeed)
+            } catch {
+                print("⚠️ 奕枢 routine result TTS unavailable")
+            }
+        }
     }
 }
 
