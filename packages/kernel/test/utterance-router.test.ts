@@ -44,6 +44,13 @@ describe("routeProductUtterance", () => {
     const r = routeProductUtterance("记住：这个项目准备基于 Pi");
     assert.equal(r?.action, "remember");
     assert.equal(r?.input.claim, "这个项目准备基于 Pi");
+    assert.equal(routeProductUtterance("帮我记住：我喜欢无糖咖啡")?.action, "remember");
+    assert.equal(
+      routeProductUtterance("帮我记住：我喜欢无糖咖啡")?.input.claim,
+      "我喜欢无糖咖啡",
+    );
+    assert.equal(routeProductUtterance("请帮我记下：周末去爬山")?.input.claim, "周末去爬山");
+    assert.equal(routeProductUtterance("麻烦记一下：钥匙在抽屉")?.input.claim, "钥匙在抽屉");
   });
 
   it("routes learning corrections", () => {

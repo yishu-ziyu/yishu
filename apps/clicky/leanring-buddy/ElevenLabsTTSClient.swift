@@ -7,20 +7,16 @@
 //  project-file compatibility with the original overlay implementation.
 //
 
-import AVFoundation
 import Foundation
 
 @MainActor
-final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
+final class ElevenLabsTTSClient {
     private let proxyURL: URL
     private let session: URLSession
-
-    /// The audio player for the current TTS playback. Kept alive so the
-    /// audio finishes playing even if the caller doesn't hold a reference.
-    private var audioPlayer: AVAudioPlayer?
-    private var playbackID: UUID?
-    private var playbackContinuation: CheckedContinuation<Void, any Error>?
-    private var playbackWatchdogTask: Task<Void, Never>?
+    private let clipPlayer = YishuSpeechClipPlayer()
+    private var prefetch: (text: String, task: Task<Data, Error>)?
+    private let streamPipe: YishuHTTPBytePipe
+    private let streamSession: URLSession
 
     init(proxyURL: String) {
         self.proxyURL = URL(string: proxyURL)!
@@ -28,8 +24,44 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 60
-        self.session = URLSession(configuration: configuration)
-        super.init()
+        configuration.httpMaximumConnectionsPerHost = 6
+        configuration.httpShouldUsePipelining = true
+        configuration.waitsForConnectivity = true
+        let pipe = YishuHTTPBytePipe()
+        self.streamPipe = pipe
+        self.session = YishuLoopbackSession.make(from: configuration)
+        self.streamSession = YishuLoopbackSession.make(
+            from: configuration,
+            delegate: pipe,
+            delegateQueue: nil
+        )
+        clipPlayer.hooks.onFirstAudio = {
+            ClickyAnalytics.trackVoiceEvent("tts.first_audio")
+        }
+        clipPlayer.hooks.onClipGap = { gapMs in
+            ClickyAnalytics.trackVoiceEvent(
+                "tts.clip_gap",
+                once: false,
+                attributes: ["gapMs": gapMs]
+            )
+        }
+        clipPlayer.hooks.onClipDone = { stats in
+            ClickyAnalytics.trackVoiceEvent(
+                "tts.clip_done",
+                once: false,
+                attributes: [
+                    "durationMs": stats.trimmedDurationMs,
+                    "playedMs": stats.scheduleToPlayedBackMs,
+                ]
+            )
+        }
+    }
+
+    func prefetch(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if prefetch?.text == trimmed { return }
+        prefetch = (trimmed, Task { try await self.downloadCompleteAudio(trimmed) })
     }
 
     /// Sends `text` to MiniMax TTS and plays the resulting audio.
@@ -39,15 +71,54 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         _ text: String,
         speed: Double = YishuSpeechSpeed.defaultValue
     ) async throws {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        try Task.checkCancellation()
+
+        if let prefetch, prefetch.text == trimmed {
+            let data = try await prefetch.task.value
+            self.prefetch = nil
+            try await playCompleteMPEG(data)
+            return
+        }
+
+        do {
+            try await streamAndPlay(trimmed, speed: speed)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let data = try await downloadCompleteAudio(trimmed, speed: speed)
+            try await playCompleteMPEG(data)
+        }
+    }
+
+    /// Whether TTS audio is currently playing back.
+    var isPlaying: Bool {
+        clipPlayer.isPlaying
+    }
+
+    /// Stops any in-progress playback immediately.
+    func stopPlayback(emitStoppedEvent: Bool = true) {
+        prefetch?.task.cancel()
+        prefetch = nil
+        let wasPlaying = clipPlayer.isPlaying
+        clipPlayer.stop()
+        if emitStoppedEvent, wasPlaying {
+            ClickyAnalytics.trackTTSStopped()
+        }
+    }
+
+    private func makeRequest(
+        text: String,
+        speed: Double = YishuSpeechSpeed.defaultValue
+    ) throws -> URLRequest {
         var request = URLRequest(url: proxyURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
+        request.setValue("keep-alive", forHTTPHeaderField: "Connection")
         YishuVoiceProxySupervisor.authorize(&request)
 
-        // Proxy accepts { text, speed, emotion? } and returns raw audio/mpeg
-        // (MiniMax t2a_v2). No emotion parameter → provider renders mood from
-        // the content itself.
         let clampedSpeed = YishuSpeechSpeed.clamp(speed)
         var body: [String: Any] = [
             "text": text,
@@ -56,165 +127,133 @@ final class ElevenLabsTTSClient: NSObject, AVAudioPlayerDelegate {
         if let emotion = YishuSpeechEmotion.wireValue() {
             body["emotion"] = emotion
         }
-
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 30
+        return request
+    }
 
+    private func downloadCompleteAudio(
+        _ text: String,
+        speed: Double = YishuSpeechSpeed.defaultValue
+    ) async throws -> Data {
+        let request = try makeRequest(text: text, speed: speed)
         let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(domain: "YishuTTS", code: -1,
-                          userInfo: [NSLocalizedDescriptionKey: "无效的 TTS 响应"])
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw NSError(
+                domain: "YishuTTS",
+                code: status,
+                userInfo: [NSLocalizedDescriptionKey: "TTS 失败 (\(status)，\(data.count) bytes)"]
+            )
         }
+        return data
+    }
 
+    private func streamAndPlay(_ text: String, speed: Double) async throws {
+        let request = try makeRequest(text: text, speed: speed)
+        let task = streamSession.dataTask(with: request)
+        let (chunks, httpResponse) = try await streamPipe.start(task)
         guard (200...299).contains(httpResponse.statusCode) else {
-            // Do not surface raw upstream bodies (may echo request fragments).
+            task.cancel()
             throw NSError(
                 domain: "YishuTTS",
                 code: httpResponse.statusCode,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "TTS 失败 (\(httpResponse.statusCode)，\(data.count) bytes)"
-                ]
+                userInfo: [NSLocalizedDescriptionKey: "TTS 失败 (\(httpResponse.statusCode))"]
             )
         }
 
         try Task.checkCancellation()
-
-        let player = try AVAudioPlayer(data: data)
-        let id = UUID()
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                if Task.isCancelled {
-                    continuation.resume(throwing: CancellationError())
-                    return
-                }
-
-                // There is one physical output channel. Superseding playback
-                // must wake the previous awaiter before this sentence starts.
-                stopPlayback()
-                audioPlayer = player
-                playbackID = id
-                playbackContinuation = continuation
-                player.delegate = self
-                player.prepareToPlay()
-                guard player.play() else {
-                    finishPlayback(
-                        id: id,
-                        error: NSError(
-                            domain: "YishuTTS",
-                            code: -2,
-                            userInfo: [NSLocalizedDescriptionKey: "TTS 音频无法播放"]
-                        )
-                    )
-                    return
-                }
-                let duration = player.duration
-                let timeout = min(max((duration.isFinite ? duration : 0) + 5, 10), 90)
-                playbackWatchdogTask = Task { @MainActor [weak self] in
-                    do {
-                        try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    } catch {
-                        return
-                    }
-                    guard let self, self.playbackID == id else { return }
-                    self.audioPlayer?.stop()
-                    self.finishPlayback(
-                        id: id,
-                        error: NSError(
-                            domain: "YishuTTS",
-                            code: -5,
-                            userInfo: [NSLocalizedDescriptionKey: "TTS 音频播放超时"]
-                        )
-                    )
-                }
-                print("🔊 奕枢 TTS: playing \(data.count / 1024)KB audio speed=\(clampedSpeed)")
-            }
+            try await self.clipPlayer.play(chunks: chunks)
         } onCancel: { [weak self] in
+            task.cancel()
             Task { @MainActor in
-                self?.cancelPlayback(id: id)
+                self?.clipPlayer.stop()
             }
         }
     }
 
-    /// Whether TTS audio is currently playing back.
-    var isPlaying: Bool {
-        audioPlayer?.isPlaying ?? false
+    private func playCompleteMPEG(_ data: Data) async throws {
+        try Task.checkCancellation()
+        try await clipPlayer.play(data: data)
+    }
+}
+
+/// URLSession data-task pipe that yields HTTP body chunks as they arrive.
+private final class YishuHTTPBytePipe: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var chunkContinuation: AsyncStream<Data>.Continuation?
+    private var responseContinuation: CheckedContinuation<(AsyncStream<Data>, HTTPURLResponse), Error>?
+    private var httpResponse: HTTPURLResponse?
+
+    func start(_ task: URLSessionDataTask) async throws -> (AsyncStream<Data>, HTTPURLResponse) {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            responseContinuation = continuation
+            chunkContinuation = nil
+            httpResponse = nil
+            lock.unlock()
+            task.resume()
+        }
     }
 
-    /// Stops any in-progress playback immediately.
-    func stopPlayback() {
-        guard let id = playbackID else {
-            audioPlayer?.stop()
-            audioPlayer = nil
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            fail(NSError(domain: "YishuTTS", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "无效的 TTS 响应",
+            ]))
             return
         }
-        cancelPlayback(id: id)
+        let (stream, continuation) = AsyncStream<Data>.makeStream()
+        lock.lock()
+        httpResponse = http
+        chunkContinuation = continuation
+        let waiter = responseContinuation
+        responseContinuation = nil
+        lock.unlock()
+        waiter?.resume(returning: (stream, http))
+        completionHandler(.allow)
     }
 
-    nonisolated func audioPlayerDidFinishPlaying(
-        _ player: AVAudioPlayer,
-        successfully flag: Bool
-    ) {
-        let playerIdentifier = ObjectIdentifier(player)
-        Task { @MainActor [weak self] in
-            self?.finishDelegatePlayback(
-                playerIdentifier: playerIdentifier,
-                succeeded: flag,
-                decodeFailed: false
-            )
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        let continuation = chunkContinuation
+        lock.unlock()
+        continuation?.yield(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let continuation = chunkContinuation
+        chunkContinuation = nil
+        let waiter = responseContinuation
+        responseContinuation = nil
+        lock.unlock()
+        continuation?.finish()
+        if let waiter {
+            waiter.resume(throwing: error ?? NSError(
+                domain: "YishuTTS",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "TTS 流未返回响应"]
+            ))
         }
     }
 
-    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        let playerIdentifier = ObjectIdentifier(player)
-        Task { @MainActor [weak self] in
-            self?.finishDelegatePlayback(
-                playerIdentifier: playerIdentifier,
-                succeeded: false,
-                decodeFailed: true
-            )
-        }
-    }
-
-    private func finishDelegatePlayback(
-        playerIdentifier: ObjectIdentifier,
-        succeeded: Bool,
-        decodeFailed: Bool
-    ) {
-        guard let player = audioPlayer,
-              ObjectIdentifier(player) == playerIdentifier,
-              let id = playbackID else { return }
-        let error: Error? = succeeded ? nil : NSError(
-            domain: "YishuTTS",
-            code: decodeFailed ? -4 : -3,
-            userInfo: [
-                NSLocalizedDescriptionKey: decodeFailed
-                    ? "TTS 音频解码失败"
-                    : "TTS 音频播放未完成"
-            ]
-        )
-        finishPlayback(id: id, error: error)
-    }
-
-    private func cancelPlayback(id: UUID) {
-        guard playbackID == id else { return }
-        audioPlayer?.stop()
-        finishPlayback(id: id, error: CancellationError())
-    }
-
-    private func finishPlayback(id: UUID, error: Error?) {
-        guard playbackID == id else { return }
-        let continuation = playbackContinuation
-        playbackWatchdogTask?.cancel()
-        playbackWatchdogTask = nil
-        playbackContinuation = nil
-        playbackID = nil
-        audioPlayer?.delegate = nil
-        audioPlayer = nil
-        if let error {
-            continuation?.resume(throwing: error)
-        } else {
-            continuation?.resume()
-        }
+    private func fail(_ error: Error) {
+        lock.lock()
+        let waiter = responseContinuation
+        responseContinuation = nil
+        let continuation = chunkContinuation
+        chunkContinuation = nil
+        lock.unlock()
+        continuation?.finish()
+        waiter?.resume(throwing: error)
     }
 }

@@ -27,10 +27,10 @@ const rememberInputSchema = z.object({
 export type RememberInput = z.infer<typeof rememberInputSchema>;
 
 /**
- * ADR 0016 #2: single write path. Explicit remember writes the markdown
- * truth layer first (when wired), then mirrors into the store index with a
- * truthRef. Hosts without a memory directory keep index-only writes for
- * tests/embedded use.
+ * Explicit remember writes one markdown authority, then the store index.
+ * When the visible file is wired, that file is the only markdown write —
+ * the legacy Memory/ truth tree stays for extraction / EverOS-off hydration,
+ * not a second live remember path.
  */
 export function createRememberAction(
   store: YishuStorePort,
@@ -52,10 +52,8 @@ export function createRememberAction(
       let truthRef: string | undefined;
       if (visible !== undefined) {
         await visible.appendFacts([input.claim], input.scope);
-      }
-      // The markdown line is the truth; write it before the index row so a
-      // crash between the two leaves a rebuildable gap, not a lost fact.
-      if (truth !== undefined) {
+      } else if (truth !== undefined) {
+        // Hosts without 记忆.md still use the legacy tree.
         const factId = randomUUID();
         await truth.upsertFact(input.scope, {
           id: factId,
@@ -94,13 +92,25 @@ export function createRememberAction(
         minConfidence: 0,
       });
       throwIfAborted(ctx.signal);
-      const hit = found.some((m) => m.id === output.id);
+      const inStore = found.some((m) => m.id === output.id);
+      let inVisible = true;
+      if (visible !== undefined && output.scope.trim() === "personal") {
+        const facts = await visible.listFacts();
+        throwIfAborted(ctx.signal);
+        const needle = output.claim.replace(/\s+/gu, " ").trim();
+        inVisible = facts.some(
+          (fact) => fact.replace(/\s+/gu, " ").trim() === needle,
+        );
+      }
+      const hit = inStore && inVisible;
       return {
         verified: hit,
         message: hit
-          ? "Memory claim is present in the store"
-          : "Memory claim was not found after write",
-        evidence: { id: output.id, found: hit },
+          ? "Memory claim is present in the store and visible file"
+          : !inStore
+            ? "Memory claim was not found after write"
+            : "Memory claim is in the store but missing from 记忆.md",
+        evidence: { id: output.id, found: hit, inStore, inVisible },
       };
     },
   });

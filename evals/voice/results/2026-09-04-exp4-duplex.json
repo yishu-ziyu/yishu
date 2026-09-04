@@ -1,0 +1,2809 @@
+{
+  "date": "2026-09-04",
+  "experiment": "exp4-duplex",
+  "model_used": null,
+  "sample_rate": 24000,
+  "voice": "wenrounansheng (intended; session never opened)",
+  "tools_format": "openai-flat then stepfun-nested (not reached)",
+  "host": "api.stepfun.com",
+  "stepfun_key_length": 65,
+  "minimax_key_length": 125,
+  "minimax_tts_model": "speech-2.8-hd",
+  "catalog": {
+    "http": 200,
+    "candidate_in_catalog": {
+      "stepaudio-2.5-realtime": true,
+      "step-audio-2": true,
+      "step-audio-2-mini": true,
+      "step-1o-audio": true
+    }
+  },
+  "tts_user_audio_ms": {
+    "U1": 4261,
+    "U2": 4563,
+    "U3": 3878,
+    "U4": 3193,
+    "UH": 1000
+  },
+  "candidate_failures": [
+    {
+      "model": "stepaudio-2.5-realtime",
+      "reason": "http 402 quota_exceeded You exceeded your current quota, please check your plan and billing details",
+      "http": 402,
+      "error_type": "quota_exceeded"
+    },
+    {
+      "model": "step-audio-2",
+      "reason": "http 402 quota_exceeded You exceeded your current quota, please check your plan and billing details",
+      "http": 402,
+      "error_type": "quota_exceeded"
+    },
+    {
+      "model": "step-audio-2-mini",
+      "reason": "http 402 quota_exceeded You exceeded your current quota, please check your plan and billing details",
+      "http": 402,
+      "error_type": "quota_exceeded"
+    },
+    {
+      "model": "step-1o-audio",
+      "reason": "http 402 quota_exceeded You exceeded your current quota, please check your plan and billing details",
+      "http": 402,
+      "error_type": "quota_exceeded"
+    }
+  ],
+  "scenarios": {
+    "S1": {
+      "runs": [
+        {
+          "scenario": "S1",
+          "run": 1,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        },
+        {
+          "scenario": "S1",
+          "run": 2,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        },
+        {
+          "scenario": "S1",
+          "run": 3,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        }
+      ],
+      "latency_p50_ms": null,
+      "latency_p95_ms": null,
+      "fn_p50_ms": null,
+      "output_to_audio_p50_ms": null,
+      "interrupt_stop_p50_ms": null,
+      "ask_yishu": [
+        false,
+        false,
+        false
+      ],
+      "bridging": [
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        },
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        },
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        }
+      ]
+    },
+    "S2": {
+      "runs": [
+        {
+          "scenario": "S2",
+          "run": 1,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        },
+        {
+          "scenario": "S2",
+          "run": 2,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        },
+        {
+          "scenario": "S2",
+          "run": 3,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        }
+      ],
+      "latency_p50_ms": null,
+      "latency_p95_ms": null,
+      "fn_p50_ms": null,
+      "output_to_audio_p50_ms": null,
+      "interrupt_stop_p50_ms": null,
+      "ask_yishu": [
+        false,
+        false,
+        false
+      ],
+      "bridging": [
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        },
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        },
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        }
+      ]
+    },
+    "S3": {
+      "runs": [
+        {
+          "scenario": "S3",
+          "run": 1,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        },
+        {
+          "scenario": "S3",
+          "run": 2,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        },
+        {
+          "scenario": "S3",
+          "run": 3,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        }
+      ],
+      "latency_p50_ms": null,
+      "latency_p95_ms": null,
+      "fn_p50_ms": null,
+      "output_to_audio_p50_ms": null,
+      "interrupt_stop_p50_ms": null,
+      "ask_yishu": [
+        false,
+        false,
+        false
+      ],
+      "bridging": [
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        },
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        },
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        }
+      ]
+    },
+    "S4": {
+      "runs": [
+        {
+          "scenario": "S4",
+          "run": 1,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        },
+        {
+          "scenario": "S4",
+          "run": 2,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        },
+        {
+          "scenario": "S4",
+          "run": 3,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "question": null,
+          "bridging": false,
+          "bridging_during_wait": false,
+          "bridging_text": "",
+          "transcript": "",
+          "error": "not run: every realtime candidate returned HTTP 402 quota_exceeded"
+        }
+      ],
+      "latency_p50_ms": null,
+      "latency_p95_ms": null,
+      "fn_p50_ms": null,
+      "output_to_audio_p50_ms": null,
+      "interrupt_stop_p50_ms": null,
+      "ask_yishu": [
+        false,
+        false,
+        false
+      ],
+      "bridging": [
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        },
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        },
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        }
+      ]
+    },
+    "S5": {
+      "runs": [
+        {
+          "scenario": "S5",
+          "run": 1,
+          "latency_ms": null,
+          "ask_yishu_called": false,
+          "error": "skipped: S1–S4 did not run"
+        }
+      ],
+      "latency_p50_ms": null,
+      "latency_p95_ms": null,
+      "fn_p50_ms": null,
+      "output_to_audio_p50_ms": null,
+      "interrupt_stop_p50_ms": null,
+      "ask_yishu": [
+        false
+      ],
+      "bridging": [
+        {
+          "yes": false,
+          "text": "",
+          "during_wait": false
+        }
+      ]
+    }
+  },
+  "caveats": [
+    "All four realtime candidates are in GET /v1/models, so this is quota, not a missing-model id.",
+    "wss://api.stepfun.com/v1/realtime returned HTTP 402 quota_exceeded for every candidate (Token Plan key).",
+    "S1–S5 were not executed. Latency, ask_yishu routing, bridging, and interruption are unmeasured.",
+    "User audio (MiniMax TTS → pcm16 24000 Hz) is in .work/voice-experiments/duplex/U1–U4.wav.",
+    "Candidate order: stepaudio-2.5-realtime, step-audio-2, step-audio-2-mini, step-1o-audio.",
+    "Audio would have been streamed in 100ms chunks; docs recommend 20–30ms."
+  ],
+  "recommendation": {
+    "verdict": "not viable until StepFun realtime quota exists on this key",
+    "paragraph": "Realtime-as-mouth/ears + ask_yishu-as-brain is untested: the Token Plan key can list stepaudio-2.5-realtime / step-audio-2 / step-audio-2-mini / step-1o-audio, but the realtime WebSocket returns quota_exceeded (HTTP 402) for all of them. Do not infer tool-call reliability, wait-bridging, or barge-in from this run. MiniMax TTS for the four user prompts succeeded at 24000 Hz pcm16. Next evidence requires a key that completes session.created; then re-run node evals/voice/exp4-duplex/run.mjs.",
+    "risks": [
+      "StepFun realtime quota_exceeded on all candidates",
+      "wrong self-answers / persona drift / wait-silence not measured"
+    ]
+  },
+  "step_plan_run": {
+    "date": "2026-09-04",
+    "endpoint": "wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime",
+    "model_used": "stepaudio-2.5-realtime",
+    "sample_rate": 24000,
+    "voice": "linjiajiejie",
+    "tools_format": "stepfun-nested",
+    "function_calling": true,
+    "host": "api.stepfun.com",
+    "path": "/step_plan/v1",
+    "chunk_ms": 100,
+    "brain_delay_ms": 2500,
+    "stepfun_step_plan_key_length": 64,
+    "minimax_key_length": 125,
+    "minimax_tts_model": "speech-2.8-hd",
+    "candidate_failures": [
+      {
+        "model": "stepaudio-2.5-realtime",
+        "reason": "Received network error or non-101 status code.",
+        "http": null,
+        "error_type": null,
+        "path": "/step_plan/v1"
+      }
+    ],
+    "scenarios": {
+      "S1": {
+        "runs": [
+          {
+            "scenario": "S1",
+            "run": 1,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1131,
+            "transcript": "累啦？先别急着睡，我帮你看看你今天的日程表，看看是不是忙了一整天还没缓过来。",
+            "transcripts": [
+              {
+                "response_id": "ee177879-9481-479a-a1a5-5d92bb2bd53c",
+                "item_id": "a497483b-82ae-433f-a0c9-edf0f53c102d",
+                "transcript": "累啦？先别急着睡，我帮你看看你今天的日程表，看看是不是忙了一整天还没缓过来。"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 8961,
+            "user_audio_ms": 4261,
+            "first_audio_response_id": "ee177879-9481-479a-a1a5-5d92bb2bd53c",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/S1-1-out.wav",
+            "output_audio_ms": 7220
+          },
+          {
+            "scenario": "S1",
+            "run": 2,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 2947,
+            "transcript": "累啦？先别急着睡，我帮你看看你今天的日程表，看看是不是忙了一整天还没缓过来。",
+            "transcripts": [
+              {
+                "response_id": "c02f3040-a7fe-4f84-88fa-178a27e4d6c8",
+                "item_id": "6ec3bf41-19e1-4b65-a34c-307a639ddc37",
+                "transcript": "累啦？先别急着睡，我帮你看看你今天的日程表，看看是不是忙了一整天还没缓过来。"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 7814,
+            "user_audio_ms": 4261,
+            "first_audio_response_id": "c02f3040-a7fe-4f84-88fa-178a27e4d6c8",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/S1-2-out.wav",
+            "output_audio_ms": 7020
+          },
+          {
+            "scenario": "S1",
+            "run": 3,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1469,
+            "transcript": "累啦？先别急着睡，我帮你看看你今天的日程表，看看是不是忙了一整天。",
+            "transcripts": [
+              {
+                "response_id": "676ac4c8-8c36-4d95-bfaf-f64fdda42c3f",
+                "item_id": "1c59a2c8-904e-45ca-bede-9e75d8e5bf9f",
+                "transcript": "累啦？先别急着睡，我帮你看看你今天的日程表，看看是不是忙了一整天。"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 6692,
+            "user_audio_ms": 4261,
+            "first_audio_response_id": "676ac4c8-8c36-4d95-bfaf-f64fdda42c3f",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/S1-3-out.wav",
+            "output_audio_ms": 6180
+          }
+        ],
+        "latency_p50_ms": 1469,
+        "latency_p95_ms": 2947,
+        "fn_p50_ms": null,
+        "output_to_audio_p50_ms": null,
+        "interrupt_stop_p50_ms": null,
+        "ask_yishu": [
+          false,
+          false,
+          false
+        ],
+        "bridging": [
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          }
+        ]
+      },
+      "S2": {
+        "runs": [
+          {
+            "scenario": "S2",
+            "run": 1,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "好，我这就帮你看看。",
+            "transcripts": [
+              {
+                "response_id": "206c054a-4fff-4ba7-93b9-aa4642a10439",
+                "item_id": "779fea06-c4bd-4f5e-8e70-92322a9db5f4",
+                "transcript": "好，我这就帮你看看。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 7414
+          },
+          {
+            "scenario": "S2",
+            "run": 2,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "好，我这就帮你看看。",
+            "transcripts": [
+              {
+                "response_id": "52d14520-577b-47ce-836d-ce3265fadfb2",
+                "item_id": "f88717a6-9a29-4fff-a54c-17e836a62bc9",
+                "transcript": "好，我这就帮你看看。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 6497
+          },
+          {
+            "scenario": "S2",
+            "run": 3,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "好，我这就帮你看看。",
+            "transcripts": [
+              {
+                "response_id": "f4579bfe-a35c-415b-adf1-ad30be8a4b00",
+                "item_id": "59beb365-054e-46db-a3ad-3a08c1ae02d2",
+                "transcript": "好，我这就帮你看看。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 8972
+          }
+        ],
+        "latency_p50_ms": null,
+        "latency_p95_ms": null,
+        "fn_p50_ms": null,
+        "output_to_audio_p50_ms": null,
+        "interrupt_stop_p50_ms": null,
+        "ask_yishu": [
+          false,
+          false,
+          false
+        ],
+        "bridging": [
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          }
+        ]
+      },
+      "S3": {
+        "runs": [
+          {
+            "scenario": "S3",
+            "run": 1,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "哎呀，我这记性还没到家呢，上周聊过什么我得翻翻看。稍等啊。",
+            "transcripts": [
+              {
+                "response_id": "1cde69d5-c88e-46aa-9346-9079780f7667",
+                "item_id": "7ee260bf-bf2a-41cc-9021-57e20aae2fda",
+                "transcript": "哎呀，我这记性还没到家呢，上周聊过什么我得翻翻看。稍等啊。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 8782
+          },
+          {
+            "scenario": "S3",
+            "run": 2,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "哎呀，我这记性还没到家呢，上周聊过什么我得翻翻看。稍等啊。",
+            "transcripts": [
+              {
+                "response_id": "606b1fa1-e759-40b6-88b0-c2c35ebad7d9",
+                "item_id": "e1b8dc5d-9ee9-4c86-9b36-23bd53a895ae",
+                "transcript": "哎呀，我这记性还没到家呢，上周聊过什么我得翻翻看。稍等啊。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 5626
+          },
+          {
+            "scenario": "S3",
+            "run": 3,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "哎呀，我这记性还没到家呢，上周聊过什么我得翻翻看。稍等啊。",
+            "transcripts": [
+              {
+                "response_id": "fd837858-5200-4598-98f6-a02dd8c8a831",
+                "item_id": "3f4b1d92-1e69-4ae0-a7bc-c96d896e36e9",
+                "transcript": "哎呀，我这记性还没到家呢，上周聊过什么我得翻翻看。稍等啊。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 5092
+          }
+        ],
+        "latency_p50_ms": null,
+        "latency_p95_ms": null,
+        "fn_p50_ms": null,
+        "output_to_audio_p50_ms": null,
+        "interrupt_stop_p50_ms": null,
+        "ask_yishu": [
+          false,
+          false,
+          false
+        ],
+        "bridging": [
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          }
+        ]
+      },
+      "S4": {
+        "runs": [
+          {
+            "scenario": "S4",
+            "run": 1,
+            "latency_ms": 922,
+            "stopped": true,
+            "ms_u3_to_speech_started": 2556,
+            "ms_u3_to_cancelled": 2900,
+            "ms_u3_to_last_audio": 2555,
+            "transcript_before": "累啦？先别急着睡，我帮你看看你今天的日程表，看看是不是忙了一整天。",
+            "transcript_after": "好，我这就帮你看看。 / 行，那我先不说话了。",
+            "error": null,
+            "t_u3_start_mono_ms": 9866,
+            "cancel_type": "response.done",
+            "cancel_status": "incomplete",
+            "audio_deltas_after_u3_same_resp": 27
+          },
+          {
+            "scenario": "S4",
+            "run": 2,
+            "latency_ms": 4432,
+            "stopped": true,
+            "ms_u3_to_speech_started": 9550,
+            "ms_u3_to_cancelled": 10908,
+            "ms_u3_to_last_audio": 9549,
+            "transcript_before": "累啦？先别急着睡，我帮你看看你今天的日程表，看看是不是忙了一整天。",
+            "transcript_after": "好，我这就帮你看看。 / 行，那我先不说话了。",
+            "error": null,
+            "t_u3_start_mono_ms": 16278,
+            "cancel_type": "response.done",
+            "cancel_status": "incomplete",
+            "audio_deltas_after_u3_same_resp": 33
+          },
+          {
+            "scenario": "S4",
+            "run": 3,
+            "latency_ms": null,
+            "stopped": false,
+            "ms_u3_to_speech_started": null,
+            "ms_u3_to_cancelled": null,
+            "ms_u3_to_last_audio": null,
+            "transcript_before": "",
+            "transcript_after": "",
+            "error": "websocket not open"
+          }
+        ],
+        "latency_p50_ms": 922,
+        "latency_p95_ms": 4432,
+        "fn_p50_ms": null,
+        "output_to_audio_p50_ms": null,
+        "interrupt_stop_p50_ms": 2556,
+        "ask_yishu": [
+          false,
+          false,
+          false
+        ],
+        "bridging": [
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          }
+        ]
+      }
+    },
+    "caveats": [
+      "Step Plan endpoint wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime.",
+      "Audio streamed in 100ms chunks at real-time pace; docs recommend 20–30ms.",
+      "Trailing 700ms silence appended so server_vad can fire; latency includes VAD hangover.",
+      "User audio is MiniMax TTS, not a live mic; interruption is file barge-in.",
+      "session.update accepted tools format stepfun-nested.",
+      "S5 latency floor skipped because S1–S4 did not all work."
+    ],
+    "recommendation": {
+      "verdict": "not viable as mouth/ears+brain — voice I/O works, ask_yishu never fires",
+      "p50_first_audio_ms": 1469,
+      "risks": [
+        "session.update accepts tools but the model never emits ask_yishu on screen or memory turns",
+        "S2/S3 speak a fake 'I'll look' line then end the turn (no 2.5s wait, no relayed answer)",
+        "S1 invents calendar-checking on chit-chat",
+        "barge-in stop is seconds, not hundreds of ms (S4 p50 speech_started 2556ms)"
+      ],
+      "paragraph": "Step Plan stepaudio-2.5-realtime + linjiajiejie can do voice in/out (S1 first-audio p50 1469ms / p95 2947ms). session.update accepted nested ask_yishu, but the model called it 0/3 on U2 and 0/3 on U4 and 0/3 on U1. Screen turns only said「好，我这就帮你看看。」then response.done; memory turns said「我得翻翻看。稍等啊。」then done — no function_call, so no 2.5s wait, no bridging-during-wait, no faithfulness score. Interrupt: 2/3 runs stopped (speech_started 2556ms / 9550ms after U3 start; after-text「行，那我先不说话了。」); run 3 died on a flaky websocket. S5 skipped. Verdict: realtime as mouth/ears is plausible; ask_yishu as the brain hand-off is not viable on this model until it actually invokes the tool."
+    }
+  },
+  "s6_s8_run": {
+    "date": "2026-09-04",
+    "model_used": "stepaudio-2.5-realtime",
+    "voice": "linjiajiejie",
+    "endpoint": "wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime",
+    "tool_choice": {
+      "sessionToolChoice": "required",
+      "label": "session.required",
+      "attempts": [
+        {
+          "form": "session.required",
+          "ok": true
+        }
+      ]
+    },
+    "transcription": {
+      "extra": {
+        "input_audio_transcription": {
+          "model": "whisper-1"
+        }
+      },
+      "label": "input_audio_transcription.whisper-1",
+      "attempts": [
+        {
+          "form": "input_audio_transcription.whisper-1",
+          "ok": true
+        }
+      ]
+    },
+    "rows": [
+      {
+        "scenario": "S6-U2",
+        "run": 1,
+        "ask_yishu_called": false,
+        "question": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "我看看。",
+        "transcripts": [
+          {
+            "response_id": "37d31259-07a5-4c46-b01b-b9d805625838",
+            "item_id": "6e43c1de-9792-4c6b-ab92-6afa2b93de6f",
+            "transcript": "我看看。"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without ask_yishu",
+        "t_end_of_user_audio_mono_ms": 4851
+      },
+      {
+        "scenario": "S6-U2",
+        "run": 2,
+        "ask_yishu_called": false,
+        "question": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "我看看。",
+        "transcripts": [
+          {
+            "response_id": "290b9ea9-f929-474a-8838-484f2dff01cd",
+            "item_id": "c192335a-1d4e-4ee8-a38f-ac04fdc5fba2",
+            "transcript": "我看看。"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without ask_yishu",
+        "t_end_of_user_audio_mono_ms": 4867
+      },
+      {
+        "scenario": "S6-U2",
+        "run": 3,
+        "ask_yishu_called": false,
+        "question": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "我看看。",
+        "transcripts": [
+          {
+            "response_id": "af3048c2-5392-44d3-8a04-96a13e9c36da",
+            "item_id": "e47b7f5d-5327-45c5-b5f9-82418bcec9c6",
+            "transcript": "我看看。"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without ask_yishu",
+        "t_end_of_user_audio_mono_ms": 4864
+      },
+      {
+        "scenario": "S6-U4",
+        "run": 1,
+        "ask_yishu_called": false,
+        "question": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "你上周提过好几本呢，是哪一本？我帮你翻翻看。",
+        "transcripts": [
+          {
+            "response_id": "722ba40b-1e0d-491f-9c9f-4d5903184c7f",
+            "item_id": "bf664256-bba6-48d7-a5e8-dbcb39c83794",
+            "transcript": "你上周提过好几本呢，是哪一本？我帮你翻翻看。"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without ask_yishu",
+        "t_end_of_user_audio_mono_ms": 3456
+      },
+      {
+        "scenario": "S6-U4",
+        "run": 2,
+        "ask_yishu_called": false,
+        "question": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "你上周提过好几本呢，是哪一本？我帮你翻翻看。",
+        "transcripts": [
+          {
+            "response_id": "a0a2f41c-5d0d-4fc5-873e-3ad61c774a09",
+            "item_id": "3821aaf3-104a-4d08-892f-720ab1de57fc",
+            "transcript": "你上周提过好几本呢，是哪一本？我帮你翻翻看。"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without ask_yishu",
+        "t_end_of_user_audio_mono_ms": 3458
+      },
+      {
+        "scenario": "S6-U4",
+        "run": 3,
+        "ask_yishu_called": false,
+        "question": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "你上周跟我提过好几本书呢，是哪一本？",
+        "transcripts": [
+          {
+            "response_id": "01e8656f-0046-4b93-9867-96fcc2e6ecd8",
+            "item_id": "18ac4032-6391-4189-813d-9c0d9fc89169",
+            "transcript": "你上周跟我提过好几本书呢，是哪一本？"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without ask_yishu",
+        "t_end_of_user_audio_mono_ms": 3466
+      },
+      {
+        "scenario": "S7-U1",
+        "run": 1,
+        "utterance": "U1",
+        "canned": "你今天先早点休息。",
+        "ms_end_to_transcript": 384,
+        "user_transcript": "今天有点累，你说我该早点睡吗？",
+        "partial_during_speech": false,
+        "violation": true,
+        "tts_form": "user-prompt+response.create",
+        "ms_text_to_audio": 648,
+        "spoken": "你今天先早点休息。",
+        "edit_distance": 0,
+        "verbatim": true,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio_transcript.done",
+          "response.audio.delta",
+          "conversation.item.input_audio_transcription.completed",
+          "response.audio.done",
+          "response.content_part.done",
+          "response.output_item.done",
+          "response.done"
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 4538,
+        "output_audio_ms": 1680
+      },
+      {
+        "scenario": "S7-U1",
+        "run": 2,
+        "utterance": "U1",
+        "canned": "你今天先早点休息。",
+        "ms_end_to_transcript": 320,
+        "user_transcript": "今天有点累，你说我该早点睡吗？",
+        "partial_during_speech": false,
+        "violation": true,
+        "tts_form": "user-prompt+response.create",
+        "ms_text_to_audio": 606,
+        "spoken": "你今天先早点休息。",
+        "edit_distance": 0,
+        "verbatim": true,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio_transcript.done",
+          "response.audio.delta",
+          "conversation.item.input_audio_transcription.completed",
+          "response.audio.done",
+          "response.content_part.done",
+          "response.output_item.done",
+          "response.done"
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 4563,
+        "output_audio_ms": 1920
+      },
+      {
+        "scenario": "S7-U1",
+        "run": 3,
+        "utterance": "U1",
+        "canned": "你今天先早点休息。",
+        "ms_end_to_transcript": 454,
+        "user_transcript": "今天有点累，你说我该早点睡吗？",
+        "partial_during_speech": false,
+        "violation": true,
+        "tts_form": "user-prompt+response.create",
+        "ms_text_to_audio": 654,
+        "spoken": "你今天先早点休息。",
+        "edit_distance": 0,
+        "verbatim": true,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio_transcript.done",
+          "response.audio.delta",
+          "conversation.item.input_audio_transcription.completed",
+          "response.audio.done",
+          "response.content_part.done",
+          "response.output_item.done",
+          "response.done"
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 4551,
+        "output_audio_ms": 1400
+      },
+      {
+        "scenario": "S7-U2",
+        "run": 1,
+        "utterance": "U2",
+        "canned": "屏幕上是 Xcode 的签名错误，Signing & Capabilities 里 Team 没选。",
+        "ms_end_to_transcript": 366,
+        "user_transcript": "帮我看看屏幕上这个报错是什么意思？",
+        "partial_during_speech": false,
+        "violation": true,
+        "tts_form": "user-prompt+response.create",
+        "ms_text_to_audio": 711,
+        "spoken": "屏幕上是 Xcode 的签名错误，Signing & Capabilities 里 Team 没选。",
+        "edit_distance": 0,
+        "verbatim": true,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.audio_transcript.done",
+          "conversation.item.input_audio_transcription.completed",
+          "response.audio.done",
+          "response.content_part.done",
+          "response.output_item.done",
+          "response.done"
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 4848,
+        "output_audio_ms": 5160
+      },
+      {
+        "scenario": "S7-U2",
+        "run": 2,
+        "utterance": "U2",
+        "canned": "屏幕上是 Xcode 的签名错误，Signing & Capabilities 里 Team 没选。",
+        "ms_end_to_transcript": 279,
+        "user_transcript": "帮我看看屏幕上这个报错是什么意思？",
+        "partial_during_speech": false,
+        "violation": true,
+        "tts_form": "user-prompt+response.create",
+        "ms_text_to_audio": 873,
+        "spoken": "屏幕上是 Xcode 的签名错误，Signing & Capabilities 里 Team 没选。",
+        "edit_distance": 0,
+        "verbatim": true,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.audio_transcript.done",
+          "conversation.item.input_audio_transcription.completed",
+          "response.audio.done",
+          "response.content_part.done",
+          "response.output_item.done",
+          "response.done"
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 4908,
+        "output_audio_ms": 5080
+      },
+      {
+        "scenario": "S7-U2",
+        "run": 3,
+        "utterance": "U2",
+        "canned": "屏幕上是 Xcode 的签名错误，Signing & Capabilities 里 Team 没选。",
+        "ms_end_to_transcript": 421,
+        "user_transcript": "帮我看看屏幕上这个报错是什么意思？",
+        "partial_during_speech": false,
+        "violation": true,
+        "tts_form": "user-prompt+response.create",
+        "ms_text_to_audio": 775,
+        "spoken": "屏幕上是 Xcode 的签名错误，Signing & Capabilities 里 Team 没选。",
+        "edit_distance": 0,
+        "verbatim": true,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio_transcript.done",
+          "conversation.item.input_audio_transcription.completed",
+          "response.audio.done",
+          "response.content_part.done",
+          "response.output_item.done",
+          "response.done",
+          "response.audio.delta"
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 4921,
+        "output_audio_ms": 4760
+      },
+      {
+        "scenario": "S7-U4",
+        "run": 1,
+        "utterance": "U4",
+        "canned": "是《Her》的原著剧本集，你 8 月 28 日提过。",
+        "ms_end_to_transcript": null,
+        "user_transcript": "",
+        "partial_during_speech": false,
+        "violation": true,
+        "tts_form": "user-prompt+response.create",
+        "ms_text_to_audio": 688,
+        "spoken": "是《Her》的原著剧本集，你 8 月 28 日提过。",
+        "edit_distance": 0,
+        "verbatim": true,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio_transcript.done",
+          "response.audio.done",
+          "response.content_part.done",
+          "response.output_item.done",
+          "response.done",
+          "conversation.item.input_audio_transcription.completed",
+          "response.audio.delta"
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 3455,
+        "output_audio_ms": 3480
+      },
+      {
+        "scenario": "S7-U4",
+        "run": 2,
+        "utterance": "U4",
+        "canned": "是《Her》的原著剧本集，你 8 月 28 日提过。",
+        "ms_end_to_transcript": null,
+        "user_transcript": "",
+        "partial_during_speech": false,
+        "violation": true,
+        "tts_form": "user-prompt+response.create",
+        "ms_text_to_audio": 825,
+        "spoken": "是《Her》的原著剧本集，你 8 月 28 日提过。",
+        "edit_distance": 0,
+        "verbatim": true,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.content_part.done",
+          "response.output_item.done",
+          "response.done",
+          "conversation.item.input_audio_transcription.completed",
+          "response.audio.delta"
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 3466,
+        "output_audio_ms": 3600
+      },
+      {
+        "scenario": "S7-U4",
+        "run": 3,
+        "utterance": "U4",
+        "canned": "是《Her》的原著剧本集，你 8 月 28 日提过。",
+        "ms_end_to_transcript": null,
+        "user_transcript": "",
+        "partial_during_speech": false,
+        "violation": true,
+        "tts_form": "user-prompt+response.create",
+        "ms_text_to_audio": 762,
+        "spoken": "是《Her》的原著剧本集，你 8 月 28 日提过。",
+        "edit_distance": 0,
+        "verbatim": true,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio_transcript.done",
+          "response.audio.delta",
+          "response.audio.done",
+          "response.content_part.done",
+          "response.output_item.done",
+          "response.done",
+          "conversation.item.input_audio_transcription.completed"
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 3495,
+        "output_audio_ms": 3240
+      },
+      {
+        "scenario": "S8-default",
+        "run": 1,
+        "vad": {
+          "type": "server_vad"
+        },
+        "ms_u3_to_speech_started": 948,
+        "ms_u3_to_last_audio": 799,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 10035,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.content_part.done",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      },
+      {
+        "scenario": "S8-default",
+        "run": 2,
+        "vad": {
+          "type": "server_vad"
+        },
+        "ms_u3_to_speech_started": 945,
+        "ms_u3_to_last_audio": 813,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 10388,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.content_part.done",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      },
+      {
+        "scenario": "S8-default",
+        "run": 3,
+        "vad": {
+          "type": "server_vad"
+        },
+        "ms_u3_to_speech_started": 946,
+        "ms_u3_to_last_audio": 797,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 9986,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.content_part.done",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      },
+      {
+        "scenario": "S8-default",
+        "run": 4,
+        "vad": {
+          "type": "server_vad"
+        },
+        "ms_u3_to_speech_started": 941,
+        "ms_u3_to_last_audio": 847,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 10012,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.content_part.done",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      },
+      {
+        "scenario": "S8-default",
+        "run": 5,
+        "vad": {
+          "type": "server_vad"
+        },
+        "ms_u3_to_speech_started": 984,
+        "ms_u3_to_last_audio": 833,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 9960,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.content_part.done",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      },
+      {
+        "scenario": "S8-fast",
+        "run": 1,
+        "vad": {
+          "type": "server_vad",
+          "prefix_padding_ms": 200,
+          "silence_duration_ms": 80,
+          "energy_awakeness_threshold": 1200
+        },
+        "ms_u3_to_speech_started": 945,
+        "ms_u3_to_last_audio": 773,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 10091,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.content_part.done",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      },
+      {
+        "scenario": "S8-fast",
+        "run": 2,
+        "vad": {
+          "type": "server_vad",
+          "prefix_padding_ms": 200,
+          "silence_duration_ms": 80,
+          "energy_awakeness_threshold": 1200
+        },
+        "ms_u3_to_speech_started": 939,
+        "ms_u3_to_last_audio": 862,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 10114,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.content_part.done",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      },
+      {
+        "scenario": "S8-fast",
+        "run": 3,
+        "vad": {
+          "type": "server_vad",
+          "prefix_padding_ms": 200,
+          "silence_duration_ms": 80,
+          "energy_awakeness_threshold": 1200
+        },
+        "ms_u3_to_speech_started": 964,
+        "ms_u3_to_last_audio": 906,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 9955,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "input_audio_buffer.speech_started",
+          "response.content_part.done",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      },
+      {
+        "scenario": "S8-fast",
+        "run": 4,
+        "vad": {
+          "type": "server_vad",
+          "prefix_padding_ms": 200,
+          "silence_duration_ms": 80,
+          "energy_awakeness_threshold": 1200
+        },
+        "ms_u3_to_speech_started": 942,
+        "ms_u3_to_last_audio": 745,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 10007,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.content_part.done",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      },
+      {
+        "scenario": "S8-fast",
+        "run": 5,
+        "vad": {
+          "type": "server_vad",
+          "prefix_padding_ms": 200,
+          "silence_duration_ms": 80,
+          "energy_awakeness_threshold": 1200
+        },
+        "ms_u3_to_speech_started": 947,
+        "ms_u3_to_last_audio": 841,
+        "tts_form": "user-prompt+response.create",
+        "error": null,
+        "t_u3_start_mono_ms": 9952,
+        "event_types": [
+          "session.created",
+          "session.updated",
+          "conversation.item.created",
+          "response.created",
+          "response.output_item.added",
+          "response.audio.done",
+          "response.audio_transcript.done",
+          "response.output_item.done",
+          "response.done",
+          "response.content_part.added",
+          "response.audio_transcript.delta",
+          "response.audio.delta",
+          "response.content_part.done",
+          "input_audio_buffer.speech_started",
+          "input_audio_buffer.speech_stopped",
+          "input_audio_buffer.committed",
+          "conversation.item.input_audio_transcription.completed"
+        ]
+      }
+    ],
+    "aggregates": {
+      "s6_ask_yishu": "0/6",
+      "s7_transcript_p50_ms": 366,
+      "s7_text_to_audio_p50_ms": 711,
+      "s7_partials": false,
+      "s7_violations": 9,
+      "s7_edit_p50": 0,
+      "s8_speech_started_p50_ms": 945,
+      "s8_last_audio_p50_ms": 813,
+      "s8_best_speech_started_p50_ms": 945
+    },
+    "answers": {
+      "handoff": "tool_choice session.required accepted; ask_yishu fired 0/6. Still not reliable enough to be the brain gate.",
+      "transport": "transcript p50=366ms (partials no); text→audio p50=711ms; self-answer violations 9/9; median edit-distance 0. Weak as a pipe — too many self-answers or missing TTS.",
+      "interrupt": "U3→speech_started p50 default=946ms fast=945ms; U3→last-audio p50=813ms; best p50=945ms."
+    },
+    "caveats": [
+      "S6–S8 used Step Plan /step_plan/v1 and stepaudio-2.5-realtime only.",
+      "S8 U3 has a 60ms 700Hz onset prepended so VAD sees a loud start.",
+      "API VAD field is energy_awakeness_threshold (not threshold).",
+      "S1–S5 were not re-run."
+    ]
+  },
+  "en_novad_run": {
+    "date": "2026-09-04",
+    "label": "Step Plan run, English instructions, VAD off",
+    "endpoint": "wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime",
+    "model_used": "stepaudio-2.5-realtime",
+    "sample_rate": 24000,
+    "voice": "linjiajiejie",
+    "tools_format": "stepfun-nested",
+    "instructions_language": "en",
+    "turn_detection": null,
+    "push_to_talk": true,
+    "host": "api.stepfun.com",
+    "path": "/step_plan/v1",
+    "chunk_ms": 100,
+    "brain_delay_ms": 2500,
+    "stepfun_step_plan_key_length": 64,
+    "scenarios": {
+      "S1": {
+        "runs": [
+          {
+            "scenario": "S1",
+            "run": 1,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 2018,
+            "transcript": "我看看。",
+            "transcripts": [
+              {
+                "response_id": "f5f9986a-b16d-4c1c-b757-233693e62c7c",
+                "item_id": "a6704af7-2672-463f-9a3d-e42e4f2d1b83",
+                "transcript": "我看看。"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 6146,
+            "user_audio_ms": 4261,
+            "first_audio_response_id": "f5f9986a-b16d-4c1c-b757-233693e62c7c",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S1-1-out.wav",
+            "output_audio_ms": 1200,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            },
+            "fabricated": false
+          },
+          {
+            "scenario": "S1",
+            "run": 2,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1642,
+            "transcript": "我看看。",
+            "transcripts": [
+              {
+                "response_id": "7f062d06-da11-406c-8f71-77f371e88c1f",
+                "item_id": "8dde0c3e-5061-47f1-af26-0410f5694cb6",
+                "transcript": "我看看。"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 7126,
+            "user_audio_ms": 4261,
+            "first_audio_response_id": "7f062d06-da11-406c-8f71-77f371e88c1f",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S1-2-out.wav",
+            "output_audio_ms": 1200,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            },
+            "fabricated": false
+          },
+          {
+            "scenario": "S1",
+            "run": 3,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1313,
+            "transcript": "我看看。",
+            "transcripts": [
+              {
+                "response_id": "f92a00a7-c617-4a1b-92d7-6c82a359de09",
+                "item_id": "008e41b4-25cd-4539-a571-6fe4b6f71106",
+                "transcript": "我看看。"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 6005,
+            "user_audio_ms": 4261,
+            "first_audio_response_id": "f92a00a7-c617-4a1b-92d7-6c82a359de09",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S1-3-out.wav",
+            "output_audio_ms": 880,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            },
+            "fabricated": false
+          }
+        ],
+        "latency_p50_ms": 1642,
+        "latency_p95_ms": 2018,
+        "fn_p50_ms": null,
+        "output_to_audio_p50_ms": null,
+        "interrupt_stop_p50_ms": null,
+        "ask_yishu": [
+          false,
+          false,
+          false
+        ],
+        "bridging": [
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          }
+        ]
+      },
+      "S2": {
+        "runs": [
+          {
+            "scenario": "S2",
+            "run": 1,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "我看看。",
+            "transcripts": [
+              {
+                "response_id": "2e57e7ee-80ab-4625-bf97-c929c4e3d56f",
+                "item_id": "d7764497-cd0a-42dc-b36a-9c9cec8de3ea",
+                "transcript": "我看看。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 7894,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S2",
+            "run": 2,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "我看看。",
+            "transcripts": [
+              {
+                "response_id": "0329855f-8a05-4313-8b5b-0ccf9af87a57",
+                "item_id": "6a02de5b-7c73-4fdf-ae6b-de6a65e7e9b9",
+                "transcript": "我看看。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 6850,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S2",
+            "run": 3,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "我看看。",
+            "transcripts": [
+              {
+                "response_id": "7637b031-c6ed-4a15-93f4-9d20f6c573c6",
+                "item_id": "25f576fc-b748-44c8-a292-8fa3892c18e2",
+                "transcript": "我看看。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 6311,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          }
+        ],
+        "latency_p50_ms": null,
+        "latency_p95_ms": null,
+        "fn_p50_ms": null,
+        "output_to_audio_p50_ms": null,
+        "interrupt_stop_p50_ms": null,
+        "ask_yishu": [
+          false,
+          false,
+          false
+        ],
+        "bridging": [
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          }
+        ]
+      },
+      "S3": {
+        "runs": [
+          {
+            "scenario": "S3",
+            "run": 1,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "我看看。",
+            "transcripts": [
+              {
+                "response_id": "3e58f59a-a052-4819-a898-f10a1da7ba05",
+                "item_id": "518f85b4-e697-4ccc-a821-922018eb790e",
+                "transcript": "我看看。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 4784,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S3",
+            "run": 2,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "我看看。",
+            "transcripts": [
+              {
+                "response_id": "42369e1f-eb60-497f-b62f-6bf0deaf6121",
+                "item_id": "8b810153-c944-4062-b6a6-d3388e711e51",
+                "transcript": "我看看。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 5337,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S3",
+            "run": 3,
+            "ask_yishu_called": false,
+            "question": null,
+            "ms_end_to_fn": null,
+            "bridging": false,
+            "bridging_text": "",
+            "ms_output_to_audio": null,
+            "transcript": "我看看。",
+            "transcripts": [
+              {
+                "response_id": "b92aa7b2-1cd9-47e3-922a-33ed443f867d",
+                "item_id": "a5af410e-dd30-46be-8dd7-c44ed8306065",
+                "transcript": "我看看。"
+              }
+            ],
+            "faithful": null,
+            "error": "responded without ask_yishu",
+            "t_end_of_user_audio_mono_ms": 4939,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          }
+        ],
+        "latency_p50_ms": null,
+        "latency_p95_ms": null,
+        "fn_p50_ms": null,
+        "output_to_audio_p50_ms": null,
+        "interrupt_stop_p50_ms": null,
+        "ask_yishu": [
+          false,
+          false,
+          false
+        ],
+        "bridging": [
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          }
+        ]
+      },
+      "S4": {
+        "runs": [
+          {
+            "scenario": "S4",
+            "run": 1,
+            "method": "cancel",
+            "latency_ms": 1280,
+            "stopped": false,
+            "ms_action_to_last_audio": 654,
+            "ms_action_to_cancelled": null,
+            "transcript_before": "我看看。",
+            "transcript_after": "",
+            "error": "no ongoing response to cancel",
+            "t_action_mono_ms": 10555,
+            "audio_deltas_after_action": 4,
+            "ms_u3_to_last_audio": 654,
+            "ms_u3_to_cancelled": null,
+            "chinese": false,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": false,
+              "helpdesk": false,
+              "friend_like": false
+            }
+          },
+          {
+            "scenario": "S4",
+            "run": 2,
+            "method": "append",
+            "latency_ms": 1504,
+            "stopped": false,
+            "ms_action_to_last_audio": 99,
+            "ms_action_to_cancelled": null,
+            "transcript_before": "我看看。",
+            "transcript_after": "",
+            "error": null,
+            "t_action_mono_ms": 9638,
+            "audio_deltas_after_action": 2,
+            "ms_u3_to_last_audio": 99,
+            "ms_u3_to_cancelled": null,
+            "chinese": false,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": false,
+              "helpdesk": false,
+              "friend_like": false
+            }
+          },
+          {
+            "scenario": "S4",
+            "run": 3,
+            "method": "cancel",
+            "latency_ms": 1438,
+            "stopped": true,
+            "ms_action_to_last_audio": 439,
+            "ms_action_to_cancelled": 439,
+            "transcript_before": "累了吗？那确实该早点休息。不过，你今天是不是又在熬夜刷手机了？",
+            "transcript_after": "",
+            "error": null,
+            "t_action_mono_ms": 8195,
+            "cancel_type": "response.done",
+            "cancel_status": "incomplete",
+            "audio_deltas_after_action": 14,
+            "ms_u3_to_last_audio": 439,
+            "ms_u3_to_cancelled": 439,
+            "chinese": false,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": false,
+              "helpdesk": false,
+              "friend_like": false
+            }
+          }
+        ],
+        "latency_p50_ms": 1438,
+        "latency_p95_ms": 1504,
+        "fn_p50_ms": null,
+        "output_to_audio_p50_ms": null,
+        "interrupt_stop_p50_ms": 439,
+        "ask_yishu": [
+          false,
+          false,
+          false
+        ],
+        "bridging": [
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          }
+        ]
+      },
+      "S5": {
+        "runs": [
+          {
+            "scenario": "S5",
+            "run": 1,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1173,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "76417338-a5dd-452f-8ee6-2f44cf34ae4d",
+                "item_id": "5774979a-fc09-461c-ba9e-217858d95e2c",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 2760,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "76417338-a5dd-452f-8ee6-2f44cf34ae4d",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-1-out.wav",
+            "output_audio_ms": 1000,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S5",
+            "run": 2,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1622,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "ba93c1ae-0d6a-430a-a90c-ea6b6b97827f",
+                "item_id": "3c4f1cf0-464b-4777-af11-b402f47f118a",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 5702,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "ba93c1ae-0d6a-430a-a90c-ea6b6b97827f",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-2-out.wav",
+            "output_audio_ms": 840,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S5",
+            "run": 3,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1172,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "fccc0c48-fca7-4303-a8a0-757215ca70af",
+                "item_id": "9bf4421d-4fcd-414b-802f-717399ab894a",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 3289,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "fccc0c48-fca7-4303-a8a0-757215ca70af",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-3-out.wav",
+            "output_audio_ms": 760,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S5",
+            "run": 4,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1119,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "572f2c74-e683-4981-ba35-38ca31bde51f",
+                "item_id": "b20b31f0-d142-4d7f-afe3-2ccf294f2513",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 2622,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "572f2c74-e683-4981-ba35-38ca31bde51f",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-4-out.wav",
+            "output_audio_ms": 880,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S5",
+            "run": 5,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1100,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "b5a8a8ac-0a85-4f43-a80c-90f42ccd4b2c",
+                "item_id": "0a31929e-ec30-4f57-928b-e39a766a84b3",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 2619,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "b5a8a8ac-0a85-4f43-a80c-90f42ccd4b2c",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-5-out.wav",
+            "output_audio_ms": 1080,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S5",
+            "run": 6,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1243,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "7b43aaf1-5e3c-4bd7-af69-5bed4b5aef2e",
+                "item_id": "65f8c3f1-8ef0-4374-9954-228405529089",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 3952,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "7b43aaf1-5e3c-4bd7-af69-5bed4b5aef2e",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-6-out.wav",
+            "output_audio_ms": 1120,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S5",
+            "run": 7,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1967,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "05e7e678-9f05-4c89-8006-fec703b22bbf",
+                "item_id": "0ba3d0e5-9f30-4b5f-9b04-598a5de4e1e0",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 2530,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "05e7e678-9f05-4c89-8006-fec703b22bbf",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-7-out.wav",
+            "output_audio_ms": 640,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S5",
+            "run": 8,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1083,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "cc9d74ff-5a3c-4e74-981a-3926b4f8cee0",
+                "item_id": "ac12254a-0f3a-484c-8549-b3d069271fc4",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 2524,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "cc9d74ff-5a3c-4e74-981a-3926b4f8cee0",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-8-out.wav",
+            "output_audio_ms": 920,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S5",
+            "run": 9,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1094,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "5c36ed4e-2dc1-4588-bc38-78278af277dd",
+                "item_id": "00f0ebc6-604e-4287-993e-b46ed05030fc",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 2581,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "5c36ed4e-2dc1-4588-bc38-78278af277dd",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-9-out.wav",
+            "output_audio_ms": 880,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          },
+          {
+            "scenario": "S5",
+            "run": 10,
+            "ask_yishu_called": false,
+            "question": null,
+            "latency_ms": 1141,
+            "transcript": "怎么啦？",
+            "transcripts": [
+              {
+                "response_id": "b38b5163-105e-47f1-a1b3-21aa10f3071c",
+                "item_id": "c7506f93-0ae3-48f4-915f-37f9441657af",
+                "transcript": "怎么啦？"
+              }
+            ],
+            "error": null,
+            "t_end_of_user_audio_mono_ms": 2558,
+            "user_audio_ms": 1000,
+            "first_audio_response_id": "b38b5163-105e-47f1-a1b3-21aa10f3071c",
+            "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/en-S5-10-out.wav",
+            "output_audio_ms": 1000,
+            "chinese": true,
+            "english_leak": [],
+            "english_leak_yes": false,
+            "persona": {
+              "chinese": true,
+              "helpdesk": false,
+              "friend_like": true
+            }
+          }
+        ],
+        "latency_p50_ms": 1141,
+        "latency_p95_ms": 1967,
+        "fn_p50_ms": null,
+        "output_to_audio_p50_ms": null,
+        "interrupt_stop_p50_ms": null,
+        "ask_yishu": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false
+        ],
+        "bridging": [
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          },
+          {
+            "yes": false,
+            "text": "",
+            "during_wait": false
+          }
+        ]
+      }
+    },
+    "caveats": [
+      "English session.instructions; model required to speak Mandarin.",
+      "turn_detection omitted (VAD off). User audio: realtime stream → commit → response.create.",
+      "function_call_output sent only after function_call_arguments.done AND that response.done, then remaining 2.5s brain wait.",
+      "S4: response.cancel at +800ms after first audio (runs 1,3); append-only barge-in (run 2). No server_vad.",
+      "S5 always ran (10× 嗯？). S1–S5 of prior CN+VAD and S6–S8 were not re-run.",
+      "User audio is MiniMax TTS, not a live mic."
+    ],
+    "recommendation": {
+      "verdict": "still not viable as mouth/ears + ask_yishu brain",
+      "p50_first_audio_ms": 1141,
+      "risks": [
+        "hand-off misses S2 0/3 S3 0/3",
+        "response.cancel stopped 1/2",
+        "append-during-playback alone does not stop playback",
+        "S1 first-audio p50 > 1.5s"
+      ],
+      "paragraph": "Realtime-as-voice-I/O + ask_yishu: still not viable as mouth/ears + ask_yishu brain. S1 no-tool 3/3 Chinese, first-audio p50=1642ms, fabricated 0/3. S2 ask_yishu 0/3 faithful+CN 0/3; S3 0/3 faithful+CN 0/3; brain→audio p50 S2=n/a S3=n/a. S4 cancel stop 1/2 last-audio p50=439ms; append-alone stop 0/1. S5 嗯？ p50=1141ms. English leak 0. Help-desk 0. Remaining risks: hand-off misses S2 0/3 S3 0/3; response.cancel stopped 1/2; append-during-playback alone does not stop playback; S1 first-audio p50 > 1.5s."
+    }
+  },
+  "concrete_tools_run": {
+    "date": "2026-09-04",
+    "label": "concrete tools",
+    "endpoint": "wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime",
+    "model_used": "stepaudio-2.5-realtime",
+    "voice": "linjiajiejie",
+    "tools": [
+      "look_at_screen",
+      "recall_memory"
+    ],
+    "instructions_language": "en",
+    "turn_detection": null,
+    "push_to_talk": true,
+    "rows": [
+      {
+        "scenario": "U1",
+        "run": 1,
+        "ask_yishu_called": false,
+        "tool_called": false,
+        "tool_name": null,
+        "question": null,
+        "latency_ms": 1740,
+        "transcript": "累的话确实该早点休息，身体最重要。不过你要是想先刷会儿手机再睡，也行，只要别熬太晚就好。",
+        "transcripts": [
+          {
+            "response_id": "b4aff0f9-b02d-43f1-911b-c518cc83b08a",
+            "item_id": "4ca75905-3c10-4eee-9ae7-6355bb40aaa1",
+            "transcript": "累的话确实该早点休息，身体最重要。不过你要是想先刷会儿手机再睡，也行，只要别熬太晚就好。"
+          }
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 6130,
+        "user_audio_ms": 4261,
+        "first_audio_response_id": "b4aff0f9-b02d-43f1-911b-c518cc83b08a",
+        "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/ct-U1-1-out.wav",
+        "output_audio_ms": 8320,
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      },
+      {
+        "scenario": "U1",
+        "run": 2,
+        "ask_yishu_called": false,
+        "tool_called": false,
+        "tool_name": null,
+        "question": null,
+        "latency_ms": 1321,
+        "transcript": "累的话确实该早点休息，身体最重要。不过你要是想先刷会儿手机再睡，也行，只要别熬太晚就好。",
+        "transcripts": [
+          {
+            "response_id": "09206701-3afd-4f20-a228-80bbd95c4491",
+            "item_id": "f5a83045-4218-4b13-b609-b50b316404c5",
+            "transcript": "累的话确实该早点休息，身体最重要。不过你要是想先刷会儿手机再睡，也行，只要别熬太晚就好。"
+          }
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 7003,
+        "user_audio_ms": 4261,
+        "first_audio_response_id": "09206701-3afd-4f20-a228-80bbd95c4491",
+        "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/ct-U1-2-out.wav",
+        "output_audio_ms": 8320,
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      },
+      {
+        "scenario": "U1",
+        "run": 3,
+        "ask_yishu_called": false,
+        "tool_called": false,
+        "tool_name": null,
+        "question": null,
+        "latency_ms": 1738,
+        "transcript": "累的话确实该早点休息，身体最重要。不过你要是还没忙完手头的事，也别太勉强自己，稍微放松一下再睡也行。",
+        "transcripts": [
+          {
+            "response_id": "d14f3aed-ac69-466c-a3b5-a94f1bc75312",
+            "item_id": "0f428bb4-8f94-40a5-b046-53011ce57688",
+            "transcript": "累的话确实该早点休息，身体最重要。不过你要是还没忙完手头的事，也别太勉强自己，稍微放松一下再睡也行。"
+          }
+        ],
+        "error": null,
+        "t_end_of_user_audio_mono_ms": 7915,
+        "user_audio_ms": 4261,
+        "first_audio_response_id": "d14f3aed-ac69-466c-a3b5-a94f1bc75312",
+        "output_wav": "/Users/mahaoxuan/Documents/我的agent/.work/voice-experiments/duplex/ct-U1-3-out.wav",
+        "output_audio_ms": 8880,
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      },
+      {
+        "scenario": "U2",
+        "run": 1,
+        "ask_yishu_called": false,
+        "question": null,
+        "tool_called": false,
+        "tool_name": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "好嘞，我这就看看。",
+        "transcripts": [
+          {
+            "response_id": "30e3965d-05e2-4c43-9f87-df50d7fc7fa4",
+            "item_id": "12f428c4-77b8-4fc1-a0fd-d50684402fa3",
+            "transcript": "好嘞，我这就看看。"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without tool",
+        "t_end_of_user_audio_mono_ms": 6399,
+        "input": "audio",
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      },
+      {
+        "scenario": "U2",
+        "run": 2,
+        "ask_yishu_called": false,
+        "question": null,
+        "tool_called": false,
+        "tool_name": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "好嘞，我这就看看。",
+        "transcripts": [
+          {
+            "response_id": "fbea19b7-0af5-4662-95f3-fae03d4d953c",
+            "item_id": "5a4b9b67-5bba-4c29-a35c-5c7b803f5d99",
+            "transcript": "好嘞，我这就看看。"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without tool",
+        "t_end_of_user_audio_mono_ms": 8464,
+        "input": "audio",
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      },
+      {
+        "scenario": "U2",
+        "run": 3,
+        "ask_yishu_called": false,
+        "question": null,
+        "tool_called": false,
+        "tool_name": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "好嘞，我这就看看。",
+        "transcripts": [
+          {
+            "response_id": "526b484c-f114-4edb-926c-6f493fb5ee32",
+            "item_id": "3dceea35-b554-43ab-8c4c-70a8486b2bea",
+            "transcript": "好嘞，我这就看看。"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without tool",
+        "t_end_of_user_audio_mono_ms": 6313,
+        "input": "audio",
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      },
+      {
+        "scenario": "U4",
+        "run": 1,
+        "ask_yishu_called": false,
+        "question": null,
+        "tool_called": false,
+        "tool_name": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "我看看啊...上周你提的书还挺多的，是那本讲人工智能的《生命3.0》，还是那本关于理财的《小狗钱钱》？",
+        "transcripts": [
+          {
+            "response_id": "cfcfa76d-a455-4503-aaf1-01b653e3cf6e",
+            "item_id": "da4efe04-2e04-4f75-9233-0f650e01bca6",
+            "transcript": "我看看啊...上周你提的书还挺多的，是那本讲人工智能的《生命3.0》，还是那本关于理财的《小狗钱钱》？"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without tool",
+        "t_end_of_user_audio_mono_ms": 5166,
+        "input": "audio",
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      },
+      {
+        "scenario": "U4",
+        "run": 2,
+        "ask_yishu_called": false,
+        "question": null,
+        "tool_called": false,
+        "tool_name": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "我看看啊...上周你提的书还挺多的，是那本讲人工智能的《生命3.0》，还是那本关于理财的《小狗钱钱》？",
+        "transcripts": [
+          {
+            "response_id": "8ed0b9cb-2394-45a8-a83f-1852cc7eb2bb",
+            "item_id": "a502b6a8-b9ae-4eaf-a29e-0f0015c2e3a3",
+            "transcript": "我看看啊...上周你提的书还挺多的，是那本讲人工智能的《生命3.0》，还是那本关于理财的《小狗钱钱》？"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without tool",
+        "t_end_of_user_audio_mono_ms": 4932,
+        "input": "audio",
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      },
+      {
+        "scenario": "U4",
+        "run": 3,
+        "ask_yishu_called": false,
+        "question": null,
+        "tool_called": false,
+        "tool_name": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "我看看啊...上周你提的书还挺多的，是那本讲人工智能的《生命3.0》，还是那本关于理财的《小狗钱钱》？",
+        "transcripts": [
+          {
+            "response_id": "f9422a57-9189-4db7-a9b4-3510976a3682",
+            "item_id": "313192c8-9524-4711-94dc-f24ec2bfd456",
+            "transcript": "我看看啊...上周你提的书还挺多的，是那本讲人工智能的《生命3.0》，还是那本关于理财的《小狗钱钱》？"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without tool",
+        "t_end_of_user_audio_mono_ms": 5022,
+        "input": "audio",
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      },
+      {
+        "scenario": "U2-text",
+        "run": 1,
+        "ask_yishu_called": false,
+        "question": null,
+        "tool_called": false,
+        "tool_name": null,
+        "ms_end_to_fn": null,
+        "bridging": false,
+        "bridging_text": "",
+        "ms_output_to_audio": null,
+        "transcript": "好的，我这就看看。",
+        "transcripts": [
+          {
+            "response_id": "27715a62-62fe-42dc-adde-aa1301f60fb3",
+            "item_id": "a506952f-af8a-4f20-ae9c-0636acc52bf4",
+            "transcript": "好的，我这就看看。"
+          }
+        ],
+        "faithful": null,
+        "error": "responded without tool",
+        "t_end_of_user_audio_mono_ms": 1777,
+        "input": "text",
+        "chinese": true,
+        "english_leak": [],
+        "english_leak_yes": false,
+        "persona": {
+          "chinese": true,
+          "helpdesk": false,
+          "friend_like": true
+        }
+      }
+    ],
+    "verdict": "Hypothesis rejected for this product pair: look_at_screen/recall_memory also did not fire on audio (0/6) or text (0/1). Not just ask_yishu naming. parrot-我看 3. Bridging/faithfulness only where a tool fired. Remaining: concrete names do not by themselves unlock the 实时对话 hand-off.",
+    "caveats": [
+      "No wait-phrase example in instructions.",
+      "S5 skipped. Prior CN/EN/S6–S8 runs not re-run.",
+      "U2-text is input_text control on the same session config."
+    ]
+  }
+}

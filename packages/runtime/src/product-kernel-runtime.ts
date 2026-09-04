@@ -141,7 +141,14 @@ import {
   verifiedSkillL1Description,
 } from "./product-kernel-runtime.helpers.js";
 import type { TurnLedgerState } from "./product-kernel-runtime.helpers.js";
-
+import { resolveRecallBudgetMs, withRecallBudget } from "./everos-sidecar.js";
+import { restrictCommandScreenshots } from "./prompt-images.js";
+import {
+  beginRuntimeTiming,
+  endRuntimeTiming,
+  runtimeTimingFor,
+} from "./observability/runtime-timing.js";
+import type { QualityRecorder } from "./observability/quality-recorder.js";
 type TerminalKind = "completed" | "cancelled" | "failed";
 
 /** Debounce between a turn settle and the async extraction drain (ADR 0016). */
@@ -395,6 +402,7 @@ export class ProductKernelRuntime implements AgentRuntime {
   readonly automations: FileAutomationStore;
   private readonly automationScheduler: AutomationScheduler;
   private automationEmit: ((event: RuntimeEvent) => void) | undefined;
+  private readonly qualityRecorder: QualityRecorder | undefined;
 
   /** Forward the optional auth capability without making the kernel own OAuth. */
   get authService(): YishuAuthService | undefined {
@@ -412,9 +420,11 @@ export class ProductKernelRuntime implements AgentRuntime {
       everosIdleMs?: number;
       everosPendingStore?: EverOSPendingSessionStore;
       routinesDir?: string;
+      qualityRecorder?: QualityRecorder;
     } = {},
   ) {
     this.kernel = kernel;
+    this.qualityRecorder = options.qualityRecorder;
     this.browserSessions = new BrowserSessionHub(openStagehandDriver);
     this.speechExcerptModel = options.speechExcerptModel;
     this.everos = options.everos;
@@ -525,6 +535,24 @@ export class ProductKernelRuntime implements AgentRuntime {
       void this.drainExtraction().catch(() => undefined);
     }
     this.visibleReady = this.hydrateVisibleMemory().catch(() => undefined);
+  }
+
+  private recordQuality(
+    name: "runtime.turn_received" | "recall.done",
+    requestId: string,
+    traceId: string,
+    sessionId: string,
+    extra?: { durationMs?: number; recallSource?: string },
+  ): void {
+    void this.qualityRecorder?.record({
+      name,
+      sessionId,
+      requestId,
+      traceId,
+      occurredAt: new Date().toISOString(),
+      ...(extra?.durationMs === undefined ? {} : { durationMs: extra.durationMs }),
+      attributes: extra?.recallSource === undefined ? {} : { recallSource: extra.recallSource },
+    }).catch(() => undefined);
   }
 
   private scheduleExtractionDrain(): void {
@@ -1289,7 +1317,9 @@ export class ProductKernelRuntime implements AgentRuntime {
   }
 
   async startTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    const timing = beginRuntimeTiming(command.requestId);
     const conversationId = command.payload.conversationId ?? command.requestId;
+    this.recordQuality("runtime.turn_received", command.requestId, command.traceId, conversationId);
     const pendingTrace = this.pendingStartTraceByRequestId.get(command.requestId);
     if (pendingTrace !== undefined) {
       if (pendingTrace === command.traceId) return;
@@ -1304,7 +1334,10 @@ export class ProductKernelRuntime implements AgentRuntime {
     let state: TurnLedgerState | undefined;
     let operation: Promise<void> | undefined;
     try {
-      releaseAdmission = await this.acquireConversationAdmission(conversationId);
+      releaseAdmission = await timing.track(
+        "admission",
+        this.acquireConversationAdmission(conversationId),
+      );
       if (this.disposed) {
         emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
           code: "runtime_disposed",
@@ -1337,14 +1370,17 @@ export class ProductKernelRuntime implements AgentRuntime {
         previous.supersedeRequested = true;
         this.releaseInnerConversationSession(previous.conversationId);
         this.conversationModelKeys.delete(previous.conversationId.toLowerCase());
-        await settlesWithin(this.cancelTurn({
-          schemaVersion: command.schemaVersion,
-          type: "turn.cancel",
-          requestId: previous.command.requestId,
-          traceId: previous.traceId,
-          sentAt: new Date().toISOString(),
-          payload: { reason: "turn_superseded" },
-        }, () => undefined), CONVERSATION_SUPERSEDE_TIMEOUT_MS);
+        await timing.track(
+          "supersede",
+          settlesWithin(this.cancelTurn({
+            schemaVersion: command.schemaVersion,
+            type: "turn.cancel",
+            requestId: previous.command.requestId,
+            traceId: previous.traceId,
+            sentAt: new Date().toISOString(),
+            payload: { reason: "turn_superseded" },
+          }, () => undefined), CONVERSATION_SUPERSEDE_TIMEOUT_MS),
+        );
       }
 
       this.activateTrailScope(sessionScope);
@@ -1399,13 +1435,17 @@ export class ProductKernelRuntime implements AgentRuntime {
       releaseAdmission?.();
     }
 
-    if (state === undefined || operation === undefined) return;
+    if (state === undefined || operation === undefined) {
+      endRuntimeTiming(command.requestId);
+      return;
+    }
     try {
       await operation;
     } finally {
       this.activeTurnOperations.delete(operation);
       this.activeRequestIds.delete(command.requestId);
       this.activeTurns.delete(command.requestId);
+      endRuntimeTiming(command.requestId);
     }
   }
 
@@ -1436,11 +1476,13 @@ export class ProductKernelRuntime implements AgentRuntime {
 
     if (state.durable) {
       try {
-        await this.recoveryReady;
-        await this.reconcileClaimedDeliveries(false);
+        const timing = runtimeTimingFor(state.command.requestId);
+        await (timing?.track("recovery", this.recoveryReady) ?? this.recoveryReady);
+        await (timing?.track("reconcileDeliveries", this.reconcileClaimedDeliveries(false))
+          ?? this.reconcileClaimedDeliveries(false));
         const preparation = this.prepareTurn(state);
         state.preparePromise = preparation;
-        const replay = await preparation;
+        const replay = await (timing?.track("prepareTurn", preparation) ?? preparation);
         if (replay === "replayed" || replay === "recovery_required" || replay === "conflict") {
           return;
         }
@@ -1640,43 +1682,55 @@ export class ProductKernelRuntime implements AgentRuntime {
       // Ordinary turns: small scoped MemoryClaim recall only. Private / failed
       // retrieval never pretends a memory was used. The engine later prepends
       // the cached block via assembleTurnMemory (ADR 0015 PR-2).
-      const recalled = await this.recallForOrdinaryTurn(state);
-      state.recalledMemories = recalled;
+      // Recall, history, mind, rules, and delegated inbox are independent.
+      const timing = runtimeTimingFor(state.command.requestId);
+      const recallStartedAt = Date.now();
+      const [recalled, mindLessons, conversationHistory, behaviorRules, delegatedResults] =
+        await Promise.all([
+          timing?.track("recall", this.recallForOrdinaryTurn(state))
+            ?? this.recallForOrdinaryTurn(state),
+          timing?.track("mind", this.recallMindForOrdinaryTurn(state))
+            ?? this.recallMindForOrdinaryTurn(state),
+          timing?.track("history", this.conversationHistoryForOrdinaryTurn(state))
+            ?? this.conversationHistoryForOrdinaryTurn(state),
+          timing?.track("behaviorRules", this.behaviorRulesForOrdinaryTurn(state))
+            ?? this.behaviorRulesForOrdinaryTurn(state),
+          timing?.track("delegatedInbox", this.delegatedResultsForOrdinaryTurn(state))
+            ?? this.delegatedResultsForOrdinaryTurn(state),
+        ]);
+      state.recalledMemories = recalled.memories;
+      state.recallSource = recalled.source;
+      state.recallMs = recalled.durationMs ?? Date.now() - recallStartedAt;
+      timing?.mark("recall.done", { source: recalled.source, durationMs: state.recallMs });
+      timing?.mark("history.done");
+      this.recordQuality(
+        "recall.done",
+        state.command.requestId,
+        state.traceId,
+        state.conversationId,
+        { durationMs: state.recallMs, recallSource: recalled.source },
+      );
       if (state.terminalKind) {
         await this.settleState(state);
         return;
       }
-      if (recalled.length > 0) {
-        this.emitMemoryUsed(state, recalled);
-      }
-      // Learned Mind lessons close the loop: bounded, private-safe, and any
-      // retrieval failure degrades to no lessons rather than breaking the turn.
-      const mindLessons = await this.recallMindForOrdinaryTurn(state);
-      if (state.terminalKind) {
-        await this.settleState(state);
-        return;
-      }
-      const conversationHistory = await this.conversationHistoryForOrdinaryTurn(state);
-      if (state.terminalKind) {
-        await this.settleState(state);
-        return;
-      }
-      const behaviorRules = await this.behaviorRulesForOrdinaryTurn(state);
-      if (state.terminalKind) {
-        await this.settleState(state);
-        return;
+      if (recalled.memories.length > 0) {
+        this.emitMemoryUsed(state, recalled.memories);
       }
       const recentTrail = this.recentTrailForOrdinaryTurn(state);
-      // Delegated child results re-enter the Main conversation here: one-shot,
-      // payload-only, and never into private sessions.
-      const delegatedResults = await this.delegatedResultsForOrdinaryTurn(state);
-      let commandForInner: TurnStartCommand = pageNoteCommandForInner(state.command);
+      let commandForInner: TurnStartCommand = attachTurnIntentFrame(
+        pageNoteCommandForInner(state.command),
+        state.intent,
+      );
+      commandForInner = restrictCommandScreenshots(
+        commandForInner,
+        state.modelRouting?.resolvedRoute,
+      );
       commandForInner = attachConversationHistory(commandForInner, conversationHistory);
       commandForInner = attachBehaviorRules(commandForInner, behaviorRules);
       commandForInner = attachRecalledMind(commandForInner, mindLessons);
       commandForInner = attachDelegatedResults(commandForInner, delegatedResults);
       commandForInner = attachRecentTrail(commandForInner, recentTrail);
-      commandForInner = attachTurnIntentFrame(commandForInner, state.intent);
       commandForInner = attachTaskExecutionContract(commandForInner, state.contract!);
       // Mark started before the last terminal check so a concurrent cancelTurn
       // will invoke inner.cancelTurn and unblock a gated startTurn.
@@ -3565,10 +3619,14 @@ export class ProductKernelRuntime implements AgentRuntime {
    */
   private async recallForOrdinaryTurn(
     state: TurnLedgerState,
-  ): Promise<RecalledMemory[]> {
-    if (state.sessionScope.kind === "private") return [];
+  ): Promise<{
+    memories: RecalledMemory[];
+    source: "visible_only" | "everos" | "none";
+    durationMs?: number;
+  }> {
+    if (state.sessionScope.kind === "private") return { memories: [], source: "none" };
     const scope = memoryScopeForSession(state.sessionScope);
-    if (scope === null) return [];
+    if (scope === null) return { memories: [], source: "none" };
     const merged: RecalledMemory[] = [];
     const seen = new Set<string>();
     const pushAll = (rows: readonly RecalledMemory[]): void => {
@@ -3611,26 +3669,33 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
     }
 
-    if (!derivedRecallAllowed) return merged;
+    if (!derivedRecallAllowed) {
+      return { memories: merged, source: visibleUsed ? "visible_only" : "none" };
+    }
 
     const acceptedDerived = (rows: readonly RecalledMemory[]): RecalledMemory[] =>
       acceptScopedDerivedMemories(rows, scope, authority);
 
     if (this.everos !== undefined) {
-      try {
-        pushAll(acceptedDerived(await this.everos.profile({ scopeKey: scope })));
-      } catch {
-        // Derived profile facts are optional; a miss must not skip other memory.
+      const budgetMs = resolveRecallBudgetMs();
+      const everosStartedAt = Date.now();
+      const everosHits = await withRecallBudget((async () => {
+        const [profileRows, searchRows] = await Promise.all([
+          this.everos!.profile({ scopeKey: scope }).catch(() => [] as RecalledMemory[]),
+          this.everos!.search({
+            scopeKey: scope,
+            query: state.command.payload.utterance,
+          }).catch(() => [] as RecalledMemory[]),
+        ]);
+        return { profileRows, searchRows };
+      })(), budgetMs);
+      const durationMs = Date.now() - everosStartedAt;
+      if (everosHits !== undefined) {
+        pushAll(acceptedDerived(everosHits.profileRows));
+        pushAll(acceptedDerived(everosHits.searchRows));
+        return { memories: merged, source: "everos", durationMs };
       }
-      try {
-        pushAll(acceptedDerived(await this.everos.search({
-          scopeKey: scope,
-          query: state.command.payload.utterance,
-        })));
-        return merged;
-      } catch {
-        // Fall through to the store index if EverOS is down.
-      }
+      return { memories: merged, source: "visible_only", durationMs };
     }
 
     if (!visibleUsed) {
@@ -3640,10 +3705,10 @@ export class ProductKernelRuntime implements AgentRuntime {
           { scope },
         ));
       } catch {
-        return merged;
+        return { memories: merged, source: merged.length > 0 ? "visible_only" : "none" };
       }
     }
-    return merged;
+    return { memories: merged, source: visibleUsed || merged.length > 0 ? "visible_only" : "none" };
   }
 
   /**

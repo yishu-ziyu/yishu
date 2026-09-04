@@ -108,6 +108,8 @@ export interface TurnLedgerState {
   productAction?: string;
   /** Scoped recall for this turn; engine assembleTurnMemory reads this cache. */
   recalledMemories?: RecalledMemory[];
+  recallSource?: "visible_only" | "everos" | "none";
+  recallMs?: number;
 }
 /**
  * L1 catalog description for a verified skill (ADR 0015): trigger phrase
@@ -260,6 +262,7 @@ const SAFE_RUNTIME_STATUSES = new Set([
   "running",
   "steering_received",
   "trajectory_summary",
+  "model.request_sent",
 ]);
 
 const SAFE_FAILURE_CODES = new Set([
@@ -317,6 +320,11 @@ export function sanitizeClientEvent(event: RuntimeEvent): RuntimeEvent | undefin
         "provider",
         "model",
         "generation",
+        "baseUrl",
+        "receivedAt",
+        "chatExit",
+        "recallSource",
+        "recallMs",
       ]));
     case "turn.interrupt.accepted": {
       const interruptedGeneration = safeGeneration(payload.interruptedGeneration);
@@ -337,6 +345,8 @@ export function sanitizeClientEvent(event: RuntimeEvent): RuntimeEvent | undefin
       return withClientPayload(event, {
         ...safeVisibleTextPayload(payload.text),
         ...(generation === undefined ? {} : { generation }),
+        ...(payload.firstByte === true ? { firstByte: true } : {}),
+        ...(payload.phase === "model.first_byte" ? { phase: "model.first_byte" } : {}),
       });
     }
     case "response.completed": {
@@ -347,6 +357,8 @@ export function sanitizeClientEvent(event: RuntimeEvent): RuntimeEvent | undefin
         verified: payload.verified === true,
         ...(payload.replayed === true ? { replayed: true } : {}),
         ...(generation === undefined ? {} : { generation }),
+        ...(payload.phase === "model.done" ? { phase: "model.done" } : {}),
+        ...(typeof payload.modelDoneAt === "string" ? { modelDoneAt: payload.modelDoneAt } : {}),
       });
     }
     case "tool.started":
@@ -394,9 +406,33 @@ export function sanitizeClientEvent(event: RuntimeEvent): RuntimeEvent | undefin
         ...(generation === undefined ? {} : { generation }),
       });
       }
+    case "models.probed":
+      return withClientPayload(event, safeModelsProbedPayload(payload));
     default:
       return undefined;
   }
+}
+
+function safeModelsProbedPayload(payload: Record<string, unknown>): ClientEventPayload {
+  const models = Array.isArray(payload.models) ? payload.models : [];
+  const probed = Array.isArray(payload.probed) ? payload.probed : [];
+  const result: ClientEventPayload = {
+    reachableCount: models.length,
+    probedCount: probed.length,
+  };
+  const rows = probed.slice(0, 8);
+  for (let i = 0; i < rows.length; i += 1) {
+    const n = i + 1;
+    const row = asRecord(rows[i]);
+    const id = safeMetadata(row.id);
+    if (id !== undefined) result[`id${n}`] = id;
+    const name = safeMetadata(row.name);
+    if (name !== undefined) result[`name${n}`] = name;
+    const host = safeMetadata(row.baseUrlHost);
+    if (host !== undefined) result[`host${n}`] = host;
+    if (typeof row.reachable === "boolean") result[`reachable${n}`] = row.reachable;
+  }
+  return result;
 }
 
 /**
@@ -624,6 +660,13 @@ function safeRuntimeStatusPayload(payload: Record<string, unknown>): ClientEvent
   if (Array.isArray(payload.toolsUsed)) {
     result.toolsUsedCount = Math.min(payload.toolsUsed.length, 1000);
   }
+  if (typeof payload.imageCount === "number" && Number.isFinite(payload.imageCount)) {
+    result.imageCount = payload.imageCount;
+  }
+  if (typeof payload.imageBytes === "number" && Number.isFinite(payload.imageBytes)) {
+    result.imageBytes = payload.imageBytes;
+  }
+  if (payload.phase === "model.request_sent") result.phase = "model.request_sent";
   return result;
 }
 
@@ -826,6 +869,11 @@ export function projectionFor(event: RuntimeEvent): {
           "provider",
           "model",
           "generation",
+          "baseUrl",
+          "receivedAt",
+          "chatExit",
+          "recallSource",
+          "recallMs",
         ]),
       };
     case "tool.started":
@@ -902,6 +950,10 @@ export function enrichEvent(event: RuntimeEvent, state: TurnLedgerState): Runtim
     trustedPayload.resolvedRoute = routing.resolvedRoute;
     trustedPayload.provider = routing.preference.provider;
     trustedPayload.model = routing.preference.model;
+  }
+  if (event.type === "turn.started") {
+    if (state.recallSource !== undefined) trustedPayload.recallSource = state.recallSource;
+    if (state.recallMs !== undefined) trustedPayload.recallMs = state.recallMs;
   }
   trustedPayload.generation = generation;
 

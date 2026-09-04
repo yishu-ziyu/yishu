@@ -29,44 +29,53 @@ protocol BuddyTranscriptionProvider {
 }
 
 enum BuddyTranscriptionProviderFactory {
-    private enum PreferredProvider: String {
-        case stepfun = "stepfun"
-        case assemblyAI = "assemblyai"
-        case openAI = "openai"
+    /// Info.plist `stepfun`, missing, and unknown values all select Step Plan.
+    /// Rollback: `VoiceTranscriptionProvider=stepfun-legacy`.
+    static func resolveProvider(
+        preferredRawValue: String? = AppBundleConfiguration
+            .stringValue(forKey: "VoiceTranscriptionProvider")
+    ) -> any BuddyTranscriptionProvider {
+        let raw = preferredRawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch raw {
+        case "stepfun-legacy":
+            return StepFunTranscriptionProvider()
+        case "assemblyai":
+            let assemblyAIProvider = AssemblyAIStreamingTranscriptionProvider()
+            if assemblyAIProvider.isConfigured {
+                return assemblyAIProvider
+            }
+            return StepPlanTranscriptionProvider()
+        case "openai":
+            let openAIProvider = OpenAIAudioTranscriptionProvider()
+            if openAIProvider.isConfigured {
+                return openAIProvider
+            }
+            return StepPlanTranscriptionProvider()
+        default:
+            return StepPlanTranscriptionProvider()
+        }
+    }
+
+    static func providerId(for provider: any BuddyTranscriptionProvider) -> String {
+        switch provider {
+        case is StepPlanTranscriptionProvider:
+            return "stepplan"
+        case is StepFunTranscriptionProvider:
+            return "stepfun-legacy"
+        case is AssemblyAIStreamingTranscriptionProvider:
+            return "assemblyai"
+        case is OpenAIAudioTranscriptionProvider:
+            return "openai"
+        default:
+            return "stepplan"
+        }
     }
 
     static func makeDefaultProvider() -> any BuddyTranscriptionProvider {
         let provider = resolveProvider()
         print("🎙️ Transcription: using \(provider.displayName)")
         return provider
-    }
-
-    private static func resolveProvider() -> any BuddyTranscriptionProvider {
-        let preferredProviderRawValue = AppBundleConfiguration
-            .stringValue(forKey: "VoiceTranscriptionProvider")?
-            .lowercased()
-        let preferredProvider = preferredProviderRawValue.flatMap(PreferredProvider.init(rawValue:))
-            ?? .stepfun
-
-        let stepFunProvider = StepFunTranscriptionProvider()
-        let assemblyAIProvider = AssemblyAIStreamingTranscriptionProvider()
-        let openAIProvider = OpenAIAudioTranscriptionProvider()
-
-        switch preferredProvider {
-        case .stepfun:
-            return stepFunProvider
-        case .assemblyAI:
-            if assemblyAIProvider.isConfigured {
-                return assemblyAIProvider
-            }
-            print("⚠️ Transcription: AssemblyAI preferred but not configured, falling back to StepFun")
-            return stepFunProvider
-        case .openAI:
-            if openAIProvider.isConfigured {
-                return openAIProvider
-            }
-            print("⚠️ Transcription: OpenAI preferred but not configured, falling back to StepFun")
-            return stepFunProvider
-        }
     }
 }

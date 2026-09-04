@@ -100,7 +100,7 @@ describe("MemoryLedger", () => {
     }
   });
 
-  it("forgets the truth fact before reopen/hydrate can resurrect it", async () => {
+  it("forgets the visible fact so reopen/hydrate cannot resurrect it", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "yishu-memory-ledger-truth-"));
     const memoryDir = path.join(dir, "memory");
     try {
@@ -115,22 +115,23 @@ describe("MemoryLedger", () => {
       });
       assert.equal(remembered.status, "verified");
       const claim = remembered.output as { id: string; truthRef?: string };
-      assert.match(claim.truthRef ?? "", /^personal\/facts\/preferences\.md#mem:/u);
-      assert.equal((await kernel.memory!.truth.listFacts("personal")).length, 1);
+      assert.equal(claim.truthRef, undefined);
+      assert.equal((await kernel.memory!.truth.listFacts("personal")).length, 0);
+      assert.match(await kernel.memory!.visible.readText(), /忘记后不能从 Truth 复活/u);
 
       const mismatch = await kernel.memories.forget({
         id: claim.id,
         expectedScope: PROJECT_SCOPE,
       });
       assert.equal(mismatch, null);
-      assert.equal((await kernel.memory!.truth.listFacts("personal")).length, 1);
+      assert.match(await kernel.memory!.visible.readText(), /忘记后不能从 Truth 复活/u);
 
       const forgotten = await kernel.memories.forget({
         id: claim.id,
         expectedScope: "personal",
       });
       assert.equal(forgotten?.alreadyGone, false);
-      assert.equal((await kernel.memory!.truth.listFacts("personal")).length, 0);
+      assert.doesNotMatch(await kernel.memory!.visible.readText(), /忘记后不能从 Truth 复活/u);
 
       const reopened = createYishuKernel({
         storeBackend: "json",

@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { clientCommandSchema, PROTOCOL_VERSION, runtimeEvent } from "./protocol.js";
+import { probeModels, reachableProbedModels } from "./model-config.js";
 import { StdioComputerUsePort } from "./computer-use-port.js";
 import { createAgentRuntime, selectedRuntimeMode } from "./runtime-factory.js";
 import { ProductKernelRuntime } from "./product-kernel-runtime.js";
@@ -300,6 +301,35 @@ lineReader.on("line", (line) => {
     emit(runtimeEvent("runtime.pong", command.requestId, command.traceId, {
       mode: runtimeMode,
     }));
+    return;
+  }
+
+  if (command.type === "models.probe") {
+    void probeModels().then((results) => {
+      const reachable = reachableProbedModels(results);
+      emit(runtimeEvent("models.probed", command.requestId, command.traceId, {
+        models: reachable.map((row) => ({
+          providerId: row.providerId,
+          id: row.id,
+          name: row.name,
+          reachable: true,
+          baseUrlHost: row.baseUrlHost,
+        })),
+        probed: results.map((row) => ({
+          providerId: row.providerId,
+          id: row.id,
+          name: row.name,
+          reachable: row.reachable,
+          baseUrlHost: row.baseUrlHost,
+          ...(row.error === undefined ? {} : { error: row.error }),
+        })),
+      }));
+    }).catch((error) => {
+      emit(runtimeEvent("runtime.error", command.requestId, command.traceId, {
+        code: "models_probe_failed",
+        message: safeRuntimeErrorMessage(error, "Unable to probe models."),
+      }));
+    });
     return;
   }
 

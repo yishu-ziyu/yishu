@@ -63,6 +63,7 @@ export function buildStepFunTranscriptionBody({
   language,
   model,
   hotwords,
+  stream,
 }) {
   const transcription = {
     model,
@@ -73,7 +74,7 @@ export function buildStepFunTranscriptionBody({
     transcription.hotwords = hotwords;
   }
 
-  return {
+  const body = {
     audio: {
       data: audioBase64,
       input: {
@@ -88,4 +89,43 @@ export function buildStepFunTranscriptionBody({
       },
     },
   };
+  if (stream === true) body.stream = true;
+  return body;
+}
+
+/** Base64 length only — never decode or log audio. */
+export function audioSecondsFromBase64Length(audioBase64, sampleRate) {
+  const rate = Number(sampleRate);
+  if (!audioBase64 || !Number.isFinite(rate) || rate <= 0) return 0;
+  const bytes = Math.floor((audioBase64.length * 3) / 4);
+  return Math.round((bytes / (rate * 2)) * 1000) / 1000;
+}
+
+export function formatAsrTimingLog({
+  route,
+  upstreamPath,
+  connectMs,
+  firstByteMs,
+  totalMs,
+  audioSeconds,
+  stream,
+  kind,
+  reused,
+  bodyBytes,
+  bodyReadMs,
+}) {
+  return [
+    "[asr]",
+    `route=${route}`,
+    `upstream=${upstreamPath}`,
+    `kind=${kind ?? "-"}`,
+    `connect_ms=${connectMs ?? "-"}`,
+    `first_byte_ms=${firstByteMs ?? "-"}`,
+    `total_ms=${totalMs ?? "-"}`,
+    `audio_s=${audioSeconds ?? 0}`,
+    `stream=${stream ? 1 : 0}`,
+    `reused=${reused ? 1 : 0}`,
+    `body_bytes=${bodyBytes ?? "-"}`,
+    `body_read_ms=${bodyReadMs ?? "-"}`,
+  ].join(" ");
 }

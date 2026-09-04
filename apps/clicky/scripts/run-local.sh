@@ -240,27 +240,14 @@ is_formal_clicky_pid() {
 
 # PIDs of the formal /Applications install only (never pgrep -x by product name).
 list_formal_clicky_pids() {
-  local pid args
-  while IFS= read -r line; do
-    # pid is first field; remainder is args (may contain spaces).
-    pid="$(printf '%s\n' "$line" | awk '{print $1}')"
-    args="$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"
-    [[ "$pid" =~ ^[0-9]+$ ]] || continue
-    if [[ "$args" == "$FORMAL_APP_EXE" || "$args" == "$FORMAL_APP_EXE "* ]]; then
-      echo "$pid"
-      continue
-    fi
-    if [[ "$args" == "$LEGACY_APP_EXE" || "$args" == "$LEGACY_APP_EXE "* ]]; then
-      echo "$pid"
-      continue
-    fi
-    # Short argv — resolve via txt path before accepting.
-    if [[ "$args" == "$APP_PRODUCT_NAME" || "$args" == "$APP_PRODUCT_NAME "* || "$args" == "Clicky" || "$args" == "Clicky "* ]]; then
-      if is_formal_clicky_pid "$pid"; then
-        echo "$pid"
-      fi
-    fi
-  done < <(ps -ax -o pid= -o args= 2>/dev/null | grep -E "${APP_PRODUCT_NAME}|Clicky.app" || true)
+  # pgrep -f, not `ps -ax | grep`: agent shells run `ps -ax` sandboxed (the app
+  # is not listed) and under a C locale `ps` escapes the UTF-8 product name, so
+  # the old grep silently found nothing and the stale binary kept running after
+  # install. Anchored to the formal path: dev/DerivedData builds never match.
+  {
+    pgrep -f "^${FORMAL_APP_EXE}( |$)" 2>/dev/null || true
+    pgrep -f "^${LEGACY_APP_EXE}( |$)" 2>/dev/null || true
+  } | sort -u
 }
 
 # True (exit 0) only when a confirmed Yishu voice-proxy PID is a *true orphan*:
@@ -487,7 +474,9 @@ open_app() {
   fi
 
   open -n "$app"
+  sleep 1
   echo "Launched: $app (must be the binary just installed at $app)"
+  echo "Formal pid now: $(list_formal_clicky_pids | tr '\n' ' ')(compare with the Quitting line above)"
 }
 
 # ---------------------------------------------------------------------------

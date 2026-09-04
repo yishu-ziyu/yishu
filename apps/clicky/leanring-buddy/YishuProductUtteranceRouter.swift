@@ -59,7 +59,10 @@ enum YishuProductUtteranceRouter {
             return .recordLearning
         }
 
-        if text.range(of: #"^(记住|记下|记一下)[：:\s]"#, options: .regularExpression) != nil
+        if text.range(
+            of: #"^(?:请帮我|请你|帮我|麻烦|请)?\s*(记住|记下|记一下)[：:\s]"#,
+            options: .regularExpression
+        ) != nil
             || text.range(of: #"^remember\s+(that|this)\b"#, options: [.regularExpression, .caseInsensitive]) != nil
             || text.contains("请记住")
         {

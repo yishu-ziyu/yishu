@@ -20,6 +20,34 @@ import {
 } from "./everos-migration.js";
 
 export const DEFAULT_EVEROS_PORT = 18765;
+export const DEFAULT_RECALL_BUDGET_MS = 300;
+
+export function resolveRecallBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.YISHU_RECALL_BUDGET_MS?.trim();
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_RECALL_BUDGET_MS;
+}
+
+/** Resolve `work` within `ms`, or `undefined` if the budget elapses. The loser keeps running. */
+export async function withRecallBudget<T>(
+  work: Promise<T>,
+  ms: number,
+): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 export interface EverOSSidecarOptions {
   readonly env?: NodeJS.ProcessEnv;
@@ -253,6 +281,8 @@ export class EverOSSidecar {
     this.env = envOf(options);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.llmEnvResolver = options.llmEnvResolver;
+    // Boot in the background so a later turn can use EverOS without waiting here.
+    void this.ensure().catch(() => undefined);
   }
 
   memory(): EverOSMemoryPort {

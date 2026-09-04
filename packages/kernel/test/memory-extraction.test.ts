@@ -331,7 +331,7 @@ test("hostile capturedAt cannot write episode files outside the root", async (t)
   assert.match(safe, /\[turn:turn-escape\]/);
 });
 
-test("explicit remember writes markdown truth and index truthRef", async (t) => {
+test("explicit remember writes visible file + index; skips legacy Memory tree", async (t) => {
   const { kernel, memory } = await makeDeps(t);
   const receipt = await kernel.registry.invoke("remember", {
     caller: "voice",
@@ -339,11 +339,10 @@ test("explicit remember writes markdown truth and index truthRef", async (t) => 
   });
   assert.equal(receipt.status, "verified");
   const claim = receipt.output as MemoryClaim;
-  assert.match(claim.truthRef ?? "", /^personal\/facts\/preferences\.md#mem:/);
-  const facts = await memory.truth.listFacts("personal");
-  assert.equal(facts.length, 1);
-  assert.equal(facts[0]!.claim, "用户偏好要点列表");
+  assert.equal(claim.truthRef, undefined);
+  assert.equal((await memory.truth.listFacts("personal")).length, 0);
+  assert.match(await memory.visible.readText(), /用户偏好要点列表/);
   const indexed = await kernel.store.searchMemory("", { scope: "personal", minConfidence: 0 });
   assert.equal(indexed.length, 1);
-  assert.equal(indexed[0]!.truthRef, claim.truthRef);
+  assert.equal(indexed[0]!.claim, "用户偏好要点列表");
 });

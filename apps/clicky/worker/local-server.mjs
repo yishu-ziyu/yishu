@@ -11,12 +11,16 @@
  */
 
 import { createServer } from "node:http";
+import { request as httpsRequest, Agent as HttpsAgent } from "node:https";
 import { timingSafeEqual } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  audioSecondsFromBase64Length,
   buildStepFunTranscriptionBody,
+  formatAsrTimingLog,
   sanitizeStepFunHotwords,
 } from "./stepfun-hotwords.mjs";
 
@@ -29,12 +33,13 @@ if (PROXY_AUTH_TOKEN.length < 32) {
   throw new Error("YISHU_VOICE_PROXY_TOKEN missing or too short");
 }
 
-const MAX_IN_FLIGHT_REQUESTS = 4;
+const MAX_IN_FLIGHT_REQUESTS = 8;
 const MAX_BODY_BYTES = Object.freeze({
   "/chat": 16 * 1024 * 1024,
   "/v1/chat/completions": 16 * 1024 * 1024,
   "/tts": 64 * 1024,
   "/transcribe": 32 * 1024 * 1024,
+  "/audio/asr/sse": 32 * 1024 * 1024,
 });
 const MAX_UPSTREAM_BYTES = Object.freeze({
   chat: 16 * 1024 * 1024,
@@ -48,8 +53,24 @@ const UPSTREAM_TIMEOUT_MS = Object.freeze({
 });
 let inFlightRequests = 0;
 
-const STEPFUN_ASR_URL =
-  "https://api.stepfun.com/step_plan/v1/audio/asr/sse";
+const interimAsrAgent = new HttpsAgent({
+  keepAlive: true,
+  maxSockets: 2,
+  maxFreeSockets: 1,
+  keepAliveMsecs: 15_000,
+  scheduling: "lifo",
+});
+const finalAsrAgent = new HttpsAgent({
+  keepAlive: true,
+  maxSockets: 1,
+  maxFreeSockets: 1,
+  keepAliveMsecs: 15_000,
+  scheduling: "lifo",
+});
+let inFlightInterimDestroy = null;
+let finalKeepAliveTimer = null;
+let finalKeepAliveMs = Number(process.env.YISHU_ASR_FINAL_KEEPALIVE_MS || 10_000);
+
 const STEPFUN_CHAT_BASE_DEFAULT = "https://api.stepfun.com/v1";
 const CLI_PROXY_CHAT_BASE_DEFAULT = "http://127.0.0.1:8317/v1";
 const MINIMAX_TTS_URL_DEFAULT = "https://api.minimaxi.com/v1/t2a_v2";
@@ -98,6 +119,29 @@ function loadDevVars(path) {
 const env = loadDevVars(
   process.env.YISHU_WORKER_ENV_FILE || join(__dirname, ".dev.vars")
 );
+
+function stepPlanBase() {
+  return (env.STEPFUN_STEP_PLAN_BASE || "https://api.stepfun.com/step_plan/v1").replace(
+    /\/$/,
+    ""
+  );
+}
+
+function asrUrl() {
+  return `${stepPlanBase()}/audio/asr/sse`;
+}
+
+function asrApiKey() {
+  return env.STEPFUN_STEP_PLAN_API_KEY || env.STEPFUN_API_KEY || "";
+}
+
+function asrBufferEnabled() {
+  return String(env.YISHU_ASR_BUFFER || "") === "1";
+}
+
+function ttsStreamEnabled() {
+  return String(env.YISHU_TTS_STREAM || "1") !== "0";
+}
 
 function requireEnv(name) {
   const value = env[name];
@@ -195,7 +239,7 @@ function publicConfigPayload() {
     },
     asr: {
       provider: "stepfun",
-      configured: Boolean(env.STEPFUN_API_KEY),
+      configured: Boolean(asrApiKey()),
     },
   };
 }
@@ -682,18 +726,21 @@ async function handleTTS(req, res) {
   // mood from the text itself.
   const emotion = resolveTtsEmotion(incoming.emotion);
 
+  const stream = ttsStreamEnabled();
   const pending = upstreamRequest(req, res, ttsURL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
       "content-type": "application/json",
+      Connection: "keep-alive",
     },
     body: JSON.stringify({
       model: ttsModel,
       text,
-      stream: false,
+      stream,
       language_boost: "Chinese",
       output_format: "hex",
+      ...(stream ? { stream_options: { exclude_aggregated_audio: true } } : {}),
       voice_setting: {
         voice_id: voiceId,
         speed,
@@ -712,11 +759,78 @@ async function handleTTS(req, res) {
   try {
   const upstream = await pending.response;
 
-  const responseText = await readTextLimited(upstream, MAX_UPSTREAM_BYTES.tts);
   if (!upstream.ok) {
+    await readTextLimited(upstream, MAX_UPSTREAM_BYTES.tts);
     console.error(`[/tts] MiniMax TTS error ${upstream.status}`);
     return json(res, upstream.status, { error: "TTS upstream request failed" });
   }
+
+  if (stream) {
+    res.writeHead(200, {
+      "content-type": "audio/mpeg",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+    });
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let upstreamBytes = 0;
+    const writeHexAudio = (hex) => {
+      if (!hex) return;
+      const audio = hexToBuffer(hex);
+      upstreamBytes += audio.byteLength;
+      if (upstreamBytes > MAX_UPSTREAM_BYTES.tts) {
+        pending.abort();
+        res.destroy(new Error("TTS upstream response too large"));
+        return false;
+      }
+      res.write(audio);
+      return true;
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let event;
+        try {
+          event = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+        const statusCode = event?.base_resp?.status_code;
+        if (statusCode !== undefined && statusCode !== 0) {
+          console.error(`[/tts] MiniMax base_resp ${statusCode}`);
+          continue;
+        }
+        const hex = event?.data?.audio || event?.audio;
+        if (hex && writeHexAudio(hex) === false) return;
+      }
+    }
+    if (buffer.startsWith("data:")) {
+      const payload = buffer.slice(5).trim();
+      try {
+        const event = JSON.parse(payload);
+        const hex = event?.data?.audio || event?.audio;
+        if (hex) writeHexAudio(hex);
+      } catch {
+        // trailing partial
+      }
+    }
+    res.end();
+    return;
+  }
+
+  const responseText = await readTextLimited(upstream, MAX_UPSTREAM_BYTES.tts);
 
   let payload;
   try {
@@ -765,8 +879,348 @@ async function handleTTS(req, res) {
   }
 }
 
-async function handleTranscribe(req, res) {
-  const raw = await readBody(req, MAX_BODY_BYTES["/transcribe"]);
+function useKeepAliveAsrAgent() {
+  return !process.env.NODE_TEST_CONTEXT;
+}
+
+function asrJsonlPath() {
+  if (process.env.YISHU_ASR_JSONL) return process.env.YISHU_ASR_JSONL;
+  return join(
+    homedir(),
+    "Library/Application Support/Yishu/Diagnostics/proxy-asr.jsonl"
+  );
+}
+
+function logAsrTiming(fields) {
+  console.error(formatAsrTimingLog(fields));
+  if (process.env.NODE_TEST_CONTEXT && !process.env.YISHU_ASR_JSONL) return;
+  try {
+    const path = asrJsonlPath();
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(
+      path,
+      `${JSON.stringify({
+        ts: new Date().toISOString(),
+        route: fields.route ?? null,
+        kind: fields.kind ?? null,
+        connect_ms: fields.connectMs ?? null,
+        first_byte_ms: fields.firstByteMs ?? null,
+        total_ms: fields.totalMs ?? null,
+        audio_s: fields.audioSeconds ?? 0,
+        stream: fields.stream ? 1 : 0,
+        reused: fields.reused ? 1 : 0,
+        body_bytes: fields.bodyBytes ?? null,
+        body_read_ms: fields.bodyReadMs ?? null,
+      })}\n`,
+      { mode: 0o600 }
+    );
+  } catch {
+    // Diagnostics must never fail the request.
+  }
+}
+
+function abortInFlightInterim() {
+  if (!inFlightInterimDestroy) return;
+  const destroy = inFlightInterimDestroy;
+  inFlightInterimDestroy = null;
+  destroy();
+}
+
+function warmAsrAgent(agent) {
+  let target;
+  try {
+    target = new URL(asrUrl());
+  } catch {
+    return;
+  }
+  if (target.protocol !== "https:") return;
+  const req = httpsRequest(
+    {
+      hostname: target.hostname,
+      port: target.port || 443,
+      path: "/",
+      method: "HEAD",
+      agent,
+      timeout: 8_000,
+    },
+    (res) => {
+      res.resume();
+    }
+  );
+  req.on("error", () => {});
+  req.end();
+}
+
+function scheduleFinalKeepAlive() {
+  if (process.env.NODE_TEST_CONTEXT) return;
+  if (!Number.isFinite(finalKeepAliveMs) || finalKeepAliveMs <= 0) return;
+  if (finalKeepAliveTimer) clearTimeout(finalKeepAliveTimer);
+  finalKeepAliveTimer = setTimeout(() => {
+    warmAsrAgent(finalAsrAgent);
+    scheduleFinalKeepAlive();
+  }, finalKeepAliveMs);
+}
+
+function warmAsrConnection() {
+  warmAsrAgent(interimAsrAgent);
+  warmAsrAgent(finalAsrAgent);
+  scheduleFinalKeepAlive();
+}
+
+function pipeAsrHttps({
+  url,
+  headers,
+  body,
+  req,
+  res,
+  wantStream,
+  agent,
+  started,
+  kind,
+}) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    let reused = false;
+    let connectMs;
+    let firstByteMs;
+    let settled = false;
+    const finish = (error, extra) => {
+      if (settled) return;
+      settled = true;
+      if (kind === "interim") inFlightInterimDestroy = null;
+      if (error) reject(error);
+      else resolve(extra);
+    };
+
+    const up = httpsRequest(
+      {
+        hostname: target.hostname,
+        port: target.port || 443,
+        path: `${target.pathname}${target.search}`,
+        method: "POST",
+        headers: {
+          ...headers,
+          "content-length": Buffer.byteLength(body),
+        },
+        agent,
+      },
+      (upRes) => {
+        if (connectMs === undefined) connectMs = Date.now() - started;
+        if ((upRes.statusCode || 0) < 200 || (upRes.statusCode || 0) >= 300) {
+          upRes.resume();
+          if (!res.headersSent) {
+            json(res, upRes.statusCode || 502, {
+              error: "Transcription upstream request failed",
+            });
+          }
+          finish(null, { reused, connectMs, firstByteMs });
+          return;
+        }
+        if (wantStream) {
+          res.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+          });
+          let upstreamBytes = 0;
+          upRes.on("data", (chunk) => {
+            if (firstByteMs === undefined) firstByteMs = Date.now() - started;
+            upstreamBytes += chunk.length;
+            if (upstreamBytes > MAX_UPSTREAM_BYTES.transcribe) {
+              up.destroy();
+              res.destroy(new Error("Transcription upstream response too large"));
+              finish(null, { reused, connectMs, firstByteMs });
+              return;
+            }
+            if (!res.writableEnded && !res.destroyed) res.write(chunk);
+          });
+          upRes.on("end", () => {
+            if (!res.writableEnded) res.end();
+            finish(null, { reused, connectMs, firstByteMs });
+          });
+          upRes.on("error", (error) => finish(error));
+          return;
+        }
+
+        const chunks = [];
+        let total = 0;
+        upRes.on("data", (chunk) => {
+          if (firstByteMs === undefined) firstByteMs = Date.now() - started;
+          total += chunk.length;
+          if (total > MAX_UPSTREAM_BYTES.transcribe) {
+            up.destroy();
+            finish(new HttpError(502, "Upstream response too large"));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        upRes.on("end", () => {
+          json(res, 200, { text: parseStepFunAsrSse(Buffer.concat(chunks).toString("utf8")) });
+          finish(null, { reused, connectMs, firstByteMs });
+        });
+        upRes.on("error", (error) => finish(error));
+      }
+    );
+
+    up.on("socket", (socket) => {
+      reused = socket.connecting === false;
+      if (reused) {
+        connectMs = connectMs ?? 0;
+      } else {
+        socket.once("connect", () => {
+          connectMs = Date.now() - started;
+        });
+      }
+    });
+    up.on("error", (error) => finish(error));
+    up.setTimeout(UPSTREAM_TIMEOUT_MS.transcribe, () => {
+      up.destroy(new Error("upstream timeout"));
+    });
+
+    if (kind === "interim") {
+      abortInFlightInterim();
+      inFlightInterimDestroy = () => {
+        up.destroy();
+        finish(null, { reused, connectMs, firstByteMs });
+      };
+    }
+
+    const abort = () => {
+      if (kind === "interim") {
+        up.destroy();
+        if (inFlightInterimDestroy) {
+          inFlightInterimDestroy = null;
+        }
+        finish(null, { reused, connectMs, firstByteMs });
+        return;
+      }
+      // Finals keep the TLS socket for the dedicated agent.
+    };
+    req.once("aborted", abort);
+    const abortOnClose = () => {
+      if (!res.writableEnded) abort();
+    };
+    res.once("close", abortOnClose);
+    up.on("close", () => {
+      req.removeListener("aborted", abort);
+      res.removeListener("close", abortOnClose);
+    });
+
+    up.write(body);
+    up.end();
+  });
+}
+
+async function pipeAsrUpstream({
+  url,
+  headers,
+  body,
+  req,
+  res,
+  wantStream,
+  route,
+  audioSeconds,
+  kind,
+  bodyBytes,
+  bodyReadMs,
+}) {
+  const started = Date.now();
+  const target = new URL(url);
+  const agent = kind === "final" ? finalAsrAgent : interimAsrAgent;
+  if (kind === "final") abortInFlightInterim();
+  let connectMs;
+  let firstByteMs;
+  let reused = false;
+  const pending = useKeepAliveAsrAgent()
+    ? null
+    : upstreamRequest(
+        req,
+        res,
+        url,
+        { method: "POST", headers, body },
+        UPSTREAM_TIMEOUT_MS.transcribe
+      );
+  try {
+    if (pending) {
+      const upstream = await pending.response;
+      connectMs = Date.now() - started;
+      if (!upstream.ok) {
+        await readTextLimited(upstream, MAX_UPSTREAM_BYTES.transcribe);
+        return json(res, upstream.status, { error: "Transcription upstream request failed" });
+      }
+
+      if (wantStream) {
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        if (!upstream.body) {
+          res.end();
+          return;
+        }
+        const reader = upstream.body.getReader();
+        let upstreamBytes = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (firstByteMs === undefined) firstByteMs = Date.now() - started;
+          upstreamBytes += value.byteLength;
+          if (upstreamBytes > MAX_UPSTREAM_BYTES.transcribe) {
+            pending.abort();
+            res.destroy(new Error("Transcription upstream response too large"));
+            return;
+          }
+          res.write(value);
+        }
+        res.end();
+        return;
+      }
+
+      const sseText = await readTextLimited(upstream, MAX_UPSTREAM_BYTES.transcribe);
+      firstByteMs = firstByteMs ?? Date.now() - started;
+      return json(res, 200, { text: parseStepFunAsrSse(sseText) });
+    }
+
+    const result = await pipeAsrHttps({
+      url,
+      headers,
+      body,
+      req,
+      res,
+      wantStream,
+      agent,
+      started,
+      kind,
+    });
+    reused = result.reused;
+    connectMs = result.connectMs;
+    firstByteMs = result.firstByteMs;
+    if (kind === "final") scheduleFinalKeepAlive();
+  } finally {
+    pending?.cleanup();
+    logAsrTiming({
+      route,
+      upstreamPath: `${target.origin}${target.pathname}`,
+      kind,
+      connectMs,
+      firstByteMs,
+      totalMs: Date.now() - started,
+      audioSeconds,
+      stream: wantStream,
+      reused,
+      bodyBytes,
+      bodyReadMs,
+    });
+  }
+}
+
+async function handleTranscribe(req, res, route = "/transcribe") {
+  const readStarted = Date.now();
+  const raw = await readBody(req, MAX_BODY_BYTES[route] || MAX_BODY_BYTES["/transcribe"]);
+  const bodyReadMs = Date.now() - readStarted;
+  const bodyBytes = raw.length;
+  const kind = req.headers["x-yishu-asr-kind"] === "final" ? "final" : "interim";
   let incoming;
   try {
     incoming = JSON.parse(raw.toString("utf8"));
@@ -787,7 +1241,12 @@ async function handleTranscribe(req, res) {
     return json(res, 400, { error: hotwordsValidation.error });
   }
 
-  const key = requireEnv("STEPFUN_API_KEY");
+  const key = asrApiKey();
+  if (!key) {
+    return json(res, 500, {
+      error: "STEPFUN_STEP_PLAN_API_KEY (or STEPFUN_API_KEY) missing in .dev.vars",
+    });
+  }
   const formatType =
     typeof incoming.format === "string" && incoming.format.trim()
       ? incoming.format.trim()
@@ -803,13 +1262,16 @@ async function handleTranscribe(req, res) {
       ? incoming.language.trim()
       : "zh";
   const asrModel = env.STEPFUN_ASR_MODEL || "stepaudio-2.5-asr";
+  const wantStream = incoming.stream === true && !asrBufferEnabled();
+  const audioSeconds = audioSecondsFromBase64Length(audioBase64, sampleRate);
 
-  const pending = upstreamRequest(req, res, STEPFUN_ASR_URL, {
-    method: "POST",
+  await pipeAsrUpstream({
+    url: asrUrl(),
     headers: {
       Authorization: `Bearer ${key}`,
       "content-type": "application/json",
       Accept: "text/event-stream",
+      Connection: "keep-alive",
     },
     body: JSON.stringify(
       buildStepFunTranscriptionBody({
@@ -819,22 +1281,18 @@ async function handleTranscribe(req, res) {
         language,
         model: asrModel,
         hotwords: hotwordsValidation.hotwords,
+        stream: wantStream,
       })
     ),
-  }, UPSTREAM_TIMEOUT_MS.transcribe);
-  try {
-  const upstream = await pending.response;
-
-  const sseText = await readTextLimited(upstream, MAX_UPSTREAM_BYTES.transcribe);
-  if (!upstream.ok) {
-    return json(res, upstream.status, { error: "Transcription upstream request failed" });
-  }
-
-  const transcript = parseStepFunAsrSse(sseText);
-  return json(res, 200, { text: transcript });
-  } finally {
-    pending.cleanup();
-  }
+    req,
+    res,
+    wantStream,
+    route,
+    audioSeconds,
+    kind,
+    bodyBytes,
+    bodyReadMs,
+  });
 }
 
 const server = createServer(async (req, res) => {
@@ -882,7 +1340,9 @@ const server = createServer(async (req, res) => {
         return await handleRuntimeChatCompletions(req, res);
       }
       if (url.pathname === "/tts") return await handleTTS(req, res);
-      if (url.pathname === "/transcribe") return await handleTranscribe(req, res);
+      if (url.pathname === "/transcribe" || url.pathname === "/audio/asr/sse") {
+        return await handleTranscribe(req, res, url.pathname);
+      }
       if (url.pathname === "/transcribe-token") {
         return json(res, 410, {
           error:
@@ -916,8 +1376,9 @@ server.listen(PORT, HOST, () => {
   );
   console.log(
     `tts: MINIMAX=${minimaxApiKey() ? "set" : "MISSING"} model=${env.MINIMAX_TTS_MODEL || MINIMAX_TTS_MODEL_DEFAULT}`,
-    `asr: STEPFUN=${env.STEPFUN_API_KEY ? "set" : "MISSING"}`
+    `asr: STEPFUN=${asrApiKey() ? "set" : "MISSING"}`
   );
+  warmAsrConnection();
 });
 
 export { server };

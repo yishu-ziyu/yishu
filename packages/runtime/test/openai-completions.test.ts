@@ -10,6 +10,8 @@ test("MiniMax reasoning_content is not spoken", () => {
     }],
   }));
   assert.equal(thinking, undefined);
+  assert.equal(parser.takeReasoningDelta(), "用户问星期几。");
+  assert.equal(parser.takeReasoningDelta(), "");
 
   const spoken = parser.push(JSON.stringify({
     choices: [{ delta: { content: "今天是星期五。" } }],

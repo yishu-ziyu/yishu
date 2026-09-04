@@ -4,16 +4,18 @@ import Foundation
 /// spoken sentences. It never interprets model/tool syntax; callers must feed
 /// it only the already-projected `response.delta` text.
 ///
-/// Mouth budget: at most two complete sentences. A run of more than ~80
-/// characters with no sentence boundary is a wall — do not stream-speak;
-/// the caller should select a deterministic excerpt from the final visible reply.
+/// Mouth budget: ordinary replies speak up to six sentences. Longer output
+/// is clipped to that prefix; a run of more than ~80 characters with no
+/// sentence boundary is a wall and is not stream-spoken.
 @MainActor
 final class YishuSentenceSpeechPipeline {
     typealias Speaker = @MainActor (String) async throws -> Void
     typealias StopPlayback = @MainActor () -> Void
+    typealias Prefetch = @MainActor (String) -> Void
 
     private let speaker: Speaker
     private let stopPlayback: StopPlayback
+    private let prefetch: Prefetch?
     private var buffer = ""
     private var committedSourceText = ""
     private var queue: [String] = []
@@ -28,10 +30,12 @@ final class YishuSentenceSpeechPipeline {
 
     init(
         speaker: @escaping Speaker,
-        stopPlayback: @escaping StopPlayback
+        stopPlayback: @escaping StopPlayback,
+        prefetch: Prefetch? = nil
     ) {
         self.speaker = speaker
         self.stopPlayback = stopPlayback
+        self.prefetch = prefetch
     }
 
     /// Returns the number of newly queued sentences. A positive result means
@@ -46,8 +50,8 @@ final class YishuSentenceSpeechPipeline {
         return count
     }
 
-    /// Reconciles against the authoritative visible text and speaks only the
-    /// uncommitted suffix, still inside the two-sentence budget. Previously
+        /// Reconciles against the authoritative visible text and speaks only the
+    /// uncommitted suffix, still inside the six-sentence budget. Previously
     /// queued/spoken sentences are never replayed. A wall is not spoken.
     @discardableResult
     func finish(authoritativeText: String) async -> Bool {
@@ -140,6 +144,9 @@ final class YishuSentenceSpeechPipeline {
         queue.append(sentence)
         enqueuedSentenceCount += 1
         didEnqueueSpeech = true
+        if queue.count == 2 {
+            prefetch?(sentence)
+        }
         startPumpIfNeeded()
         return true
     }
@@ -150,6 +157,9 @@ final class YishuSentenceSpeechPipeline {
             guard let self else { return }
             while !Task.isCancelled, !self.isCancelled, !self.queue.isEmpty {
                 let sentence = self.queue.removeFirst()
+                if let next = self.queue.first {
+                    self.prefetch?(next)
+                }
                 do {
                     try await self.speaker(sentence)
                     self.didCompleteSpeech = true
@@ -186,7 +196,6 @@ final class YishuSentenceSpeechPipeline {
 }
 
 enum YishuSearchCoverSpeech {
-    static let line = "好的，我去查查看。"
     static let toolName = "web_search"
 
     static func shouldSpeak(
@@ -195,10 +204,8 @@ enum YishuSearchCoverSpeech {
         didSpeakAnswer: Bool,
         hasVisibleAnswerText: Bool
     ) -> Bool {
-        toolName == Self.toolName
-            && !didSpeakCover
-            && !didSpeakAnswer
-            && !hasVisibleAnswerText
+        _ = (toolName, didSpeakCover, didSpeakAnswer, hasVisibleAnswerText)
+        return false
     }
 }
 
@@ -209,7 +216,7 @@ enum YishuAnswerSpeechRoute: Equatable {
 }
 
 enum YishuSpokenReplyBudget {
-    static let maxSpokenSentences = 2
+    static let maxSpokenSentences = 6
     static let wallCharacterLimit = 80
 
     static func route(
@@ -223,7 +230,7 @@ enum YishuSpokenReplyBudget {
     }
 
     /// Returns only source text from the completed visible reply. Short replies
-    /// stay intact; longer replies are capped at two complete sentences. A
+    /// stay intact; longer replies are capped at six complete sentences. A
     /// long fragment with no sentence boundary is intentionally not spoken.
     static func deterministicExcerpt(from visibleText: String) -> String? {
         let trimmed = visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -348,8 +355,6 @@ enum YishuSpokenReplyBudget {
         }
 
         // Markdown ordered-list markers such as `1. ` are not sentences.
-        // Counting them against the two-sentence mouth budget made speech end
-        // immediately after saying the list number.
         let prefixThroughPeriod = String(buffer[...index])
         if prefixThroughPeriod.range(
             of: #"(?:^|\n)\s*\d+\.$"#,

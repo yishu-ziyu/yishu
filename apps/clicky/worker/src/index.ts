@@ -1,10 +1,14 @@
 import {
+  audioSecondsFromBase64Length,
   buildStepFunTranscriptionBody,
+  formatAsrTimingLog,
   sanitizeStepFunHotwords,
 } from "../stepfun-hotwords.mjs";
 
 export {
+  audioSecondsFromBase64Length,
   buildStepFunTranscriptionBody,
+  formatAsrTimingLog,
   MAX_STEPFUN_HOTWORD_LENGTH,
   MAX_STEPFUN_HOTWORDS,
   sanitizeStepFunHotwords,
@@ -18,8 +22,8 @@ export {
  * Routes:
  *   POST /chat       → OpenAI-compatible chat/completions (default: Grok via 8317)
  *                      App still sends Anthropic-shaped body; worker converts.
- *   POST /tts        → MiniMax t2a_v2 (hex audio → audio/mpeg)
- *   POST /transcribe → StepFun Token Plan ASR (SSE → JSON { text })
+ *   POST /tts        → MiniMax t2a_v2 (hex audio → audio/mpeg; stream unless YISHU_TTS_STREAM=0)
+ *   POST /transcribe → StepFun Step Plan ASR (SSE passthrough when stream:true; JSON when YISHU_ASR_BUFFER=1)
  */
 
 interface Env {
@@ -29,6 +33,10 @@ interface Env {
   STEPFUN_OPENAI_BASE_URL?: string;
   STEPFUN_FORCE_STEP_PLAN?: string;
   STEPFUN_ASR_MODEL?: string;
+  STEPFUN_STEP_PLAN_API_KEY?: string;
+  STEPFUN_STEP_PLAN_BASE?: string;
+  YISHU_ASR_BUFFER?: string;
+  YISHU_TTS_STREAM?: string;
   /** Chat/vision overrides (prefer over StepFun for /chat). */
   CHAT_API_KEY?: string;
   OPENAI_API_KEY?: string;
@@ -46,8 +54,6 @@ interface Env {
   MINIMAX_TTS_VOLUME?: string;
 }
 
-const STEPFUN_ASR_URL =
-  "https://api.stepfun.com/step_plan/v1/audio/asr/sse";
 const STEPFUN_CHAT_BASE_DEFAULT = "https://api.stepfun.com/v1";
 const CLI_PROXY_CHAT_BASE_DEFAULT = "http://127.0.0.1:8317/v1";
 const MINIMAX_TTS_URL_DEFAULT = "https://api.minimaxi.com/v1/t2a_v2";
@@ -188,7 +194,7 @@ export default {
             },
             asr: {
               provider: "stepfun",
-              configured: Boolean(env.STEPFUN_API_KEY),
+              configured: Boolean(asrApiKey(env)),
             },
           },
           200
@@ -208,8 +214,8 @@ export default {
       if (url.pathname === "/tts") {
         return await handleTTS(request, env);
       }
-      if (url.pathname === "/transcribe") {
-        return await handleTranscribe(request, env);
+      if (url.pathname === "/transcribe" || url.pathname === "/audio/asr/sse") {
+        return await handleTranscribe(request, env, url.pathname);
       }
       // Legacy Clicky route — keep a clear error so old clients fail loudly.
       if (url.pathname === "/transcribe-token") {
@@ -501,6 +507,26 @@ function minimaxApiKey(env: Env): string {
   return env.MINIMAX_API_KEY || env.MINIMAX_TOKEN_PLAN_KEY || "";
 }
 
+function asrApiKey(env: Env): string {
+  return env.STEPFUN_STEP_PLAN_API_KEY || env.STEPFUN_API_KEY || "";
+}
+
+function asrUrl(env: Env): string {
+  const base = (env.STEPFUN_STEP_PLAN_BASE || "https://api.stepfun.com/step_plan/v1").replace(
+    /\/$/,
+    ""
+  );
+  return `${base}/audio/asr/sse`;
+}
+
+function asrBufferEnabled(env: Env): boolean {
+  return String(env.YISHU_ASR_BUFFER || "") === "1";
+}
+
+function ttsStreamEnabled(env: Env): boolean {
+  return String(env.YISHU_TTS_STREAM || "1") !== "0";
+}
+
 function hexToBytes(hex: string): Uint8Array {
   const cleaned = hex.trim().replace(/\s+/g, "");
   if (!cleaned || cleaned.length % 2 !== 0) {
@@ -551,18 +577,21 @@ async function handleTTS(request: Request, env: Env): Promise<Response> {
   // mood from the text itself.
   const emotion = resolveTtsEmotion(incoming.emotion);
 
+  const stream = ttsStreamEnabled(env);
   const response = await fetch(ttsURL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
       "content-type": "application/json",
+      Connection: "keep-alive",
     },
     body: JSON.stringify({
       model: ttsModel,
       text,
-      stream: false,
+      stream,
       language_boost: "Chinese",
       output_format: "hex",
+      ...(stream ? { stream_options: { exclude_aggregated_audio: true } } : {}),
       voice_setting: {
         voice_id: voiceId,
         speed,
@@ -579,14 +608,29 @@ async function handleTTS(request: Request, env: Env): Promise<Response> {
     }),
   });
 
-  const responseText = await response.text();
   if (!response.ok) {
+    const responseText = await response.text();
     logRedactedUpstreamError("/tts", response.status, responseText);
     return json(
       redactedUpstreamErrorPayload(response.status, responseText),
       response.status
     );
   }
+
+  if (stream && response.body) {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    void pipeMiniMaxTtsHexToMpeg(response.body, writable);
+    return new Response(readable, {
+      status: 200,
+      headers: {
+        "content-type": "audio/mpeg",
+        "cache-control": "no-store",
+        ...corsHeaders(),
+      },
+    });
+  }
+
+  const responseText = await response.text();
 
   let payload: {
     data?: { audio?: string };
@@ -638,10 +682,12 @@ async function handleTTS(request: Request, env: Env): Promise<Response> {
 
 async function handleTranscribe(
   request: Request,
-  env: Env
+  env: Env,
+  route = "/transcribe"
 ): Promise<Response> {
-  if (!env.STEPFUN_API_KEY) {
-    return json({ error: "STEPFUN_API_KEY missing" }, 500);
+  const key = asrApiKey(env);
+  if (!key) {
+    return json({ error: "STEPFUN_STEP_PLAN_API_KEY (or STEPFUN_API_KEY) missing" }, 500);
   }
 
   let incoming: {
@@ -650,6 +696,7 @@ async function handleTranscribe(
     sample_rate?: unknown;
     language?: unknown;
     hotwords?: unknown;
+    stream?: unknown;
   };
   try {
     const parsed = await request.json();
@@ -687,6 +734,7 @@ async function handleTranscribe(
       ? incoming.language.trim()
       : "zh";
   const asrModel = env.STEPFUN_ASR_MODEL || "stepaudio-2.5-asr";
+  const wantStream = incoming.stream === true && !asrBufferEnabled(env);
 
   const stepfunBody = buildStepFunTranscriptionBody({
     audioBase64,
@@ -695,31 +743,144 @@ async function handleTranscribe(
     language,
     model: asrModel,
     hotwords: hotwordsValidation.hotwords,
+    stream: wantStream,
   });
+  const started = Date.now();
+  const upstream = asrUrl(env);
+  const audioSeconds = audioSecondsFromBase64Length(audioBase64, sampleRate);
+  let connectMs: number | undefined;
+  let firstByteMs: number | undefined;
 
-  const response = await fetch(STEPFUN_ASR_URL, {
+  const response = await fetch(upstream, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.STEPFUN_API_KEY}`,
+      Authorization: `Bearer ${key}`,
       "content-type": "application/json",
       Accept: "text/event-stream",
+      Connection: "keep-alive",
     },
     body: JSON.stringify(stepfunBody),
   });
+  connectMs = Date.now() - started;
 
   if (!response.ok) {
     const responseBody = await response.text();
     logRedactedUpstreamError("/transcribe", response.status, responseBody);
+    console.error(
+      formatAsrTimingLog({
+        route,
+        upstreamPath: new URL(upstream).pathname,
+        connectMs,
+        firstByteMs,
+        totalMs: Date.now() - started,
+        audioSeconds,
+        stream: wantStream,
+      })
+    );
     return json(
       redactedUpstreamErrorPayload(response.status, responseBody),
       response.status
     );
   }
 
+  if (wantStream && response.body) {
+    const reader = response.body.getReader();
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+    void (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (firstByteMs === undefined) firstByteMs = Date.now() - started;
+          await writer.write(value);
+        }
+      } finally {
+        console.error(
+          formatAsrTimingLog({
+            route,
+            upstreamPath: new URL(upstream).pathname,
+            connectMs,
+            firstByteMs,
+            totalMs: Date.now() - started,
+            audioSeconds,
+            stream: true,
+          })
+        );
+        try {
+          await writer.close();
+        } catch {
+          // client gone
+        }
+      }
+    })();
+    return new Response(readable, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        ...corsHeaders(),
+      },
+    });
+  }
+
   const sseText = await response.text();
+  firstByteMs = firstByteMs ?? Date.now() - started;
   const transcript = parseStepFunAsrSse(sseText);
+  console.error(
+    formatAsrTimingLog({
+      route,
+      upstreamPath: new URL(upstream).pathname,
+      connectMs,
+      firstByteMs,
+      totalMs: Date.now() - started,
+      audioSeconds,
+      stream: false,
+    })
+  );
 
   return json({ text: transcript }, 200);
+}
+
+async function pipeMiniMaxTtsHexToMpeg(
+  body: ReadableStream<Uint8Array>,
+  writable: WritableStream<Uint8Array>
+): Promise<void> {
+  const writer = writable.getWriter();
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let event: { data?: { audio?: string }; audio?: string };
+        try {
+          event = JSON.parse(payload) as typeof event;
+        } catch {
+          continue;
+        }
+        const hex = event?.data?.audio || event?.audio;
+        if (!hex) continue;
+        await writer.write(hexToBytes(hex));
+      }
+    }
+  } catch {
+    // client gone or upstream closed
+  } finally {
+    try {
+      await writer.close();
+    } catch {
+      // already closed
+    }
+  }
 }
 
 function parseStepFunAsrSse(sseText: string): string {

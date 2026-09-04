@@ -173,7 +173,7 @@ private final class StepFunAudioTranscriptionSession: BuddyStreamingTranscriptio
         urlSessionConfiguration.timeoutIntervalForRequest = 60
         urlSessionConfiguration.timeoutIntervalForResource = 90
         urlSessionConfiguration.waitsForConnectivity = true
-        self.urlSession = URLSession(configuration: urlSessionConfiguration)
+        self.urlSession = YishuLoopbackSession.make(from: urlSessionConfiguration)
     }
 
     func appendAudioBuffer(_ audioBuffer: AVAudioPCMBuffer) {
@@ -207,6 +207,12 @@ private final class StepFunAudioTranscriptionSession: BuddyStreamingTranscriptio
         }
 
         transcriptionUploadTask?.cancel()
+        urlSession.getAllTasks { $0.forEach { $0.cancel() } }
+    }
+
+    // Invalidate only in deinit: creating a URL task on an invalidated session
+    // raises an uncatchable NSGenericException (see StepPlanTranscriptionProvider).
+    deinit {
         urlSession.invalidateAndCancel()
     }
 

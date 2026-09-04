@@ -170,13 +170,14 @@ export function routeProductUtterance(
   }
 
   // 5) Remember a fact (must not steal remember_how)
+  // Accept lead-ins users actually say: 帮我记住 / 请帮我记下 / 记一下：…
   if (
-    /^(记住|记下|记一下)[：:\s]/.test(text) ||
+    /^(?:请帮我|请你|帮我|麻烦|请)?\s*(记住|记下|记一下)[：:\s]/.test(text) ||
     /^remember\s+(that|this)\b/i.test(text) ||
     /请记住/.test(text)
   ) {
     const claim = text
-      .replace(/^(记住|记下|记一下|请记住)[：:\s]*/u, "")
+      .replace(/^(?:请帮我|请你|帮我|麻烦|请)?\s*(记住|记下|记一下|请记住)[：:\s]*/u, "")
       .replace(/^remember\s+(that|this)\s*/i, "")
       .trim();
     if (claim.length < 2) return null;

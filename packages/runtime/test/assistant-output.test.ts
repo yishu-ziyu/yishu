@@ -7,6 +7,7 @@ import {
   isDirectComputerActionUtterance,
   parsePointDirective,
   projectAssistantOutput,
+  thinkInnerCharCount,
   utteranceRequiresObservationalPointing,
 } from "../src/assistant-output.js";
 
@@ -228,6 +229,8 @@ test("MiniMax think blocks stay off the spoken overlay", () => {
   const stream = new AssistantOutputStreamProjector();
   assert.equal(stream.push("<think>hidden"), "");
   assert.equal(stream.push("</think>\n今天是星期五。"), "今天是星期五。");
+  assert.equal(thinkInnerCharCount("<think>hidden</think>\n今天是星期五。"), 6);
+  assert.equal(stream.thinkChars(), 6);
 });
 
 test("MiniMax weekday plus POINT:none keeps the spoken sentence", () => {

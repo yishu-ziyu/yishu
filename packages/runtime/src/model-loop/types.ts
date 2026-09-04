@@ -89,7 +89,10 @@ export type SessionEvent =
   | { type: "message_end"; message: SessionMessageEnvelope }
   | { type: "turn_end"; message: SessionMessageEnvelope }
   | { type: "tool_execution_start"; toolCallId: string; toolName: string }
-  | { type: "tool_execution_end"; toolCallId: string; toolName: string; isError: boolean };
+  | { type: "tool_execution_end"; toolCallId: string; toolName: string; isError: boolean }
+  | { type: "request_sent"; imageCount: number; imageBytes: number }
+  | { type: "sse_first_byte" }
+  | { type: "reasoning_delta"; delta: string };
 
 /**
  * The session contract the loop adapter consumes. The previous engine's

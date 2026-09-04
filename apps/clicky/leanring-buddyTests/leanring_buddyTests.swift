@@ -180,6 +180,15 @@ struct leanring_buddyTests {
         ))
     }
 
+    /// Local-provider models come from the runtime's model-config.json; Swift
+    /// must not reject a model it has never heard of (MiniMax-M2.5 regression).
+    @Test func runtimeClientDoesNotGateLocalProviderModels() {
+        let local = YishuConversationModelCatalog.localProvider
+        #expect(YishuAgentRuntimeClient.supportsModel(provider: local, model: "MiniMax-M2.5"))
+        #expect(YishuAgentRuntimeClient.supportsModel(provider: local, model: "some-future-model"))
+        #expect(!YishuAgentRuntimeClient.supportsModel(provider: local, model: ""))
+    }
+
     @Test func browserAuthorizationURLOpensAutomaticallyOnce() throws {
         var openedURLs: [URL] = []
         let viewModel = ProviderAccountsViewModel(
@@ -322,6 +331,8 @@ struct leanring_buddyTests {
         #expect(YishuProductUtteranceRouter.classify("记住刚才这个流程") == .rememberHow)
         #expect(YishuProductUtteranceRouter.classify("这个交给 Codex") == .runSkillOrShare)
         #expect(YishuProductUtteranceRouter.classify("记住：这个项目准备基于 Pi") == .rememberFact)
+        #expect(YishuProductUtteranceRouter.classify("帮我记住：我喜欢无糖咖啡") == .rememberFact)
+        #expect(YishuProductUtteranceRouter.classify("请帮我记下：周末去爬山") == .rememberFact)
         #expect(YishuProductUtteranceRouter.classify("以后不要在没有证据时自动写入长期记忆") == .recordLearning)
         #expect(YishuProductUtteranceRouter.classify("这个按钮为什么是灰色的？") == .conversation)
         #expect(YishuProductUtteranceRouter.shouldPreferProductKernel("记住刚才这个流程"))
@@ -767,6 +778,15 @@ struct leanring_buddyTests {
         #expect(spoken.hasSuffix("来源链接我放在文字里了。"))
     }
 
+    @Test func speechTextStripsPointTagsSoTheyAreNeverSpoken() {
+        let spoken = CompanionManager.speechText(
+            from: "内核就是操作系统的核心。\n[POINT:478,292:说话闭环]"
+        )
+        #expect(spoken == "内核就是操作系统的核心。")
+        #expect(!spoken.contains("POINT"))
+        #expect(!spoken.contains("478"))
+    }
+
     @Test func speechTextLeavesOrdinaryRepliesUntouched() {
         #expect(CompanionManager.speechText(from: "好的，我已经处理完了。") == "好的，我已经处理完了。")
     }
@@ -833,8 +853,20 @@ struct leanring_buddyTests {
         )
         #expect(
             CompanionManager.spokenRuntimeFailureMessage(
-                for: YishuAgentRuntimeClientError.turnFailed
+                for: YishuAgentRuntimeClientError.turnFailed(code: nil, message: nil)
             ) == "这一轮没做成。"
+        )
+        #expect(
+            CompanionManager.spokenRuntimeFailureMessage(
+                for: YishuAgentRuntimeClientError.turnFailed(code: nil, message: nil),
+                streamedDelta: "这句我想了太久，换个说法再来一次？"
+            ) == "这句我想了太久，换个说法再来一次？"
+        )
+        #expect(
+            CompanionManager.spokenRuntimeFailureMessage(
+                for: YishuAgentRuntimeClientError.turnTimedOut,
+                streamedDelta: "   "
+            ) == "等太久了，这一轮没回。"
         )
         #expect(
             CompanionManager.spokenRuntimeFailureMessage(
@@ -2052,10 +2084,20 @@ struct leanring_buddyTests {
         #expect(first == second)
     }
 
-    @Test func defaultTranscriptionProviderIsStepFunOnly() {
+    @Test func defaultTranscriptionProviderIsStepPlan() {
         let provider = BuddyTranscriptionProviderFactory.makeDefaultProvider()
-        #expect(provider.displayName == "阶跃 StepFun")
-        #expect(provider is StepFunTranscriptionProvider)
+        #expect(provider.displayName == "阶跃 Step Plan")
+        #expect(provider is StepPlanTranscriptionProvider)
+        #expect(BuddyTranscriptionProviderFactory.resolveProvider(preferredRawValue: "stepfun") is StepPlanTranscriptionProvider)
+        #expect(BuddyTranscriptionProviderFactory.resolveProvider(preferredRawValue: nil) is StepPlanTranscriptionProvider)
+        #expect(BuddyTranscriptionProviderFactory.resolveProvider(preferredRawValue: "unknown") is StepPlanTranscriptionProvider)
+        #expect(BuddyTranscriptionProviderFactory.resolveProvider(preferredRawValue: " stepfun ") is StepPlanTranscriptionProvider)
+        #expect(BuddyTranscriptionProviderFactory.resolveProvider(preferredRawValue: "stepfun-legacy") is StepFunTranscriptionProvider)
+        #expect(
+            BuddyTranscriptionProviderFactory.providerId(
+                for: BuddyTranscriptionProviderFactory.resolveProvider(preferredRawValue: "stepfun")
+            ) == "stepplan"
+        )
     }
 
     @Test func directClickResolutionKeyIncludesTargetAndROI() {

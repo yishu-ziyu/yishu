@@ -690,28 +690,35 @@ test("computer_control tool keeps delivered and unverified outcomes out of compl
 });
 
 test("Pi adapter completion text promotes only verified receipts", () => {
-  assert.equal(computerActionCompletionText({
+  assert.match(computerActionCompletionText({
     succeeded: true,
     verified: true,
     status: "verified",
     method: "ax_press",
     message: "Changed.",
-  }), "点好了。");
-  assert.equal(computerActionCompletionText({
+  }), /Status: verified/);
+  assert.match(computerActionCompletionText({
     succeeded: true,
     verified: false,
     status: "delivered",
     method: "quartz",
     message: "Posted.",
-  }), "已经点击，但界面结果还没确认。");
-  assert.equal(computerActionCompletionText({
+  }), /Status: unverified/);
+  assert.match(computerActionCompletionText({
+    succeeded: true,
+    verified: false,
+    status: "delivered",
+    method: "quartz",
+    message: "Posted.",
+  }), /must not claim success/);
+  assert.match(computerActionCompletionText({
     succeeded: false,
     verified: false,
     status: "stale",
     code: "target_stale",
     method: "unknown",
     message: "Target changed.",
-  }), "这次没点成功。");
+  }), /Status: failed/);
 });
 
 async function assertDirectTurnSecondCallIsBlocked(firstResult: {
@@ -770,9 +777,9 @@ async function assertDirectTurnSecondCallIsBlocked(firstResult: {
   assert.equal(activeTurn.actionCount, 1, "only the dispatched action counts");
   assert.equal(activeTurn.lastResult.status, firstResult.status);
   assert.equal(activeTurn.lastResult.verified, firstResult.verified);
-  assert.equal(
+  assert.match(
     computerActionCompletionText(activeTurn.lastResult),
-    firstResult.verified ? "点好了。" : "已经点击，但界面结果还没确认。",
+    firstResult.verified ? /Status: verified/ : /Status: unverified/,
   );
   await adapter.dispose();
 }
