@@ -74,6 +74,25 @@ test("completions providers POST /chat/completions", async () => {
   assert.deepEqual(output.newFacts, ["用户偏好要点列表"]);
 });
 
+test("MiniMax-M3 extraction disables thinking", async () => {
+  let body: Record<string, unknown> = {};
+  const m3: ResolvedModel = { ...COMPLETIONS_MODEL, id: "MiniMax-M3", name: "MiniMax-M3", providerId: "yishu-local-grok", baseUrl: "https://api.minimaxi.com/v1" };
+  const model = createCompletionsExtractionModel(
+    fakeRuntime(m3),
+    async (_input, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"new_facts":[],"confirmed_fact_ids":[]}' } }],
+        }),
+        { status: 200 },
+      );
+    },
+  );
+  await model.extract({ ...SAMPLE_INPUT, providerId: m3.providerId, modelId: m3.id });
+  assert.deepEqual(body.thinking, { type: "disabled" });
+});
+
 test("Codex providers POST /codex/responses and read the SSE wire", async () => {
   let url = "";
   let headers: Record<string, string> = {};

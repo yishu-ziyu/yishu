@@ -4,6 +4,7 @@
  * Input is the scrubbed visible reply, never chain-of-thought.
  */
 
+import { minimaxCompletionsExtras } from "./model-loop/openai-completions.js";
 import type { ModelProviderRuntime, ResolvedModel } from "./model-loop/types.js";
 import {
   buildResponsesBody,
@@ -81,6 +82,7 @@ async function excerptViaCompletions(
         ],
         stream: false,
         max_tokens: 256,
+        ...minimaxCompletionsExtras(model.id),
       }),
     },
   );
