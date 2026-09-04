@@ -3,7 +3,7 @@ import Testing
 @testable import Clicky
 
 struct YishuSentenceSpeechPipelineTests {
-    @Test @MainActor func streamsEachSentenceOnceAndStopsAfterTwo() async {
+    @Test @MainActor func streamsEachSentenceOnceAndSpeaksTheFinalTail() async {
         #expect(YishuSentenceSpeechPolicy.allowsStreaming(for: "解释一下当前页面"))
         #expect(!YishuSentenceSpeechPolicy.allowsStreaming(for: "点击左上角新对话"))
         #expect(!YishuSentenceSpeechPolicy.allowsStreaming(for: "先点击 A，再输入 hello"))
@@ -37,28 +37,28 @@ struct YishuSentenceSpeechPipelineTests {
         let handled = await pipeline.finish(authoritativeText: "第一句。第二句。收尾")
 
         #expect(handled)
-        #expect(spoken == ["第一句。", "第二句。"])
+        #expect(spoken == ["第一句。", "第二句。", "收尾"])
     }
 
-    @Test @MainActor func stopsAfterTwoCompleteSentencesWhileMoreTextArrives() async {
+    @Test @MainActor func stopsAfterSixCompleteSentencesWhileMoreTextArrives() async {
         var spoken: [String] = []
         let pipeline = YishuSentenceSpeechPipeline(
             speaker: { sentence in spoken.append(sentence) },
             stopPlayback: {}
         )
 
-        #expect(pipeline.consume("第一句。第二句。第三句。第四句。") == 2)
-        for _ in 0..<30 where spoken.count < 2 {
+        #expect(pipeline.consume("第一句。第二句。第三句。第四句。第五句。第六句。第七句。") == 6)
+        for _ in 0..<40 where spoken.count < 6 {
             await Task.yield()
         }
-        #expect(spoken == ["第一句。", "第二句。"])
-        #expect(pipeline.consume("第五句。") == 0)
+        #expect(spoken == ["第一句。", "第二句。", "第三句。", "第四句。", "第五句。", "第六句。"])
+        #expect(pipeline.consume("第八句。") == 0)
 
         let handled = await pipeline.finish(
-            authoritativeText: "第一句。第二句。第三句。第四句。第五句。"
+            authoritativeText: "第一句。第二句。第三句。第四句。第五句。第六句。第七句。第八句。"
         )
         #expect(handled)
-        #expect(spoken == ["第一句。", "第二句。"])
+        #expect(spoken == ["第一句。", "第二句。", "第三句。", "第四句。", "第五句。", "第六句。"])
     }
 
     @Test @MainActor func wallWithoutSentenceBoundaryDoesNotStreamSpeak() async {
@@ -79,9 +79,9 @@ struct YishuSentenceSpeechPipelineTests {
         #expect(!pipeline.didCompleteSpeech)
     }
 
-    @Test func searchCoverSpeaksWebSearchOnceAndNeverCountsAsAnswer() {
+    @Test func searchCoverNeverSpeaksACannedLine() {
         #expect(
-            YishuSearchCoverSpeech.shouldSpeak(
+            !YishuSearchCoverSpeech.shouldSpeak(
                 toolName: "web_search",
                 didSpeakCover: false,
                 didSpeakAnswer: false,
@@ -96,32 +96,6 @@ struct YishuSentenceSpeechPipelineTests {
                 hasVisibleAnswerText: false
             )
         )
-        #expect(
-            !YishuSearchCoverSpeech.shouldSpeak(
-                toolName: "web_search",
-                didSpeakCover: true,
-                didSpeakAnswer: false,
-                hasVisibleAnswerText: false
-            )
-        )
-        #expect(
-            !YishuSearchCoverSpeech.shouldSpeak(
-                toolName: "web_search",
-                didSpeakCover: false,
-                didSpeakAnswer: true,
-                hasVisibleAnswerText: false
-            )
-        )
-        #expect(
-            !YishuSearchCoverSpeech.shouldSpeak(
-                toolName: "web_search",
-                didSpeakCover: false,
-                didSpeakAnswer: false,
-                hasVisibleAnswerText: true
-            )
-        )
-        #expect(YishuSearchCoverSpeech.line == "好的，我去查查看。")
-        #expect(!YishuSearchCoverSpeech.line.contains("web_search"))
     }
 
     @Test func shortConfirmationsSpeakInFullAndEssaysUseDeterministicExcerpt() {
@@ -150,11 +124,11 @@ struct YishuSentenceSpeechPipelineTests {
     }
 
     @Test func longRepliesUseDeterministicVisibleSentencesWithoutRewriting() {
-        let visibleReply = "第一句保留原文里的事实。第二句也保留原文里的事实。第三句不应进入口播。"
+        let visibleReply = "第一句保留原文里的事实。第二句也保留原文里的事实。第三句。第四句。第五句。第六句。第七句不应进入口播。"
 
         #expect(
             YishuSpokenReplyBudget.deterministicExcerpt(from: visibleReply)
-                == "第一句保留原文里的事实。第二句也保留原文里的事实。"
+                == "第一句保留原文里的事实。第二句也保留原文里的事实。第三句。第四句。第五句。第六句。"
         )
         #expect(
             YishuSpokenReplyBudget.deterministicExcerpt(from: "短回答保持完整。")

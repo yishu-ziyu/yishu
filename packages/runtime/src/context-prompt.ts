@@ -1,4 +1,5 @@
 import type { ContextFrame, TurnStartCommand } from "./protocol.js";
+import { planVisualPromptForCommand } from "./prompt-images.js";
 import { highRiskReminder, scanForInjection, wrapUntrustedContent } from "./untrusted-content.js";
 
 /** Controlled memory snippet injected into a single ordinary turn prompt. */
@@ -390,11 +391,15 @@ export function localClockLine(now = new Date(), timeZone = "Asia/Shanghai"): st
   return `本机当前时间：${date} ${weekday}。`;
 }
 
-export function buildGroundedPrompt(
+function frontmostAppLine(contextFrame: ContextFrame): string {
+  const name = contextFrame.frontmostApplication?.value.name?.trim();
+  return `前台应用：${name && name.length > 0 ? name : "未知"}。`;
+}
+
+function sharedPromptPrefix(
   command: TurnStartCommand,
-  options: BuildGroundedPromptOptions = {},
-): string {
-  const groundedContext = contextWithoutImageBytes(command.payload.contextFrame);
+  options: BuildGroundedPromptOptions,
+): string[] {
   const privateSession = command.payload.sessionScope?.kind === "private";
   const memories = privateSession ? [] : memoriesFromCommand(command);
   const mindLessons = privateSession ? [] : mindLessonsFromCommand(command);
@@ -404,6 +409,83 @@ export function buildGroundedPrompt(
     : [];
   const recentTrail = privateSession ? [] : recentTrailFromCommand(command);
   const behaviorRules = privateSession ? [] : behaviorRulesFromCommand(command);
+  return [
+    ...formatConversationHistoryBlock(conversationHistory),
+    ...formatMemoryBlock(memories),
+    ...formatBehaviorRulesBlock(behaviorRules),
+    ...formatMindBlock(mindLessons),
+    ...formatDelegatedResultsBlock(delegatedResults),
+    ...formatRecentTrailBlock(recentTrail),
+  ];
+}
+
+const PROMPT_SECTION_MARKERS = [
+  ["history", '<untrusted source="conversation_history">', "</untrusted>"],
+  ["memory", "<durable_memories>", "</durable_memories>"],
+  ["rules", "<behavior_rules>", "</behavior_rules>"],
+  ["mind", "<mind_lessons>", "</mind_lessons>"],
+  ["delegated", '<untrusted source="delegated_results">', "</untrusted>"],
+  ["trail", '<untrusted source="recent_context_trail">', "</untrusted>"],
+  ["utterance", "<user_utterance>", "</user_utterance>"],
+] as const;
+
+export type GroundedPromptSectionSizes = {
+  history: number;
+  memory: number;
+  rules: number;
+  mind: number;
+  delegated: number;
+  trail: number;
+  utterance: number;
+  remainder: number;
+  total: number;
+};
+
+/** Tagged-section lengths only. Never returns prompt text. */
+export function groundedPromptSectionSizes(prompt: string): GroundedPromptSectionSizes {
+  const sizes: GroundedPromptSectionSizes = {
+    history: 0,
+    memory: 0,
+    rules: 0,
+    mind: 0,
+    delegated: 0,
+    trail: 0,
+    utterance: 0,
+    remainder: 0,
+    total: prompt.length,
+  };
+  let accounted = 0;
+  for (const [key, open, close] of PROMPT_SECTION_MARKERS) {
+    const start = prompt.indexOf(open);
+    if (start < 0) continue;
+    const end = prompt.indexOf(close, start + open.length);
+    if (end < 0) continue;
+    const length = end + close.length - start;
+    sizes[key] = length;
+    accounted += length;
+  }
+  sizes.remainder = Math.max(0, prompt.length - accounted);
+  return sizes;
+}
+
+export function buildGroundedPrompt(
+  command: TurnStartCommand,
+  options: BuildGroundedPromptOptions = {},
+): string {
+  const visual = planVisualPromptForCommand(command);
+  if (!visual.attachVisual) {
+    return [
+      localClockLine(),
+      frontmostAppLine(command.payload.contextFrame),
+      "",
+      ...sharedPromptPrefix(command, options),
+      "<user_utterance>",
+      command.payload.utterance,
+      "</user_utterance>",
+    ].join("\n");
+  }
+
+  const groundedContext = contextWithoutImageBytes(command.payload.contextFrame);
   const contextJson = JSON.stringify(groundedContext, null, 2);
   // Screen-derived context is untrusted: scan it, and when risky wrap it as
   // data (never stripped) plus prepend a reminder. Low risk stays byte-identical.
@@ -422,12 +504,7 @@ export function buildGroundedPrompt(
       ? ["This turn has exactly one image bound to the current source window. Use only that image for current-page action items; do not infer content from any other window."]
       : []),
     "",
-    ...formatConversationHistoryBlock(conversationHistory),
-    ...formatMemoryBlock(memories),
-    ...formatBehaviorRulesBlock(behaviorRules),
-    ...formatMindBlock(mindLessons),
-    ...formatDelegatedResultsBlock(delegatedResults),
-    ...formatRecentTrailBlock(recentTrail),
+    ...sharedPromptPrefix(command, options),
     ...formatNumberedTargetsBlock(command.payload.contextFrame),
     ...contextLines,
     "",

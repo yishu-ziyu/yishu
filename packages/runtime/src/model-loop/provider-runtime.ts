@@ -10,7 +10,8 @@ import type { YishuCredentialStore } from "../auth-store.js";
 import {
   defaultLocalModelConfig,
   providerById,
-  resolveProviderApiKey,
+  resolveEffectiveApiKey,
+  withEffectiveChatExit,
   type LocalModelConfig,
   type LocalModelProviderConfig,
 } from "../model-config.js";
@@ -95,8 +96,13 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
     }
   }
 
+  private modelConfig(): LocalModelConfig {
+    return this.options.modelConfig ?? defaultLocalModelConfig();
+  }
+
   private localGrokProvider(): LocalModelProviderConfig {
-    return providerById(this.options.modelConfig ?? defaultLocalModelConfig());
+    const config = this.modelConfig();
+    return withEffectiveChatExit(config, providerById(config));
   }
 
   getProvider(providerId: string): ProviderDefinition | undefined {
@@ -121,7 +127,10 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
 
   async checkAuth(providerId: string): Promise<{ type: "api_key" | "oauth" } | undefined> {
     if (providerId === LOCAL_GROK_PROVIDER) {
-      const key = resolveProviderApiKey(this.localGrokProvider()) ?? this.options.localGrokBearer.value();
+      const config = this.modelConfig();
+      const provider = this.localGrokProvider();
+      const key = resolveEffectiveApiKey(config, providerById(config))
+        ?? this.options.localGrokBearer.value();
       return key && key.length > 0 ? { type: "api_key" } : undefined;
     }
     const provider = this.getProvider(providerId);
@@ -132,7 +141,9 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
 
   async getAuth(providerId: string): Promise<unknown> {
     if (providerId === LOCAL_GROK_PROVIDER) {
-      const key = resolveProviderApiKey(this.localGrokProvider()) ?? this.options.localGrokBearer.value();
+      const config = this.modelConfig();
+      const key = resolveEffectiveApiKey(config, providerById(config))
+        ?? this.options.localGrokBearer.value();
       return key && key.length > 0 ? { apiKey: key } : undefined;
     }
     const credential = await this.usableCredential(providerId);
@@ -159,9 +170,10 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
 
   async resolveModel(providerId: string, modelId: string): Promise<ResolvedModel> {
     if (providerId === LOCAL_GROK_PROVIDER) {
+      const baseUrl = this.localGrokProvider().baseUrl;
       let model = this.localGrokModels.get(modelId);
-      if (!model) {
-        model = localGrokModel(modelId, this.localGrokProvider().baseUrl);
+      if (!model || model.baseUrl !== baseUrl) {
+        model = localGrokModel(modelId, baseUrl);
         this.localGrokModels.set(modelId, model);
       }
       return model;
@@ -188,7 +200,9 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
 
   async bearer(providerId: string): Promise<string> {
     if (providerId === LOCAL_GROK_PROVIDER) {
-      const key = resolveProviderApiKey(this.localGrokProvider()) ?? this.options.localGrokBearer.value();
+      const config = this.modelConfig();
+      const key = resolveEffectiveApiKey(config, providerById(config))
+        ?? this.options.localGrokBearer.value();
       if (key && key.length > 0) return key;
     }
     const credential = await this.usableCredential(providerId);

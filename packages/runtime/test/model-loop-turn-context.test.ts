@@ -104,6 +104,7 @@ function textResponse(text: string): readonly string[] {
 
 function toolCallResponse(call: { id: string; name: string; argumentsJson: string }): readonly string[] {
   return [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: "行。" } }] })}\n\n`,
     `data: ${JSON.stringify({
       choices: [{
         delta: {

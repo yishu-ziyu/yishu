@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
@@ -20,7 +20,6 @@ import {
 import { attachConversationHistory } from "../src/context-prompt.js";
 import {
   computerActionRequestedPayloadSchema,
-  LOCAL_GROK_BASE_URL,
   LOCAL_GROK_DEFAULT_MODEL,
   LOCAL_GROK_PROVIDER,
   PROTOCOL_VERSION,
@@ -63,6 +62,9 @@ type FakeSessionEvent = {
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
+  delta?: string;
+  imageCount?: number;
+  imageBytes?: number;
 };
 
 /**
@@ -385,7 +387,7 @@ test("direct-click POINT still dispatches one left_click instead of flying", asy
   await turn;
   assert.equal(harness.sessions[0]?.prompts.length, 1, "direct actions do not enter POINT repair");
   const completed = events.find((event) => event.type === "response.completed");
-  assert.equal(completed?.payload.text, "点好了。");
+  assert.equal(completed?.payload.text, "我点那个。");
   assert.doesNotMatch(String(completed?.payload.text), /POINT/);
 });
 
@@ -542,13 +544,10 @@ test("startTurn prompts with grounded text and streams deltas to completion", as
     !prompt.text.includes("c2NyZWVu"),
     "screenshot base64 must stay out of the text prompt",
   );
-  assert.equal(prompt.images.length, 1);
-  assert.deepEqual(prompt.images[0], {
-    type: "image",
-    data: "c2NyZWVu",
-    mimeType: "image/jpeg",
-    label: "cursor display (image dimensions: 1280x800 pixels)",
-  });
+  assert.equal(prompt.images.length, 0);
+  assert.match(prompt.text, /前台应用：/);
+  assert.doesNotMatch(prompt.text, /<context_frame>/);
+  assert.doesNotMatch(prompt.text, /<numbered_targets>/);
 
   const started = events.find((event) => event.type === "turn.started");
   assert.ok(started);
@@ -557,7 +556,8 @@ test("startTurn prompts with grounded text and streams deltas to completion", as
   assert.equal(started.payload.sessionId, session.sessionId);
   assert.equal(started.payload.provider, LOCAL_GROK_PROVIDER);
   assert.equal(started.payload.model, LOCAL_GROK_DEFAULT_MODEL);
-  assert.equal(started.payload.baseUrl, LOCAL_GROK_BASE_URL);
+  assert.equal(started.payload.baseUrl, "127.0.0.1:8787");
+  assert.equal(typeof started.payload.receivedAt, "string");
 
   const deltaText = events
     .filter((event) => event.type === "response.delta")
@@ -570,6 +570,78 @@ test("startTurn prompts with grounded text and streams deltas to completion", as
   assert.equal(completed.payload.verified, false);
   assert.equal(completed.payload.verifier, "conversation-response-only");
   assert.ok(!events.some((event) => event.type === "turn.failed"));
+});
+
+test("timing records SSE first byte, first reasoning, and visible first byte with reasoningChars", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "yishu-loop-timing-"));
+  const filePath = path.join(dir, "runtime-timing.jsonl");
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const previousPath = process.env.YISHU_RUNTIME_TIMING_PATH;
+  process.env.YISHU_RUNTIME_TIMING_PATH = filePath;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.YISHU_RUNTIME_TIMING_PATH;
+    else process.env.YISHU_RUNTIME_TIMING_PATH = previousPath;
+  });
+
+  const harness = createFakePiHarness();
+  harness.configureSession = (session) => {
+    session.promptHandler = async (s) => {
+      s.emitSessionEvent({ type: "request_sent", imageCount: 0, imageBytes: 0 });
+      s.emitSessionEvent({ type: "sse_first_byte" });
+      s.emitSessionEvent({ type: "reasoning_delta", delta: "hidden-chain" });
+      s.emitTextDelta("<think>tag-think</think>在。");
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(makeCommand("在吗"), (event) => events.push(event));
+
+  const spoken = events
+    .filter((event) => event.type === "response.delta")
+    .map((event) => String(event.payload.text))
+    .join("");
+  assert.equal(spoken, "在。");
+
+  const lines = (await readFile(filePath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as {
+    name?: string;
+    reasoningChars?: number;
+  });
+  const names = lines.map((row) => row.name);
+  const sse = names.indexOf("model.sse_first_byte");
+  const thought = names.indexOf("model.first_reasoning");
+  const visible = names.indexOf("model.first_byte");
+  assert.ok(sse >= 0 && thought > sse && visible > thought);
+  const firstByte = lines.find((row) => row.name === "model.first_byte");
+  assert.equal(firstByte?.reasoningChars, "hidden-chain".length + "tag-think".length);
+});
+
+test("plain chat attaches no screenshots even with extra displays", async (t) => {
+  const harness = createFakePiHarness();
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+  const command = makeCommand("今天星期几");
+  command.payload.contextFrame.screenshots = [
+    ...command.payload.contextFrame.screenshots,
+    {
+      label: "display 2",
+      mediaType: "image/jpeg",
+      base64Data: "ZXh0cmE=",
+      displayWidthPoints: 1440,
+      displayHeightPoints: 900,
+      displayOriginXPoints: 1440,
+      displayOriginYPoints: 0,
+      screenshotWidthPixels: 1280,
+      screenshotHeightPixels: 800,
+    },
+  ];
+  command.payload.contextFrame.numberedTargets = [
+    { id: "1", role: "AXButton", title: "Back", description: null, enabled: true },
+  ];
+  await adapter.startTurn(command, () => undefined);
+  assert.equal(harness.sessions[0]!.prompts[0]!.images.length, 0);
+  assert.doesNotMatch(harness.sessions[0]!.prompts[0]!.text, /numbered_targets/);
 });
 
 test("expired ContextFrame fails before the model prompt and publishes no response", async (t) => {
@@ -1300,10 +1372,13 @@ test("a first-byte timeout fails the turn as first_byte_timeout", async (t) => {
   const events: RuntimeEvent[] = [];
   await adapter.startTurn(makeCommand(), (event) => events.push(event));
 
-  assert.deepEqual(eventTypes(events), ["turn.started", "turn.failed"]);
+  assert.deepEqual(eventTypes(events), ["turn.started", "response.delta", "turn.failed"]);
   const failed = events.at(-1)!;
   assert.equal(failed.payload.code, "first_byte_timeout");
   assert.equal(failed.payload.message, FIRST_BYTE_TIMEOUT_MESSAGE);
+  const delta = events.find((event) => event.type === "response.delta");
+  assert.equal(delta?.payload.text, "这句我想了太久，换个说法再来一次？");
+  assert.equal(delta?.payload.phase, "model.first_byte");
 });
 
 test("prompt rejection fails the turn with a credential-safe message", async (t) => {
@@ -1702,9 +1777,10 @@ test("direct click turn requests the action and completes with verified language
     "response.completed",
   ]);
   const completed = events.at(-1)!;
-  assert.equal(completed.payload.text, "点好了。");
+  assert.equal(completed.payload.text, "这句模型补充不该出现在直点回合里。");
   assert.equal(completed.payload.verified, true);
   assert.equal(completed.payload.verifier, "macos-accessibility-result");
+  assert.equal(completed.payload.phase, "model.done");
 });
 
 test("direct click turn keeps an unverified receipt out of completion language", async (t) => {
@@ -1719,7 +1795,7 @@ test("direct click turn keeps an unverified receipt out of completion language",
 
   const completed = events.find((event) => event.type === "response.completed");
   assert.ok(completed);
-  assert.equal(completed.payload.text, "已经点击，但界面结果还没确认。");
+  assert.equal(completed.payload.text, "这句模型补充不该出现在直点回合里。");
   assert.equal(completed.payload.verified, false);
 });
 
@@ -1735,7 +1811,7 @@ test("direct click turn admits failure when the receipt failed", async (t) => {
 
   const completed = events.find((event) => event.type === "response.completed");
   assert.ok(completed);
-  assert.equal(completed.payload.text, "这次没点成功。");
+  assert.equal(completed.payload.text, "这句模型补充不该出现在直点回合里。");
   assert.equal(completed.payload.verified, false);
 });
 
@@ -1816,7 +1892,7 @@ test("model computer turns project an unverified receipt instead of model comple
   const completed = events.find((event) => event.type === "response.completed");
   assert.ok(completed);
   assert.equal(completed.payload.verified, false);
-  assert.equal(completed.payload.text, "已经点击，但界面结果还没确认。");
+  assert.equal(completed.payload.text, "");
   assert.doesNotMatch(String(completed.payload.text), /完成|点好了/u);
 });
 
@@ -1913,4 +1989,80 @@ test("cold Pi sessions isolate conversation history and private sessions reject 
     harness.sessions[2]!.prompts[0]!.text,
     /conversation_history|private history must stay out/,
   );
+});
+
+test("empty-text-completion: no text + verified action completes", async (t) => {
+  const harness = createFakePiHarness();
+  const events: RuntimeEvent[] = [];
+  const requested = deferred<RuntimeEvent>();
+  const sink = (event: RuntimeEvent): void => {
+    events.push(event);
+    if (event.type === "computer.action.requested") requested.resolve(event);
+  };
+  const port = new StdioComputerUsePort(sink, 30_000);
+  const { adapter, workdir } = await makeAdapter(harness, port);
+  cleanupAfter(t, adapter, workdir);
+
+  harness.configureSession = (session) => {
+    session.promptHandler = async (s) => {
+      const tool = harness.capturedTools[0]!;
+      s.emitSessionEvent({ type: "tool_execution_start", toolName: "computer_control" });
+      await tool.execute(
+        "tool-call-1",
+        { action: "left_click", x: 185, y: 375, label: "保存" },
+        undefined,
+        undefined,
+        {} as never,
+      );
+      s.emitSessionEvent({ type: "tool_execution_end", toolName: "computer_control", isError: false });
+    };
+  };
+
+  const command = makeCommand("点击保存按钮");
+  const turn = adapter.startTurn(command, sink);
+  const requestEvent = await requested.promise;
+  const payload = computerActionRequestedPayloadSchema.parse(requestEvent.payload);
+  assert.equal(port.resolve({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "computer.action.result",
+    requestId: command.requestId,
+    traceId: command.traceId,
+    sentAt: new Date().toISOString(),
+    payload: {
+      actionId: payload.actionId,
+      ...(payload.attemptId === undefined ? {} : { attemptId: payload.attemptId }),
+      succeeded: true,
+      verified: true,
+      status: "verified",
+      code: "verified_accessibility",
+      method: "ax_press",
+      message: "AXPress succeeded.",
+    },
+  }), true);
+  await turn;
+
+  const completed = events.find((event) => event.type === "response.completed");
+  const failed = events.find((event) => event.type === "turn.failed");
+  assert.equal(failed, undefined);
+  assert.ok(completed);
+  assert.equal(completed.payload.text, "");
+  assert.equal(completed.payload.verified, true);
+});
+
+test("empty-text-completion: no text + nothing fails", async (t) => {
+  const harness = createFakePiHarness();
+  harness.configureSession = (session) => {
+    session.promptHandler = async () => {
+      // Intentionally no text and no tools.
+    };
+  };
+  const { adapter, workdir } = await makeAdapter(harness);
+  cleanupAfter(t, adapter, workdir);
+
+  const events: RuntimeEvent[] = [];
+  await adapter.startTurn(makeCommand("你好"), (event) => events.push(event));
+  const failed = events.find((event) => event.type === "turn.failed");
+  assert.ok(failed);
+  assert.equal(failed.payload.code, "pi_turn_failed");
+  assert.equal(events.some((event) => event.type === "response.completed"), false);
 });

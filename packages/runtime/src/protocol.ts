@@ -23,22 +23,12 @@ export const LOCAL_GROK_PROVIDER = "yishu-local-grok" as const;
 export const LOCAL_GROK_BASE_URL = "http://127.0.0.1:8787/v1" as const;
 export const LOCAL_GROK_DEFAULT_MODEL = "MiniMax-M3" as const;
 
-/** Current Grok choices exposed by Clicky's model picker. */
-export const LOCAL_GROK_MODEL_IDS = [
-  "MiniMax-M3",
-  "grok-4.6",
-  "grok-4.5",
-  "grok-4.3",
-  "grok-4.20-0309-reasoning",
-  "grok-4.20-0309-non-reasoning",
-  "grok-4.20-multi-agent-0309",
-  "grok-3-mini",
-  "grok-3-mini-fast",
-  "grok-composer-2.5-fast",
-  "grok-build-0.1",
-] as const;
-
-const grokModelIdSchema = z.enum(LOCAL_GROK_MODEL_IDS);
+/**
+ * Local model ids are owned by model-config.json; the wire only bounds the
+ * shape. A hard-coded enum here rejected MiniMax-M2.5 in ~20 ms before the turn
+ * reached the runtime, while the same id was valid in model-config.json.
+ */
+const localModelIdSchema = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._:-]+$/);
 
 const confidenceSchema = z.number().min(0).max(1);
 
@@ -398,7 +388,7 @@ export const capabilityProfileSchema = z.enum(["conversation", "observe", "build
 export const localModelPreferenceSchema = z
   .object({
     provider: z.literal(LOCAL_GROK_PROVIDER),
-    model: grokModelIdSchema,
+    model: localModelIdSchema,
   })
   .strict();
 
@@ -530,6 +520,15 @@ export const computerActionResultCommandSchema = z.object({
 export const runtimePingCommandSchema = z.object({
   schemaVersion: z.literal(PROTOCOL_VERSION),
   type: z.literal("runtime.ping"),
+  requestId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  sentAt: z.string().datetime(),
+  payload: z.object({}).default({}),
+});
+
+export const modelsProbeCommandSchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("models.probe"),
   requestId: z.string().uuid(),
   traceId: z.string().uuid(),
   sentAt: z.string().datetime(),
@@ -901,6 +900,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   delegatedTaskListCommandSchema,
   computerActionResultCommandSchema,
   runtimePingCommandSchema,
+  modelsProbeCommandSchema,
   trailObserveCommandSchema,
   authStatusCommandSchema,
   authLoginStartCommandSchema,
@@ -949,6 +949,7 @@ export type ComputerActionRequestedPayload = z.infer<typeof computerActionReques
 export type ComputerActionResultPayload = z.infer<typeof computerActionResultPayloadSchema>;
 export type ComputerActionResultCommand = z.infer<typeof computerActionResultCommandSchema>;
 export type TrailObserveCommand = z.infer<typeof trailObserveCommandSchema>;
+export type ModelsProbeCommand = z.infer<typeof modelsProbeCommandSchema>;
 export type AuthStatusCommand = z.infer<typeof authStatusCommandSchema>;
 export type AuthLoginStartCommand = z.infer<typeof authLoginStartCommandSchema>;
 export type AuthPromptReplyCommand = z.infer<typeof authPromptReplyCommandSchema>;
@@ -984,6 +985,7 @@ export type RuntimeEventType =
   | "runtime.ready"
   | "runtime.pong"
   | "runtime.status"
+  | "models.probed"
   | "turn.started"
   | "turn.interrupt.accepted"
   | "turn.interrupt.rejected"

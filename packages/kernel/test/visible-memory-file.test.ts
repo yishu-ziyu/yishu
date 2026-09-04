@@ -128,6 +128,7 @@ test("remember and extract write the visible file; forget removes the bullet", a
   });
   assert.equal(remembered.status, "verified");
   assert.match(await visible.readText(), /周四把钥匙放在抽屉/);
+  assert.equal((await kernel.memory!.truth.listFacts("personal")).length, 0);
 
   const queue = new InMemoryExtractionQueue();
   await queue.enqueue({

@@ -149,6 +149,29 @@ export function attachObservationalPointDirective(
   return body.length === 0 ? tag : `${body}\n${tag}`;
 }
 
+/** Inner text of `<think>` blocks, including an unclosed tail. Not spoken. */
+export function thinkInnerCharCount(rawText: string): number {
+  let count = 0;
+  let cursor = 0;
+  const open = /<\s*think\b[^>]*>/gi;
+  const close = /<\/\s*think\s*>/gi;
+  while (cursor < rawText.length) {
+    open.lastIndex = cursor;
+    const start = open.exec(rawText);
+    if (!start) break;
+    const innerStart = start.index + start[0].length;
+    close.lastIndex = innerStart;
+    const end = close.exec(rawText);
+    if (!end) {
+      count += rawText.length - innerStart;
+      break;
+    }
+    count += end.index - innerStart;
+    cursor = end.index + end[0].length;
+  }
+  return count;
+}
+
 function cleanVisibleText(rawText: string): string {
   const withoutFences = rawText.replace(fencedBlockPattern, "").replace(thinkBlockPattern, "");
   const withoutComputerControl = withoutFences
@@ -291,6 +314,10 @@ export class AssistantOutputStreamProjector {
     };
   }
 
+  thinkChars(): number {
+    return thinkInnerCharCount(this.rawText);
+  }
+
   private takeNewVisibleSuffix(nextVisibleText: string): string {
     if (!nextVisibleText.startsWith(this.emittedText)) {
       return "";
@@ -365,6 +392,10 @@ export class AssistantOutputGenerationProjector {
   push(generation: number, delta: string, bufferUntilComplete = false): string {
     if (!this.accepts(generation)) return "";
     return this.projectors.get(generation)?.push(delta, bufferUntilComplete) ?? "";
+  }
+
+  thinkChars(generation: number): number {
+    return this.projectors.get(generation)?.thinkChars() ?? 0;
   }
 
   complete(generation: number): AssistantOutputGenerationCompletion {

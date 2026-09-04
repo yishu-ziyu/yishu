@@ -1,20 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
-import os from "node:os";
-import { join } from "node:path";
-import {
-  createYishuAgentSession,
-  createYishuProviderRuntime,
-  isFirstByteTimeoutError,
-  type AnyToolDefinition,
-  type ModelProviderRuntime,
-  type ModelSession,
-  type PromptImage,
-  type ResolvedModel,
-  type ToolDefinition,
-  type TurnContextProviderFactory,
-} from "./model-loop/index.js";
+import { createYishuAgentSession, createYishuProviderRuntime, isFirstByteTimeoutError, FIRST_BYTE_FALLBACK_SPEECH, type AnyToolDefinition, type ModelProviderRuntime, type ModelSession, type PromptImage, type ResolvedModel, type ToolDefinition, type TurnContextProviderFactory } from "./model-loop/index.js";
 import {
   AssistantOutputGenerationProjector,
   attachObservationalPointDirective,
@@ -23,6 +10,17 @@ import {
   utteranceRequiresObservationalPointing,
 } from "./assistant-output.js";
 import { intentAllowsComputerEffect } from "./intent-frame.js";
+import {
+  planVisualPromptForCommand,
+  promptImageByteLength,
+  selectPromptScreenshots,
+} from "./prompt-images.js";
+import {
+  beginRuntimeTiming,
+  endRuntimeTiming,
+  lastTurnErrorPath,
+  runtimeTimingFor,
+} from "./observability/runtime-timing.js";
 import {
   createComputerControlTool,
   type ComputerControlToolAction,
@@ -63,7 +61,7 @@ import {
   type ComputerActionResult,
   type ComputerUsePort,
 } from "./computer-use-port.js";
-import { buildGroundedPrompt, screenshotDimensionCaption } from "./context-prompt.js";
+import { buildGroundedPrompt, groundedPromptSectionSizes, screenshotDimensionCaption } from "./context-prompt.js";
 import { YISHU_SYSTEM_PROMPT } from "./persona.js";
 import {
   safeRuntimeErrorMessage,
@@ -71,10 +69,10 @@ import {
   type AuthTransitionKind,
 } from "./auth-service.js";
 import { createYishuCredentialStore } from "./auth-store.js";
-import { readModelConfigSync } from "./model-config.js";
+import { baseUrlHost, readModelConfigSync, resolveChatExit } from "./model-config.js";
+import type { QualityRecorder } from "./observability/quality-recorder.js";
 import type { AuthProviderId } from "./auth-protocol.js";
 import {
-  LOCAL_GROK_BASE_URL,
   LOCAL_GROK_DEFAULT_MODEL,
   LOCAL_GROK_PROVIDER,
   modelPreferenceSchema,
@@ -605,6 +603,7 @@ export interface YishuLoopRuntimeAdapterOptions {
   createSession?: typeof createYishuAgentSession;
   interruptionSteerTimeoutMs?: number;
   now?: () => Date;
+  qualityRecorder?: QualityRecorder;
 }
 
 export class YishuLoopRuntimeAdapter implements AgentRuntime {
@@ -612,6 +611,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
   private readonly createSession: typeof createYishuAgentSession;
   private readonly interruptionSteerTimeoutMs: number;
   private readonly now: () => Date;
+  private readonly qualityRecorder: QualityRecorder | undefined;
   readonly authService: YishuAuthService;
   private readonly sessions = new Map<string, ModelSession>();
   private readonly activeSessionByRequestId = new Map<string, ModelSession>();
@@ -652,6 +652,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     this.interruptionSteerTimeoutMs = options.interruptionSteerTimeoutMs
       ?? INTERRUPTION_STEER_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
+    this.qualityRecorder = options.qualityRecorder;
     // Keep provider/model state in this process. In particular, do not read
     // or write any global model catalog. OAuth state is product-owned under
     // Yishu/Auth/auth.json instead. The registry is OAuth-only by
@@ -853,10 +854,12 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       this.activeTurnOperations.delete(operation);
       this.pendingRequestIds.delete(command.requestId);
       this.cancelledRequestIds.delete(command.requestId);
+      endRuntimeTiming(command.requestId);
     }
   }
 
   private async runTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    const timing = runtimeTimingFor(command.requestId) ?? beginRuntimeTiming(command.requestId);
     let preference!: ModelPreference;
     let model: RuntimeModel;
     let session: ModelSession;
@@ -869,18 +872,18 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       if (preference.provider !== LOCAL_GROK_PROVIDER) {
         providerTurn = this.registerProviderTurn(preference.provider, command.requestId);
       }
-      model = await this.modelFor(preference);
+      model = await timing.track("modelFor", this.modelFor(preference));
       if (this.isRequestCancelled(command.requestId)) {
         if (providerTurn) this.settleProviderTurn(providerTurn);
         return;
       }
-      const acquiredSession = await this.sessionFor(
+      const acquiredSession = await timing.track("sessionFor", this.sessionFor(
         command.payload.capabilityProfile,
         preference,
         model,
         command.payload.conversationId ?? command.requestId,
         normalizeSessionScope(command.payload.sessionScope),
-      );
+      ));
       session = acquiredSession.session;
       sessionCreated = acquiredSession.created;
       sessionKey = acquiredSession.key;
@@ -949,6 +952,12 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       actionBudget,
     });
     let computerActionAttempted = false;
+    let completedToolResult = false;
+    let emittedVisibleDelta = false;
+    let recordedFirstByte = false;
+    let recordedSseFirstByte = false;
+    let recordedFirstReasoning = false;
+    let reasoningCharsBeforeVisible = 0;
     const generationState = new PiTurnGenerationState(
       directComputerAction,
       true,
@@ -956,12 +965,41 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     );
     this.activeGenerationByRequestId.set(command.requestId, generationState);
     this.activeGenerationBySessionKey.set(sessionKey, generationState);
-    const emitVisibleDelta = (generation: number, text: string): void => {
+    const recordQuality = (
+      name: "turn.start" | "runtime.turn_received" | "model.request_sent" | "model.first_byte" | "model.done",
+      extra?: { durationMs?: number; imageCount?: number; imageBytes?: number },
+    ): void => {
+      void this.qualityRecorder?.record({
+        name,
+        sessionId: session.sessionId,
+        requestId: command.requestId,
+        traceId: command.traceId,
+        occurredAt: this.now().toISOString(),
+        ...(extra?.durationMs === undefined ? {} : { durationMs: extra.durationMs }),
+        attributes: {
+          providerId: preference.provider,
+          modelId: preference.model,
+          ...(extra?.imageCount === undefined ? {} : { imageCount: extra.imageCount }),
+          ...(extra?.imageBytes === undefined ? {} : { imageBytes: extra.imageBytes }),
+        },
+      }).catch(() => undefined);
+    };
+    const emitVisibleDelta = (generation: number, text: string, meta: { firstByte?: boolean } = {}): void => {
       if (text.length === 0 || !generationState.accepts(generation)) return;
       generationState.appendText(generation, text);
+      emittedVisibleDelta = true;
+      const firstByte = meta.firstByte === true || !recordedFirstByte;
+      if (firstByte && !recordedFirstByte) {
+        recordedFirstByte = true;
+        timing.mark("model.first_byte", {
+          reasoningChars: reasoningCharsBeforeVisible + generationState.output.thinkChars(generation),
+        });
+        recordQuality("model.first_byte");
+      }
       emit(runtimeEvent("response.delta", command.requestId, command.traceId, {
         text,
         generation,
+        ...(firstByte ? { firstByte: true, phase: "model.first_byte" } : {}),
       }));
     };
     const researchTrace = emptyResearchCompletionTrace();
@@ -977,6 +1015,21 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       if (event.type === "turn_end") {
         generationState.observeTurnEnd(event.message);
       }
+      if (event.type === "sse_first_byte") {
+        if (recordedSseFirstByte) return;
+        recordedSseFirstByte = true;
+        timing.mark("model.sse_first_byte");
+      }
+
+      if (event.type === "reasoning_delta") {
+        if (event.delta.length === 0) return;
+        if (!recordedFirstReasoning) {
+          recordedFirstReasoning = true;
+          timing.mark("model.first_reasoning");
+        }
+        if (!recordedFirstByte) reasoningCharsBeforeVisible += event.delta.length;
+      }
+
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
         const generation = generationState.generationForMessage(event.message);
         if (generation === undefined) return;
@@ -985,6 +1038,20 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
           event.assistantMessageEvent.delta,
           bufferComputerModelText || generationState.isDirectAction(generation),
         ));
+      }
+
+      if (event.type === "request_sent") {
+        timing.mark("model.request_sent");
+        recordQuality("model.request_sent", {
+          imageCount: event.imageCount,
+          imageBytes: event.imageBytes,
+        });
+        emit(runtimeEvent("runtime.status", command.requestId, command.traceId, {
+          status: "model.request_sent",
+          phase: "model.request_sent",
+          imageCount: event.imageCount,
+          imageBytes: event.imageBytes,
+        }));
       }
 
       if (event.type === "tool_execution_start") {
@@ -999,6 +1066,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
 
       if (event.type === "tool_execution_end") {
         noteResearchTool(researchTrace, event.toolName, event.isError);
+        completedToolResult = true;
         const generation = generationState.generationForToolEnd(event.toolCallId);
         if (!generationState.accepts(generation)) return;
         emit(runtimeEvent("tool.completed", command.requestId, command.traceId, {
@@ -1009,6 +1077,8 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       }
     });
 
+    const receivedAt = this.now().toISOString();
+    const chatExit = resolveChatExit(readModelConfigSync());
     emit(runtimeEvent("turn.started", command.requestId, command.traceId, {
       runtime: "yishu-loop",
       capabilityProfile: command.payload.capabilityProfile,
@@ -1016,8 +1086,11 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       provider: preference.provider,
       model: preference.model,
       generation: generationState.currentGeneration,
-      ...(preference.provider === LOCAL_GROK_PROVIDER ? { baseUrl: model.baseUrl } : {}),
+      receivedAt,
+      chatExit,
+      baseUrl: baseUrlHost(model.baseUrl),
     }));
+    recordQuality("turn.start");
 
     const computerTurn: ActiveComputerTurn = {
       requestId: command.requestId,
@@ -1046,7 +1119,12 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         lastObservation: observationFromContextFrame(command.payload.contextFrame),
       }),
     };
-    const turnImages: readonly PromptImage[] = command.payload.contextFrame.screenshots.map((screenshot) => ({
+    const visualPlan = planVisualPromptForCommand(command);
+    const promptScreenshots = selectPromptScreenshots(
+      command.payload.contextFrame.screenshots,
+      visualPlan,
+    );
+    const turnImages: readonly PromptImage[] = promptScreenshots.map((screenshot) => ({
       type: "image" as const,
       data: screenshot.base64Data,
       mimeType: screenshot.mediaType,
@@ -1066,10 +1144,26 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
           && command.payload.contextFrame.screenshots.length === 1
           && command.payload.contextFrame.screenshots[0]?.sourceWindowNumber
             === command.payload.contextFrame.activeWindow?.value.windowNumber;
-        await session.prompt(buildGroundedPrompt(command, {
+        const promptText = buildGroundedPrompt(command, {
           includeConversationHistory: sessionCreated,
           ...(currentPageNoteImageOnly ? { currentPageNoteImageOnly: true } : {}),
-        }), {
+        });
+        const sections = groundedPromptSectionSizes(promptText);
+        timing.mark("prompt.built", {
+          imageCount: turnImages.length,
+          imageBytes: turnImages.reduce(
+            (sum, image) => sum + promptImageByteLength(image.data),
+            0,
+          ),
+          promptChars: promptText.length,
+          historyChars: sections.history,
+          memoryChars: sections.memory,
+          trailChars: sections.trail,
+          mindChars: sections.mind,
+          rulesChars: sections.rules,
+          delegatedChars: sections.delegated,
+        });
+        await session.prompt(promptText, {
           preflightResult: (accepted) => {
             if (accepted) generationState.markInitialPromptAdmitted();
             else generationState.rejectInitialPrompt(new Error("Initial Pi prompt preflight was rejected."));
@@ -1188,7 +1282,13 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
             || terminal.hasComputerAction
             ? spokenText
             : attachObservationalPointDirective(spokenText, completedOutput.pointing));
-        if (authoritativeText.trim().length === 0) {
+        const hasVerifiedComputerAction = computerTurn.actionCount > 0
+          && computerTurn.allActionsVerified === true;
+        if (
+          authoritativeText.trim().length === 0
+          && !hasVerifiedComputerAction
+          && !completedToolResult
+        ) {
           const error = new Error("Pi completed the turn without a user-visible response.");
           Object.assign(error, {
             yishuTurnDump: {
@@ -1209,18 +1309,22 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         const completion = runtimeEvent("response.completed", command.requestId, command.traceId, {
           text: authoritativeText,
           generation,
+          phase: "model.done",
+          modelDoneAt: this.now().toISOString(),
           ...researchCompletionFields(researchTrace, computerTurn.actionCount, computerTurn.allActionsVerified),
         });
         emit(computerTurn.actionCount > 0
           ? markTrustedExternalReceipt(completion, computerTurn.allActionsVerified)
           : completion);
+        timing.mark("model.done");
+        recordQuality("model.done");
         completedSuccessfully = true;
       });
     } catch (error) {
       if (this.isRequestCancelled(command.requestId)) return;
       try {
         writeFileSync(
-          join(os.homedir(), "Library", "Application Support", "Yishu", "Diagnostics", "last-turn-error.json"),
+          lastTurnErrorPath(),
           `${JSON.stringify({
             at: new Date().toISOString(),
             message: error instanceof Error ? error.message : String(error),
@@ -1233,6 +1337,19 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         // diagnostics must never take down the turn
       }
       if (preference.provider !== LOCAL_GROK_PROVIDER) reloginProvider = preference.provider;
+      if (isFirstByteTimeoutError(error) && !emittedVisibleDelta && !this.isRequestCancelled(command.requestId)) {
+        const generation = Math.max(
+          generationState.currentGeneration,
+          generationState.output.acceptanceFloor,
+        );
+        emit(runtimeEvent("response.delta", command.requestId, command.traceId, {
+          text: FIRST_BYTE_FALLBACK_SPEECH,
+          generation,
+          firstByte: true,
+          phase: "model.first_byte",
+        }));
+        recordQuality("model.first_byte");
+      }
       emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
         code: error instanceof SteerReplacementFailedBeforeStartError
           ? "steer_replacement_failed_before_start"

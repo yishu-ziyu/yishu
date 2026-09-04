@@ -68,14 +68,14 @@ test("product runtime passes the resolved concrete model to the inner loop and e
     model: "grok-4.5",
   });
   const started = events.find((event) => event.type === "turn.started");
-  assert.deepEqual(started?.payload, {
-    runtime: "capture",
-    routingMode: "auto",
-    resolvedRoute: "screen_collaboration",
-    provider: "xai",
-    model: "grok-4.5",
-    generation: 1,
-  });
+  assert.equal(started?.payload.runtime, "capture");
+  assert.equal(started?.payload.routingMode, "auto");
+  assert.equal(started?.payload.resolvedRoute, "screen_collaboration");
+  assert.equal(started?.payload.provider, "xai");
+  assert.equal(started?.payload.model, "grok-4.5");
+  assert.equal(started?.payload.generation, 1);
+  assert.equal(started?.payload.recallSource, "none");
+  assert.equal(typeof started?.payload.recallMs, "number");
   assert.equal(started?.payload.apiKey, undefined);
   assert.equal(started?.payload.profiles, undefined);
 });

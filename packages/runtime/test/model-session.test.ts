@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createYishuAgentSession, MAX_MODEL_ITERATIONS } from "../src/model-loop/model-session.js";
+import { createYishuAgentSession, FIRST_BYTE_FALLBACK_SPEECH, MAX_MODEL_ITERATIONS, resolveFirstByteTimeoutMs } from "../src/model-loop/model-session.js";
 import type {
   ModelProviderRuntime,
   ResolvedModel,
@@ -68,8 +68,13 @@ function delayedRestBody(
 
 function toolCallsResponse(
   calls: readonly { id: string; name: string; argumentsJson: string }[],
+  spoken: string | false = "行。",
 ): readonly string[] {
-  return [
+  const chunks: string[] = [];
+  if (spoken) {
+    chunks.push(`data: ${JSON.stringify({ choices: [{ delta: { content: spoken } }] })}\n\n`);
+  }
+  chunks.push(
     `data: ${JSON.stringify({
       choices: [{
         delta: {
@@ -83,7 +88,8 @@ function toolCallsResponse(
     })}\n\n`,
     `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`,
     "data: [DONE]\n\n",
-  ];
+  );
+  return chunks;
 }
 
 function installFetchStub(
@@ -102,6 +108,12 @@ function okStream(body: ReadableStream<Uint8Array>): Response {
   });
 }
 
+test("first-byte timeout defaults to 8s and honors YISHU_MODEL_FIRST_BYTE_MS", () => {
+  assert.equal(resolveFirstByteTimeoutMs(undefined, {}), 8_000);
+  assert.equal(resolveFirstByteTimeoutMs(undefined, { YISHU_MODEL_FIRST_BYTE_MS: "2500" }), 2_500);
+  assert.equal(resolveFirstByteTimeoutMs(40, { YISHU_MODEL_FIRST_BYTE_MS: "2500" }), 40);
+});
+
 test("a silent model stream fails instead of hanging past the first-byte deadline", async (t) => {
   const fetchStub = installFetchStub(() => okStream(hangingBody()));
   t.after(fetchStub.restore);
@@ -115,6 +127,14 @@ test("a silent model stream fails instead of hanging past the first-byte deadlin
   });
   t.after(() => session.dispose());
 
+  let spoken = "";
+  const unsubscribe = session.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      spoken += event.assistantMessageEvent.delta;
+    }
+  });
+  t.after(unsubscribe);
+
   const startedAt = Date.now();
   await assert.rejects(session.prompt("你好"), (error: unknown) => {
     assert.match(String(error), /timed out waiting for the first byte/);
@@ -122,6 +142,7 @@ test("a silent model stream fails instead of hanging past the first-byte deadlin
   });
   assert.ok(Date.now() - startedAt < 1_000, "first-byte timeout must not wait the production 20s");
   assert.equal(session.agent.state.errorMessage, "Model stream timed out waiting for the first byte.");
+  assert.equal(spoken, FIRST_BYTE_FALLBACK_SPEECH);
 });
 
 test("MiniMax content on the finish chunk is spoken", async (t) => {
@@ -155,6 +176,49 @@ test("MiniMax content on the finish chunk is spoken", async (t) => {
   await session.prompt("今天星期几？");
   assert.equal(spoken, "今天是星期五。");
   assert.equal(session.agent.state.errorMessage, null);
+});
+
+test("SSE first bytes and reasoning_content are traced without being spoken", async (t) => {
+  const fetchStub = installFetchStub(() => okStream(sseBody([
+    ": ping\n\n",
+    `data: ${JSON.stringify({
+      choices: [{ delta: { role: "assistant", content: "", reasoning_content: "hidden-chain" } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      choices: [{ delta: { content: "在。" } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+    "data: [DONE]\n\n",
+  ])));
+  t.after(fetchStub.restore);
+
+  const { session } = await createYishuAgentSession({
+    model: MODEL,
+    providerRuntime,
+    systemPrompt: "PERSONA",
+    customTools: [],
+  });
+  t.after(() => session.dispose());
+
+  const types: string[] = [];
+  let spoken = "";
+  let reasoning = "";
+  const unsubscribe = session.subscribe((event) => {
+    types.push(event.type);
+    if (event.type === "reasoning_delta") reasoning += event.delta;
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      spoken += event.assistantMessageEvent.delta;
+    }
+  });
+  t.after(unsubscribe);
+
+  await session.prompt("在吗");
+  assert.equal(spoken, "在。");
+  assert.equal(reasoning, "hidden-chain");
+  const sse = types.indexOf("sse_first_byte");
+  const thought = types.indexOf("reasoning_delta");
+  const visible = types.indexOf("message_update");
+  assert.ok(sse >= 0 && thought > sse && visible > thought);
 });
 
 test("first-byte timeout does not abort a stream that already started speaking", async (t) => {
@@ -586,4 +650,85 @@ test("a tool recapture image is sent on the next model call, not the turn-start 
   assert.ok(recapture, "follow-up model call must include the recaptured screenshot");
   assert.match(JSON.stringify(recapture.content), /Fresh observation after the last action/);
   assert.equal(JSON.stringify(followUp).includes("turn-start"), true);
+});
+
+test("YISHU_FAULT=model_stall emits a spoken fallback then times out", async (t) => {
+  const previousFault = process.env.YISHU_FAULT;
+  process.env.YISHU_FAULT = "model_stall";
+  t.after(() => {
+    if (previousFault === undefined) delete process.env.YISHU_FAULT;
+    else process.env.YISHU_FAULT = previousFault;
+  });
+
+  const { session } = await createYishuAgentSession({
+    model: MODEL,
+    providerRuntime,
+    systemPrompt: "PERSONA",
+    customTools: [],
+    streamFirstByteTimeoutMs: 40,
+  });
+  t.after(() => session.dispose());
+
+  let spoken = "";
+  const unsubscribe = session.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      spoken += event.assistantMessageEvent.delta;
+    }
+  });
+  t.after(unsubscribe);
+
+  await assert.rejects(session.prompt("你好"), /timed out waiting for the first byte/);
+  assert.equal(spoken, FIRST_BYTE_FALLBACK_SPEECH);
+});
+
+test("a tool-only first output injects one ack-first reminder before tools run", async (t) => {
+  const requests: Array<{
+    tools?: unknown;
+    messages?: Array<{ role?: string; content?: unknown }>;
+  }> = [];
+  let callIndex = 0;
+  let echoRuns = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input, init) => {
+    if (init && typeof init === "object" && "body" in init && typeof init.body === "string") {
+      requests.push(JSON.parse(init.body) as (typeof requests)[number]);
+    }
+    const lines = callIndex === 0
+      ? toolCallsResponse([{ id: "call_1", name: "echo", argumentsJson: "{}" }], false)
+      : stopResponse();
+    callIndex += 1;
+    return okStream(sseBody(lines));
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const echo: ToolDefinition = {
+    name: "echo",
+    label: "echo",
+    description: "echo",
+    promptSnippet: "",
+    promptGuidelines: [],
+    parameters: { type: "object" },
+    executionMode: "sequential",
+    async execute() {
+      echoRuns += 1;
+      return { content: [{ type: "text", text: "echoed" }], details: undefined };
+    },
+  };
+
+  const { session } = await createYishuAgentSession({
+    model: MODEL,
+    providerRuntime,
+    systemPrompt: "PERSONA",
+    customTools: [echo],
+  });
+  t.after(() => session.dispose());
+
+  await session.prompt("查一下");
+  assert.equal(callIndex, 2);
+  assert.equal(echoRuns, 0);
+  const reminder = requests[1]?.messages?.at(-1);
+  assert.equal(reminder?.role, "user");
+  assert.match(String(reminder?.content ?? ""), /先开口再说/);
 });

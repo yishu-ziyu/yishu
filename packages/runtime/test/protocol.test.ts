@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { PI_CAPABILITY_PROFILES } from "../src/capability-profiles.js";
-import { buildGroundedPrompt, screenshotDimensionCaption } from "../src/context-prompt.js";
+import {
+  attachConversationHistory,
+  attachRecentTrail,
+  buildGroundedPrompt,
+  groundedPromptSectionSizes,
+  screenshotDimensionCaption,
+} from "../src/context-prompt.js";
 import { buildCompletionsBody } from "../src/model-loop/openai-completions.js";
 import { buildResponsesBody } from "../src/model-loop/codex-responses.js";
 import type { ResolvedModel } from "../src/model-loop/types.js";
@@ -48,6 +54,18 @@ import { makeTurnStartCommand } from "./fixtures.js";
 test("turn command validates as the shared protocol", () => {
   const command = makeTurnStartCommand();
   assert.equal(clientCommandSchema.parse(command).type, "turn.start");
+});
+
+test("models.probe is a client command", () => {
+  const command = {
+    schemaVersion: 1,
+    type: "models.probe",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: {},
+  };
+  assert.equal(clientCommandSchema.parse(command).type, "models.probe");
 });
 
 test("barge-in commands bind one exact generation and conversation steer", () => {
@@ -367,21 +385,13 @@ test("model preference rejects arbitrary URLs, providers, models, and fields", (
     payload: { ...makeTurnStartCommand().payload, modelPreference: invalidProvider },
   }));
 
-  const invalidModel = {
-    provider: LOCAL_GROK_PROVIDER,
-    model: "gpt-4o",
-  };
-  assert.throws(() => modelPreferenceSchema.parse(invalidModel));
-  assert.throws(() => clientCommandSchema.parse({
-    ...makeTurnStartCommand(),
-    payload: { ...makeTurnStartCommand().payload, modelPreference: invalidModel },
-  }));
-
-  const unknownGrok = {
-    provider: LOCAL_GROK_PROVIDER,
-    model: "grok-not-in-clicky-picker",
-  };
-  assert.throws(() => modelPreferenceSchema.parse(unknownGrok));
+  // Local model ids are owned by model-config.json, not a wire enum: an id the
+  // picker never listed must still parse. The wire only bounds the shape.
+  const configOwnedModel = { provider: LOCAL_GROK_PROVIDER, model: "MiniMax-M2.5" };
+  assert.deepEqual(modelPreferenceSchema.parse(configOwnedModel), configOwnedModel);
+  for (const model of ["", "a".repeat(81), "gpt 4o", "http://attacker.example/v1", "m/../x"]) {
+    assert.throws(() => modelPreferenceSchema.parse({ provider: LOCAL_GROK_PROVIDER, model }));
+  }
 
   const unexpectedUrl = {
     provider: LOCAL_GROK_PROVIDER,
@@ -747,6 +757,20 @@ test("open_destination accepts only the product-owned Gmail destination", () => 
   }));
 });
 
+test("text-only chat prompt keeps frontmost app and drops the frame dump", () => {
+  const command = makeTurnStartCommand();
+  command.payload.utterance = "在吗";
+  command.payload.contextFrame.numberedTargets = [
+    { id: "1", role: "AXButton", title: "Back", description: "后退", enabled: true },
+  ];
+  const prompt = buildGroundedPrompt(command);
+  assert.match(prompt, /前台应用：Preview/);
+  assert.match(prompt, /<user_utterance>\n在吗/);
+  assert.doesNotMatch(prompt, /<context_frame>/);
+  assert.doesNotMatch(prompt, /<numbered_targets>/);
+  assert.doesNotMatch(prompt, /c2NyZWVu/);
+});
+
 test("grounded prompt lists numbered AX targets for click-by-id", () => {
   const command = makeTurnStartCommand();
   command.payload.contextFrame.numberedTargets = [
@@ -808,6 +832,48 @@ test("grounded prompt leaves normal context unwrapped without reminder", () => {
   assert.match(prompt, /<context_frame>/);
   assert.doesNotMatch(prompt, /<untrusted/);
   assert.doesNotMatch(prompt, /Security reminder/);
+});
+
+test("plain-chat prompt growth is trail, not other-conversation history", () => {
+  const command = makeTurnStartCommand();
+  command.payload.utterance = "在吗";
+  command.payload.contextFrame.screenshots = [];
+  command.payload.contextFrame.numberedTargets = [];
+  const empty = groundedPromptSectionSizes(buildGroundedPrompt(command));
+  assert.equal(empty.history, 0);
+  assert.equal(empty.trail, 0);
+  assert.ok(empty.total < 200);
+
+  const withForeignHistory = attachConversationHistory(command, [{
+    id: "11111111-1111-4111-8111-111111111111",
+    capturedAt: "2026-09-04T00:00:00.000Z",
+    userInput: "另一段对话",
+    assistantOutput: "不该出现在新 conversationId",
+  }]);
+  const historyCold = groundedPromptSectionSizes(buildGroundedPrompt(withForeignHistory, {
+    includeConversationHistory: true,
+  }));
+  const historyHot = groundedPromptSectionSizes(buildGroundedPrompt(withForeignHistory, {
+    includeConversationHistory: false,
+  }));
+  assert.ok(historyCold.history > 0);
+  assert.equal(historyHot.history, 0);
+
+  const oneTrail = attachRecentTrail(command, [{
+    frameId: "22222222-2222-4222-8222-222222222222",
+    capturedAt: "2026-09-04T00:00:00.000Z",
+    appName: "Finder",
+    windowTitle: null,
+    axRole: null,
+    axTitle: null,
+    axValuePreview: null,
+    cursorRegion: "center",
+    warnings: [],
+  }]);
+  const sized = groundedPromptSectionSizes(buildGroundedPrompt(oneTrail));
+  assert.equal(sized.history, 0);
+  assert.ok(sized.trail > 200);
+  assert.ok(sized.total > empty.total);
 });
 
 test("formatTurnMemoryBlock is undefined when empty and otherwise matches the prompt contract", async () => {
@@ -878,6 +944,11 @@ test("capability profiles retain mature Pi tools only where they belong", () => 
 });
 
 test("Yishu persona keeps agency without leaking private reflection", () => {
+  assert.doesNotMatch(YISHU_SYSTEM_PROMPT, /唯一持续存在的个人 Agent/);
+  assert.match(YISHU_SYSTEM_PROMPT, /先应答再干活/);
+  assert.match(YISHU_SYSTEM_PROMPT, /长度跟着用户/);
+  assert.match(YISHU_SYSTEM_PROMPT, /开始弄了/);
+  assert.match(YISHU_SYSTEM_PROMPT, /不是客服/);
   assert.match(YISHU_SYSTEM_PROMPT, /主观能动性/);
   assert.match(YISHU_SYSTEM_PROMPT, /尽量不拒绝/);
   assert.match(YISHU_SYSTEM_PROMPT, /不输出 <mood>/);

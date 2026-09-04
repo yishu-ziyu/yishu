@@ -181,7 +181,9 @@ enum YishuAgentRuntimeClientError: LocalizedError {
     case credentialConfigurationUnavailable
     case runtimeNotRunning
     case unsupportedModel
-    case turnFailed
+    /// `code`/`message` come from the runtime's turn.failed payload and are
+    /// for diagnostics only; the spoken text stays the fixed errorDescription.
+    case turnFailed(code: String?, message: String?)
     case turnTimedOut
     case turnInterruptUnavailable
     case turnInterruptTimedOut
@@ -1078,6 +1080,8 @@ final class YishuAgentRuntimeClient {
         do {
             try send(command)
             armTurnWatchdog(requestId: requestId)
+            QualityEventRecorder.record(name: "runtime.turn_received", sessionId: "voice")
+            ClickyAnalytics.trackVoiceEvent("turn.start")
         } catch {
             turnContinuations.removeValue(forKey: requestId)
             activeTurnTraceIds.removeValue(forKey: requestId)
@@ -1922,11 +1926,68 @@ final class YishuAgentRuntimeClient {
         }
     }
 
+    private static let runtimeTimingNames: Set<String> = [
+        "runtime.turn_received",
+        "recall.done",
+        "model.request_sent",
+        "prompt.built",
+        "turn.start",
+        "model.first_byte",
+        "model.completed",
+        "context.resolved",
+    ]
+
+    /// Records allowlisted runtime timing events. Returns true when the
+    /// envelope is a timing/status event that must not enter the turn stream.
+    @discardableResult
+    private static func recordRuntimeTimingIfPresent(
+        type: String,
+        payload: [String: Any]
+    ) -> Bool {
+        let name: String?
+        if type == "runtime.status" {
+            if let phase = payload["phase"] as? String, runtimeTimingNames.contains(phase) {
+                name = phase
+            } else if let status = payload["status"] as? String, runtimeTimingNames.contains(status) {
+                name = status
+            } else {
+                name = nil
+            }
+        } else if type == "quality.event" {
+            name = (payload["name"] as? String).flatMap {
+                runtimeTimingNames.contains($0) ? $0 : nil
+            }
+        } else if runtimeTimingNames.contains(type) {
+            name = type
+        } else {
+            return false
+        }
+
+        if let name {
+            var attributes: [String: Any] = [:]
+            if let value = payload["providerId"] as? String { attributes["providerId"] = value }
+            if let value = payload["modelId"] as? String { attributes["modelId"] = value }
+            if let value = payload["recallSource"] as? String { attributes["recallSource"] = value }
+            if let value = payload["imageCount"] as? Int { attributes["imageCount"] = value }
+            if let value = payload["imageBytes"] as? Int { attributes["imageBytes"] = value }
+            QualityEventRecorder.record(
+                name: name,
+                sessionId: "voice",
+                durationMs: payload["durationMs"] as? Int,
+                attributes: attributes
+            )
+        }
+        return type == "runtime.status" || type == "quality.event" || runtimeTimingNames.contains(type)
+    }
+
     private func dispatch(_ raw: [String: Any]) {
         guard let type = raw["type"] as? String else { return }
         let requestId = (raw["requestId"] as? String).flatMap(UUID.init(uuidString:))
         let traceId = (raw["traceId"] as? String).flatMap(UUID.init(uuidString:))
         let payload = raw["payload"] as? [String: Any] ?? [:]
+        if Self.recordRuntimeTimingIfPresent(type: type, payload: payload) {
+            return
+        }
 
         if type == "runtime.ready" {
             onLifecycleEvent?(.ready(mode: payload["mode"] as? String ?? "unknown"))
@@ -2246,6 +2307,7 @@ final class YishuAgentRuntimeClient {
             ))
         case "response.delta":
             if let text = payload["text"] as? String {
+                ClickyAnalytics.trackVoiceEvent("model.first_byte")
                 continuation.yield(.responseDelta(text: text, generation: generation))
             }
         case "tool.started":
@@ -2287,6 +2349,15 @@ final class YishuAgentRuntimeClient {
                 continuation.yield(.memoryUsed(items, generation: generation))
             }
         case "response.completed":
+            QualityEventRecorder.record(
+                name: "model.completed",
+                sessionId: "voice",
+                attributes: [
+                    "verified": payload["verified"] as? Bool ?? false,
+                    "taskTerminal": (payload["verified"] as? Bool ?? false)
+                        ? "verified" : "unverified",
+                ]
+            )
             continuation.yield(.completed(
                 text: payload["text"] as? String ?? "",
                 verified: payload["verified"] as? Bool ?? false,
@@ -2331,7 +2402,10 @@ final class YishuAgentRuntimeClient {
                 finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnTimedOut)
                 return
             }
-            finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnFailed)
+            finishTurn(requestId, throwing: YishuAgentRuntimeClientError.turnFailed(
+                code: code ?? type,
+                message: Self.boundedProtocolString(payload["message"], maximum: 200)
+            ))
         default:
             break
         }
@@ -3425,9 +3499,6 @@ final class YishuAgentRuntimeClient {
     }
 
     private static let supportedModelsByProvider: [String: Set<String>] = [
-        YishuConversationModelCatalog.localProvider: Set(
-            YishuConversationModelCatalog.localModels.map(\.model)
-        ),
         YishuAuthProvider.openAICodex.rawValue: Set([
             "gpt-5.3-codex-spark",
             "gpt-5.4",
@@ -3445,7 +3516,13 @@ final class YishuAgentRuntimeClient {
     ]
 
     static func supportsModel(provider: String, model: String) -> Bool {
-        supportedModelsByProvider[provider]?.contains(model) == true
+        // The local provider's model list lives in the runtime's model-config.json.
+        // Gating it here created a second source of truth: a model added there
+        // (MiniMax-M2.5) failed every turn in Swift before turn.start was sent.
+        if provider == YishuConversationModelCatalog.localProvider {
+            return !model.isEmpty
+        }
+        return supportedModelsByProvider[provider]?.contains(model) == true
     }
 
     static func modelPreference(provider: String, model: String) -> YishuModelPreference? {

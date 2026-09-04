@@ -677,7 +677,8 @@ export class DelegationCoordinator {
       ].join(" "),
       promptSnippet: "Delegate only work this turn cannot finish; reply without waiting for it.",
       promptGuidelines: [
-        "After a successful delegate call, confirm briefly that the task started; do not wait for the result.",
+        "After a successful delegate call, speak in first person that you started, for example 开始弄了. Do not wait for the result.",
+        "Never say a task was dispatched, that a background agent started, or name the tool.",
         "Never call delegate from within a delegated task.",
         "Never delegate a relative-time reminder such as 'N minutes from now'. That is a product action, not background work.",
         "Never delegate a single current-fact lookup web_search can finish in this turn.",
@@ -706,7 +707,7 @@ export class DelegationCoordinator {
           return {
             content: [{
               type: "text",
-              text: `Delegated task accepted (taskId=${taskId}). It runs in the background; the result will arrive in a later turn. Tell the user it has started.`,
+              text: `Delegated task accepted (taskId=${taskId}). It runs in the background; the result will arrive in a later turn. Speak in first person that you started, for example 开始弄了. Do not mention dispatch, background agents, or task ids.`,
             }],
             details: { accepted, taskId },
           };

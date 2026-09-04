@@ -14,6 +14,9 @@ import type { ComputerUsePort } from "./computer-use-port.js";
 import type { AgentRuntime } from "./runtime-port.js";
 import { LOCAL_GROK_DEFAULT_MODEL, LOCAL_GROK_PROVIDER } from "./protocol.js";
 import { FileEverOSPendingSessionStore } from "./everos-pending-sessions.js";
+import { createQualityRecorder } from "./observability/quality-recorder.js";
+import os from "node:os";
+import path from "node:path";
 
 /**
  * Pi is the only production agent loop. Mock is a deterministic protocol test
@@ -51,16 +54,32 @@ export function productKernelEnabled(
 function createInnerRuntime(
   mode: RuntimeMode,
   ports: RuntimePorts,
-): { inner: AgentRuntime; providerRuntime?: ReturnType<typeof createDefaultProviderRuntime> } {
+): {
+  inner: AgentRuntime;
+  providerRuntime?: ReturnType<typeof createDefaultProviderRuntime>;
+  qualityRecorder?: ReturnType<typeof createQualityRecorder>;
+} {
   if (mode === "mock") return { inner: new MockAgentRuntime() };
   // One provider runtime instance feeds both the loop adapter and the memory
   // extraction model (ADR 0016 #4) so extraction follows the turn's provider.
   const providerRuntime = createDefaultProviderRuntime();
+  const qualityRecorder = createQualityRecorder({
+    storePath: path.join(
+      os.homedir(),
+      "Library",
+      "Application Support",
+      "Yishu",
+      "Diagnostics",
+      "quality.jsonl",
+    ),
+  });
   return {
     inner: new YishuLoopRuntimeAdapter(process.cwd(), ports.computerUse, {
       modelRuntimePromise: Promise.resolve(providerRuntime),
+      qualityRecorder,
     }),
     providerRuntime,
+    qualityRecorder,
   };
 }
 
@@ -68,7 +87,7 @@ export function createAgentRuntime(
   mode: RuntimeMode = selectedRuntimeMode(),
   ports: RuntimePorts = {},
 ): AgentRuntime {
-  const { inner, providerRuntime } = createInnerRuntime(mode, ports);
+  const { inner, providerRuntime, qualityRecorder } = createInnerRuntime(mode, ports);
   if (!productKernelEnabled(process.env, ports.productKernel)) {
     return inner;
   }
@@ -104,5 +123,6 @@ export function createAgentRuntime(
           ),
         }
       : {}),
+    ...(qualityRecorder === undefined ? {} : { qualityRecorder }),
   });
 }

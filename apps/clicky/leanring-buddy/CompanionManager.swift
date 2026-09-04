@@ -47,7 +47,7 @@ enum YishuAgentRuntimeAvailability: Equatable {
     case stopped
 }
 
-private struct VoiceTurnOrigin {
+struct VoiceTurnOrigin {
     let traceID: String
     let releaseAt: UInt64?
 }
@@ -163,63 +163,6 @@ private struct HeldSceneCache {
     let displayFingerprint: String
     let activeWindowNumber: Int?
     let traceID: String
-}
-
-/// Keeps the latency story observable without retaining transcripts, labels,
-/// screenshots, or other private content. The trace origin is created on PTT
-/// press; this timing object is created when final ASR text arrives and starts
-/// at the recorded release timestamp when that origin is valid.
-@MainActor
-private final class VoiceTurnTiming {
-    private let startedAt: UInt64
-    private var previousAt: UInt64
-    private let traceID: String
-    private let hasValidReleaseOrigin: Bool
-
-    init(origin: VoiceTurnOrigin?) {
-        let now = DispatchTime.now().uptimeNanoseconds
-        traceID = origin?.traceID ?? "unknown"
-        if let releaseAt = origin?.releaseAt, releaseAt <= now {
-            startedAt = releaseAt
-            previousAt = releaseAt
-            hasValidReleaseOrigin = true
-        } else {
-            startedAt = now
-            previousAt = now
-            hasValidReleaseOrigin = false
-        }
-    }
-
-    func mark(
-        _ phase: String,
-        reason: String,
-        sourceDimensions: String? = nil,
-        receiptID: String? = nil
-    ) {
-        let now = DispatchTime.now().uptimeNanoseconds
-        let deltaMS = Double(now - previousAt) / 1_000_000.0
-        let totalMS = Double(now - startedAt) / 1_000_000.0
-        let loggedReason = phase == "asr_complete" && !hasValidReleaseOrigin
-            ? "unknown_origin"
-            : reason
-        if phase == "context_capture",
-           let contextReason = ClickyContextResolutionReason(rawValue: reason) {
-            ClickyAnalytics.trackContextResolution(
-                reason: contextReason,
-                sourceDimensionsAvailable: sourceDimensions != nil && sourceDimensions != "unavailable"
-            )
-        }
-        CompanionManager.logVoicePhase(
-            turnID: traceID,
-            phase: phase,
-            deltaMS: deltaMS,
-            totalMS: totalMS,
-            reason: loggedReason,
-            sourceDimensions: sourceDimensions,
-            receiptID: receiptID
-        )
-        previousAt = now
-    }
 }
 
 @MainActor
@@ -1754,6 +1697,8 @@ final class CompanionManager: ObservableObject {
 
             // Key-down owns the audio channel synchronously. No async Runtime
             // acknowledgement is allowed to delay stopping a spoken sentence.
+            let voiceTurnTraceID = Self.newVoiceTurnTraceID()
+            ClickyAnalytics.trackPushToTalkStarted(turnId: voiceTurnTraceID)
             cancelActiveSentenceSpeechPipeline()
             elevenLabsTTSClient.stopPlayback()
             clearMemorySourceNotice()
@@ -1762,9 +1707,6 @@ final class CompanionManager: ObservableObject {
             // speaking; waiting returns stay queued for the next quiet window.
             interruptDelegatedTaskReturnForForegroundTurn()
 
-            // A new press starts a new trace. Any origin left by an interrupted
-            // or silent session must not be attached to this transcript.
-            let voiceTurnTraceID = Self.newVoiceTurnTraceID()
             pendingVoiceTurnOrigin = VoiceTurnOrigin(
                 traceID: voiceTurnTraceID,
                 releaseAt: nil
@@ -1830,7 +1772,6 @@ final class CompanionManager: ObservableObject {
             }
 
 
-            ClickyAnalytics.trackPushToTalkStarted()
             startHeldSceneCapture(traceID: voiceTurnTraceID)
 
             pendingKeyboardShortcutStartTask?.cancel()
@@ -1839,9 +1780,12 @@ final class CompanionManager: ObservableObject {
                     currentDraftText: "",
                     updateDraftText: { [weak self] partialText in
                         guard let self else { return }
-                        guard self.voiceState == .listening else { return }
+                        let trimmed = partialText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return }
                         self.livePartialTranscript = partialText
+                        self.responseOverlayManager.updateTranscriptText(partialText)
                         self.recordShadowPartial(traceID: voiceTurnTraceID)
+                        guard self.voiceState == .listening else { return }
                         self.startDirectClickPrewarmIfEligible(
                             partialText,
                             traceID: voiceTurnTraceID
@@ -1883,10 +1827,15 @@ final class CompanionManager: ObservableObject {
                 )
             }
             ClickyAnalytics.trackPushToTalkReleased()
-            isPushToTalkKeyHeld = false
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
+            isPushToTalkKeyHeld = false
+            turnVisualPhase = .finalizingSpeech
+            voiceState = .processing
+            ensureOverlayVisibleForVoiceFeedback()
+            responseOverlayManager.showPresenceCue()
+            ClickyAnalytics.trackVoiceEvent("presence.cue")
             armBargeInTranscriptWatchdogIfNeeded()
             Self.logVoicePhase(
                 turnID: releasedOrigin?.traceID ?? "unknown",
@@ -2232,7 +2181,7 @@ final class CompanionManager: ObservableObject {
             turnVisualPhase = directIntent ? .searchingContext : .observingContext
             voiceState = .processing
             ensureOverlayVisibleForVoiceFeedback()
-            responseOverlayManager.showThinking()
+            responseOverlayManager.showPresenceCue()
             if directIntent {
                 await waitForDirectClickPrewarm()
             }
@@ -2292,19 +2241,29 @@ final class CompanionManager: ObservableObject {
                 responseOverlayManager.hideOverlay()
             } catch {
                 let failureReason: String
+                var failureAttributes: [String: Any] = [:]
                 if let runtimeError = error as? YishuAgentRuntimeClientError {
                     switch runtimeError {
                     case .turnTimedOut:
                         failureReason = "turn_timed_out"
-                    case .turnFailed:
-                        failureReason = "turn_failed"
+                    case let .turnFailed(code, message):
+                        failureReason = code ?? "turn_failed"
+                        if let message { failureAttributes["message"] = message }
+                    case .unsupportedModel:
+                        failureReason = "unsupported_model"
                     default:
                         failureReason = "runtime_error"
                     }
                 } else {
                     failureReason = "unknown"
                 }
+                failureAttributes["errorCode"] = failureReason
                 timing.mark("runtime_failed", reason: failureReason)
+                QualityEventRecorder.record(
+                    name: "turn.failed",
+                    sessionId: "voice",
+                    attributes: failureAttributes
+                )
                 if freshStartAfterRejectedSteerIfNeeded(error, turnToken: turnToken) {
                     return
                 }
@@ -2321,29 +2280,10 @@ final class CompanionManager: ObservableObject {
                     runtimeIsRunning: yishuAgentRuntimeClient.isRunning
                 ) {
                 case .useActionReceipt:
-                    guard let actionResult else { return }
-                    // A direct action was already consumed. Do not spend a
-                    // second model turn after Pi failed around its result.
+                    guard actionResult != nil else { return }
+                    // Model turn already consumed an action. Do not overlay
+                    // canned 点好了 / 点击已送达 lines; the model speaks.
                     activeTurnConsumedComputerAction = true
-                    responseOverlayManager.showOverlayAndBeginStreaming()
-                    do {
-                        try await presentVoiceResponse(
-                            Self.directActionConfirmation(
-                                for: actionResult,
-                                action: actionName
-                            ),
-                            transcript: transcript,
-                            screenCaptures: capturedContext.screenCaptures,
-                            timing: timing,
-                            turnToken: turnToken
-                        )
-                    } catch is CancellationError {
-                        clearMemorySourceNotice()
-                        responseOverlayManager.hideOverlay()
-                    } catch {
-                        clearMemorySourceNotice()
-                        responseOverlayManager.hideOverlay()
-                    }
                     return
                 case .restartRuntime:
                     // A crashed sidecar must not immediately fork product
@@ -2436,6 +2376,7 @@ final class CompanionManager: ObservableObject {
         let now = DispatchTime.now().uptimeNanoseconds
         if firstPartialTranscriptAt == nil {
             firstPartialTranscriptAt = now
+            ClickyAnalytics.trackVoiceEvent("asr.first_partial")
         }
         let totalMS = firstPartialTranscriptAt.map {
             Double(now - $0) / 1_000_000.0
@@ -2483,8 +2424,8 @@ final class CompanionManager: ObservableObject {
         transcript: String,
         traceID: String?
     ) async -> (YishuCapturedContext, String) {
-        if let heldSceneTask {
-            await heldSceneTask.value
+        if heldSceneCache == nil {
+            await heldSceneTask?.value
         }
         let held = heldSceneCache
         let current = yishuContextFrameCollector.liveSceneIdentity(
@@ -2505,25 +2446,28 @@ final class CompanionManager: ObservableObject {
             now: DispatchTime.now().uptimeNanoseconds
         )
         defer { clearHeldSceneCapture() }
-        switch decision {
-        case .reuse:
-            if let held {
+        if let held {
+            if decision == .reuse {
                 let refreshed = yishuContextFrameCollector.refreshLiveAttention(
                     onto: held.context,
                     pointerSince: held.startedAt
                 )
                 return (refreshed, decision.rawValue)
             }
-            let fresh = await yishuContextFrameCollector.capture()
-            return (fresh, YishuHeldSceneDecision.recaptureMissingBasis.rawValue)
-        case .recaptureActiveWindow:
+            // Protocol requires a frame in turn.start. Recapture-before-start
+            // would add 0.5–2s; send the held frame even when policy says it
+            // is stale. A later recapture cannot replace a turn already sent.
+            return (held.context, decision.rawValue)
+        }
+        switch decision {
+        case .reuse, .recaptureSceneChanged, .recaptureStale, .recaptureMissingBasis:
             let fresh = await yishuContextFrameCollector.capture(
-                activeWindowOnly: true,
                 pointerSince: held?.startedAt
             )
             return (fresh, decision.rawValue)
-        case .recaptureSceneChanged, .recaptureStale, .recaptureMissingBasis:
+        case .recaptureActiveWindow:
             let fresh = await yishuContextFrameCollector.capture(
+                activeWindowOnly: true,
                 pointerSince: held?.startedAt
             )
             return (fresh, decision.rawValue)
@@ -3019,6 +2963,7 @@ final class CompanionManager: ObservableObject {
             model: selectedModel,
             modelRouting: runtimeModelRouting
         )
+        ClickyAnalytics.trackVoiceEvent("turn.start")
         activeRuntimeRequestId = turn.requestId
         activeRuntimePresentationTranscript = transcript
         responseOverlayManager.showOverlayAndBeginStreaming()
@@ -3036,7 +2981,6 @@ final class CompanionManager: ObservableObject {
         var presentationTranscript = transcript
         var responseVerified = false
         var didStartStreamingSpeech = false
-        var didSpeakSearchCover = false
         var didSpeakAnswer = false
         func makeSentenceSpeechPipeline(for utterance: String) -> YishuSentenceSpeechPipeline? {
             guard YishuSentenceSpeechPolicy.allowsStreaming(for: utterance) else {
@@ -3058,6 +3002,12 @@ final class CompanionManager: ObservableObject {
                 },
                 stopPlayback: { [weak self] in
                     self?.elevenLabsTTSClient.stopPlayback()
+                },
+                prefetch: { [weak self] sentence in
+                    guard let self else { return }
+                    let ttsText = Self.speechText(from: sentence)
+                    guard !ttsText.isEmpty else { return }
+                    self.elevenLabsTTSClient.prefetch(ttsText)
                 }
             )
             activeSentenceSpeechPipeline = pipeline
@@ -3075,6 +3025,7 @@ final class CompanionManager: ObservableObject {
         }
         // Clear prior turn's memory source so unrelated answers cannot inherit it.
         clearMemorySourceNotice()
+        do {
         try await withTaskCancellationHandler {
             for try await event in turn.events {
                 guard activeRuntimeRequestId == turn.requestId,
@@ -3098,7 +3049,6 @@ final class CompanionManager: ObservableObject {
                         presentationTranscript
                     )
                     didStartStreamingSpeech = false
-                    didSpeakSearchCover = false
                     didSpeakAnswer = false
                     stopCoverSpeech()
                     activeTurnConsumedComputerAction = false
@@ -3120,20 +3070,9 @@ final class CompanionManager: ObservableObject {
                         isProductActionTurn: isDirectClickTurn || activeTurnConsumedComputerAction
                     )
                     updateTurnVisualPhase(for: event)
-                case let .toolStarted(name, generation):
+                case let .toolStarted(_, generation):
                     guard generation == presentationReducer.generation else { continue }
                     updateTurnVisualPhase(for: event)
-                    if beginSearchCoverSpeech(
-                        toolName: name,
-                        didSpeakCover: didSpeakSearchCover,
-                        didSpeakAnswer: didSpeakAnswer,
-                        hasVisibleAnswerText: !presentationReducer.accumulatedText
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                            .isEmpty,
-                        turnToken: turnToken
-                    ) {
-                        didSpeakSearchCover = true
-                    }
                 case .toolCompleted:
                     updateTurnVisualPhase(for: event)
                 case let .memoryUsed(items, _):
@@ -3204,6 +3143,7 @@ final class CompanionManager: ObservableObject {
                     guard stillOwned else { continue }
                 case let .responseDelta(delta, _):
                     updateTurnVisualPhase(for: event)
+                    ClickyAnalytics.trackVoiceEvent("model.first_byte")
                     presentationReducer.appendCurrentDelta(delta)
                     // Direct-click turns stay buffered until the action/result
                     // decision is known; this prevents model tool markup from
@@ -3255,11 +3195,27 @@ final class CompanionManager: ObservableObject {
                 )
             }
         }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as YishuAgentRuntimeClientError {
+            let streamed = Self.scrubToolMarkup(from: presentationReducer.accumulatedText)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            switch error {
+            case .turnTimedOut, .turnFailed:
+                guard !streamed.isEmpty else { throw error }
+                sawTerminalTurnEvent = true
+                presentationReducer.completeCurrent(with: streamed)
+            default:
+                throw error
+            }
+        }
         try Task.checkCancellation()
         // A stream that just ends without response.completed is a broken
         // runtime turn. Do not speak the truncated visible text as the answer.
         guard sawTerminalTurnEvent else {
-            throw YishuAgentRuntimeClientError.turnFailed
+            throw YishuAgentRuntimeClientError.turnFailed(
+                code: "stream_ended_without_terminal_event", message: nil
+            )
         }
         let finalText = Self.scrubToolMarkup(
             from: presentationReducer.authoritativeText
@@ -3267,7 +3223,7 @@ final class CompanionManager: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !finalText.isEmpty else {
             clearMemorySourceNotice()
-            throw YishuAgentRuntimeClientError.turnFailed
+            throw YishuAgentRuntimeClientError.turnFailed(code: "empty_final_text", message: nil)
         }
         let pointingParse = Self.parsePointingCoordinates(from: finalText)
         let spokenOverlayText = pointingParse.spokenText
@@ -3311,6 +3267,9 @@ final class CompanionManager: ObservableObject {
             speechAlreadyPresented = await sentenceSpeechPipeline.finish(
                 authoritativeText: spokenOverlayText
             )
+            if speechAlreadyPresented {
+                ClickyAnalytics.trackTTSStopped()
+            }
             if activeSentenceSpeechPipeline === sentenceSpeechPipeline {
                 activeSentenceSpeechPipeline = nil
             }
@@ -3350,7 +3309,10 @@ final class CompanionManager: ObservableObject {
     /// honestly instead of silently forking the conversation through a second model loop.
     private func presentRuntimeFailure(turnToken: UUID, error: Error) async {
         guard ownsVoiceTurn(turnToken) else { return }
-        let message = Self.spokenRuntimeFailureMessage(for: error)
+        let message = Self.spokenRuntimeFailureMessage(
+            for: error,
+            streamedDelta: responseOverlayManager.currentStreamingText
+        )
         turnVisualPhase = .shapingOutput
         voiceState = .responding
         ensureOverlayVisibleForVoiceFeedback()
@@ -3363,7 +3325,13 @@ final class CompanionManager: ObservableObject {
         }
     }
     static let genericRuntimeFailureMessage = "这轮没有完成。你再说一遍，或者换个说法。"
-    static func spokenRuntimeFailureMessage(for error: Error) -> String {
+    static func spokenRuntimeFailureMessage(
+        for error: Error,
+        streamedDelta: String? = nil
+    ) -> String {
+        let streamed = streamedDelta?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !streamed.isEmpty { return streamed }
         if let runtimeError = error as? YishuAgentRuntimeClientError,
            let description = runtimeError.errorDescription,
            !description.isEmpty {
@@ -3446,10 +3414,6 @@ final class CompanionManager: ObservableObject {
                 result: result,
                 sourceCapture: Self.sourceCapture(for: request, in: screenCaptures)
             )
-            spokenText = Self.directActionConfirmation(
-                for: result,
-                action: request.action
-            )
             detectedElementScreenLocation = nil
             detectedElementDisplayFrame = nil
             voiceState = .responding
@@ -3491,6 +3455,7 @@ final class CompanionManager: ObservableObject {
                     ttsText,
                     speed: speechSpeed
                 )
+                ClickyAnalytics.trackTTSStopped()
                 guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
                 turnVisualPhase = .shapingOutput
                 voiceState = .responding
@@ -3523,6 +3488,7 @@ final class CompanionManager: ObservableObject {
                     excerptTts,
                     speed: speechSpeed
                 )
+                ClickyAnalytics.trackTTSStopped()
                 guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
                 turnVisualPhase = .shapingOutput
                 voiceState = .responding
@@ -3539,17 +3505,19 @@ final class CompanionManager: ObservableObject {
     }
 
     /// Keeps citations in the visual response while making the TTS copy
-    /// conversational. Link-only/source-only lines are omitted, inline
+    /// conversational. POINT tags must never be spoken — they are orb
+    /// coordinates, not words. Link-only/source-only lines are omitted, inline
     /// Markdown links keep their human label, and one short notice replaces
     /// the spoken URLs.
     static func speechText(from presentationText: String) -> String {
+        let withoutPoint = parsePointingCoordinates(from: presentationText).spokenText
         let urlPattern = #"(?i)(?:https?://|www\.)[^\s<>()（）\[\]{}，。！？；、“”‘’]+"#
-        guard presentationText.range(of: urlPattern, options: .regularExpression) != nil else {
-            return presentationText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard withoutPoint.range(of: urlPattern, options: .regularExpression) != nil else {
+            return withoutPoint.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         var readableLines: [String] = []
-        for rawLine in presentationText.components(separatedBy: .newlines) {
+        for rawLine in withoutPoint.components(separatedBy: .newlines) {
             var line = replacingMatches(
                 in: rawLine,
                 pattern: #"(?i)\[([^\]\n]+)\]\(\s*(?:https?://|www\.)[^)\n]+\)"#,
@@ -3771,7 +3739,7 @@ final class CompanionManager: ObservableObject {
     /// names, durations, screenshot dimensions, and typed receipts. They are
     /// safe to inspect when a turn feels slow without retaining user speech or
     /// screen contents in the log stream.
-    fileprivate static func logVoicePhase(
+    static func logVoicePhase(
         turnID: String,
         phase: String,
         deltaMS: Double,
@@ -3998,37 +3966,6 @@ final class CompanionManager: ObservableObject {
     private func stopCoverSpeech() {
         coverSpeechTask?.cancel()
         coverSpeechTask = nil
-    }
-
-    /// Product cover for a waiting search. Not an answer. Once per turn.
-    @discardableResult
-    private func beginSearchCoverSpeech(
-        toolName: String,
-        didSpeakCover: Bool,
-        didSpeakAnswer: Bool,
-        hasVisibleAnswerText: Bool,
-        turnToken: UUID
-    ) -> Bool {
-        guard YishuSearchCoverSpeech.shouldSpeak(
-            toolName: toolName,
-            didSpeakCover: didSpeakCover,
-            didSpeakAnswer: didSpeakAnswer,
-            hasVisibleAnswerText: hasVisibleAnswerText
-        ) else { return false }
-        let line = YishuSearchCoverSpeech.line
-        if !hasVisibleAnswerText {
-            responseOverlayManager.updateStreamingText(line)
-        }
-        coverSpeechTask?.cancel()
-        coverSpeechTask = Task { @MainActor [weak self] in
-            guard let self, self.ownsVoiceTurn(turnToken) else { return }
-            do {
-                try await self.elevenLabsTTSClient.speakText(line, speed: self.speechSpeed)
-            } catch {
-                // Cover is optional; answer or barge-in may stop it.
-            }
-        }
-        return true
     }
 
     /// Publish the orb target as soon as coordinates exist so flight overlaps speech.

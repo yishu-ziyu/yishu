@@ -320,7 +320,7 @@ final class YishuVoiceProxySupervisor: ObservableObject {
 
     init(
         fileManager: FileManager = .default,
-        session: URLSession = .shared
+        session: URLSession = YishuLoopbackSession.make()
     ) {
         self.fileManager = fileManager
         self.session = session

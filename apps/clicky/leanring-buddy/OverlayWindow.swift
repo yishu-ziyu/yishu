@@ -96,16 +96,23 @@ struct YishuPresenceView: View {
     @ObservedObject var companionManager: CompanionManager
     @ObservedObject var responseOverlayViewModel: CompanionResponseOverlayViewModel
     @ObservedObject var agentPresenceViewModel: AgentPresenceViewModel
+    @ObservedObject var overlayMarks: OverlayMarkStore
 
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
 
-    init(screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
+    init(
+        screenFrame: CGRect,
+        isFirstAppearance: Bool,
+        companionManager: CompanionManager,
+        overlayMarks: OverlayMarkStore
+    ) {
         self.screenFrame = screenFrame
         self.isFirstAppearance = isFirstAppearance
         self.companionManager = companionManager
         self.responseOverlayViewModel = companionManager.responseOverlayViewModel
         self.agentPresenceViewModel = companionManager.agentPresenceViewModel
+        self.overlayMarks = overlayMarks
 
         // Seed the cursor position from the current mouse location so the
         // orb doesn't flash at (0,0) before onAppear fires.
@@ -174,6 +181,8 @@ struct YishuPresenceView: View {
         ZStack {
             // Nearly transparent background (helps with compositing)
             Color.black.opacity(0.001)
+
+            OverlayMarksLayer(screenFrame: screenFrame, store: overlayMarks)
 
             // Welcome speech bubble (first launch only)
             if isCursorOnThisScreen && showWelcome && !welcomeText.isEmpty {
@@ -500,9 +509,7 @@ struct YishuPresenceView: View {
     /// Converts a macOS screen point (AppKit, bottom-left origin) to SwiftUI
     /// coordinates (top-left origin) relative to this screen's overlay window.
     private func convertScreenPointToSwiftUICoordinates(_ screenPoint: CGPoint) -> CGPoint {
-        let x = screenPoint.x - screenFrame.origin.x
-        let y = (screenFrame.origin.y + screenFrame.height) - screenPoint.y
-        return CGPoint(x: x, y: y)
+        OverlayCoordinateSpace.overlayPoint(fromAppKit: screenPoint, screenFrame: screenFrame)
     }
 
     // MARK: - Element Navigation
@@ -855,6 +862,7 @@ private struct YishuThinkingOrbCanvas: View {
 class OverlayWindowManager {
     private var overlayWindows: [OverlayWindow] = []
     var hasShownOverlayBefore = false
+    let markStore = OverlayMarkStore()
 
     func showOverlay(onScreens screens: [NSScreen], companionManager: CompanionManager) {
         // Hide any existing overlays
@@ -871,7 +879,8 @@ class OverlayWindowManager {
             let contentView = YishuPresenceView(
                 screenFrame: screen.frame,
                 isFirstAppearance: isFirstAppearance,
-                companionManager: companionManager
+                companionManager: companionManager,
+                overlayMarks: markStore
             )
 
             let hostingView = NSHostingView(rootView: contentView)

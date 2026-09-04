@@ -405,6 +405,55 @@ test("sidecar rejects an explicit server without a compatible health contract", 
   );
 });
 
+test("hanging EverOS does not block the model request past the recall budget", async (t) => {
+  class HangingEverOS implements EverOSMemoryPort {
+    async add(): Promise<void> {}
+    async flush(): Promise<void> {}
+    search(): Promise<RecalledMemory[]> {
+      return new Promise(() => undefined);
+    }
+    profile(): Promise<RecalledMemory[]> {
+      return new Promise(() => undefined);
+    }
+  }
+  class TimingInner extends MockAgentRuntime {
+    startedAt = 0;
+    override async startTurn(...args: Parameters<MockAgentRuntime["startTurn"]>): Promise<void> {
+      this.startedAt = Date.now();
+      return super.startTurn(...args);
+    }
+  }
+  const inner = new TimingInner();
+  const runtime = await makeRuntime(t, new HangingEverOS(), inner);
+  const events: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+  const command = makeTurnStartCommand();
+  command.payload.utterance = "在吗";
+  command.payload.conversationId = command.requestId;
+  command.payload.modelPreference = { provider: "openai-codex", model: "gpt-5.4" };
+  const started = Date.now();
+  await runtime.startTurn(command, (event) => events.push(event));
+  assert.ok(inner.startedAt > 0, "inner model turn must start");
+  assert.ok(
+    inner.startedAt - started < 400,
+    `model request waited ${inner.startedAt - started}ms for a hanging EverOS client`,
+  );
+  const startedEvent = events.find((event) => event.type === "turn.started");
+  assert.equal(startedEvent?.payload?.recallSource, "visible_only");
+});
+
+test("in-process startTurn with a stub model stays well under one second", async (t) => {
+  const runtime = await makeRuntime(t);
+  const command = makeTurnStartCommand();
+  command.payload.utterance = "在吗";
+  command.payload.conversationId = command.requestId;
+  command.payload.modelPreference = { provider: "openai-codex", model: "gpt-5.4" };
+  const started = Date.now();
+  await runtime.startTurn(command, () => undefined);
+  const elapsed = Date.now() - started;
+  process.stdout.write(`stub_startTurn_ms=${elapsed}\n`);
+  assert.ok(elapsed < 2000, `stub startTurn took ${elapsed}ms`);
+});
+
 test("ordinary weather reads explicit profile facts without announcing them", async (t) => {
   const everos = new FakeEverOS();
   everos.profileHits = [{

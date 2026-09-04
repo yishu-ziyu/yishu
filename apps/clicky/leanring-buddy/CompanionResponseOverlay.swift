@@ -20,6 +20,11 @@ enum CompanionResponsePresentationPhase: Equatable {
     case message
 }
 
+enum CompanionResponseTextKind: Equatable {
+    case transcript
+    case reply
+}
+
 /// Runtime completion owns observational pointing so the later response
 /// presentation cannot publish the same target a second time.
 enum YishuObservationalPointingPolicy {
@@ -62,6 +67,7 @@ enum YishuOverlayTextReconcilePolicy {
 @MainActor
 final class CompanionResponseOverlayViewModel: ObservableObject {
     @Published var streamingResponseText: String = ""
+    @Published var textKind: CompanionResponseTextKind = .reply
     /// Sentences already spoken aloud; they dim so the unread tail stays
     /// visually "live" while the voice catches up with the text.
     @Published var spokenSentenceCount = 0
@@ -89,13 +95,29 @@ final class CompanionResponseOverlayManager {
     /// hand work off to one another. The answer replaces this phase in place.
     func showThinking() {
         cancelScheduledHide()
-        viewModel.streamingResponseText = ""
         viewModel.spokenSentenceCount = 0
         viewModel.routingMetadataText = ""
         viewModel.memorySourceText = ""
+        if viewModel.textKind == .transcript,
+           !viewModel.streamingResponseText.isEmpty {
+            viewModel.presentationPhase = .response
+            return
+        }
+        viewModel.textKind = .reply
+        viewModel.streamingResponseText = ""
 
         withAnimation(.easeOut(duration: 0.14)) {
             viewModel.presentationPhase = .thinking
+        }
+    }
+
+    /// Key-up presence: switch to thinking without wiping the last interim.
+    func showPresenceCue() {
+        cancelScheduledHide()
+        if viewModel.presentationPhase == .hidden {
+            withAnimation(.easeOut(duration: 0.08)) {
+                viewModel.presentationPhase = .thinking
+            }
         }
     }
 
@@ -103,8 +125,26 @@ final class CompanionResponseOverlayManager {
         showThinking()
     }
 
+    /// Assistant text only. The transcript shares the field but must never be
+    /// replayed as a reply (it was spoken back to the user on runtime failure).
+    var currentStreamingText: String {
+        viewModel.textKind == .reply ? viewModel.streamingResponseText : ""
+    }
+
+    func updateTranscriptText(_ text: String) {
+        cancelScheduledHide()
+        let collapsed = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !collapsed.isEmpty else { return }
+        viewModel.textKind = .transcript
+        viewModel.streamingResponseText = collapsed
+        viewModel.presentationPhase = .response
+    }
+
     func updateStreamingText(_ accumulatedText: String) {
         cancelScheduledHide()
+        viewModel.textKind = .reply
         viewModel.streamingResponseText = accumulatedText
         guard !accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
@@ -148,6 +188,7 @@ final class CompanionResponseOverlayManager {
         viewModel.routingMetadataText = ""
         viewModel.memorySourceText = ""
         viewModel.spokenSentenceCount = 0
+        viewModel.textKind = .reply
         viewModel.streamingResponseText = trimmed
         withAnimation(.easeOut(duration: 0.18)) {
             viewModel.presentationPhase = .message
@@ -163,6 +204,7 @@ final class CompanionResponseOverlayManager {
     func hideOverlay() {
         cancelScheduledHide()
         viewModel.presentationPhase = .hidden
+        viewModel.textKind = .reply
         viewModel.streamingResponseText = ""
         viewModel.spokenSentenceCount = 0
         viewModel.routingMetadataText = ""
@@ -176,6 +218,7 @@ final class CompanionResponseOverlayManager {
 
         // Keep the final glyphs alive until the opacity transition finishes.
         let clearWorkItem = DispatchWorkItem { [weak self] in
+            self?.viewModel.textKind = .reply
             self?.viewModel.streamingResponseText = ""
             self?.viewModel.spokenSentenceCount = 0
             self?.viewModel.routingMetadataText = ""
@@ -218,12 +261,25 @@ struct CompanionResponsePresenceView: View {
 
     private var responseSurface: some View {
         VStack(alignment: .leading, spacing: 6) {
-            YishuSentenceRevealText(
-                text: viewModel.streamingResponseText.isEmpty
-                    ? "…"
-                    : viewModel.streamingResponseText,
-                spokenSentenceCount: viewModel.spokenSentenceCount
-            )
+            if viewModel.textKind == .transcript {
+                HStack(alignment: .center, spacing: 5) {
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary.opacity(0.88))
+                    Text(viewModel.streamingResponseText)
+                        .font(.system(size: 11.5, weight: .regular))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            } else {
+                YishuSentenceRevealText(
+                    text: viewModel.streamingResponseText.isEmpty
+                        ? "…"
+                        : viewModel.streamingResponseText,
+                    spokenSentenceCount: viewModel.spokenSentenceCount
+                )
+            }
 
             if !viewModel.routingMetadataText.isEmpty {
                 Text(viewModel.routingMetadataText)
@@ -281,6 +337,9 @@ struct CompanionResponsePresenceView: View {
     }
 
     private var responseContentWidth: CGFloat {
+        if viewModel.textKind == .transcript {
+            return 282
+        }
         switch viewModel.presentationPhase {
         case .hidden, .thinking:
             return 34

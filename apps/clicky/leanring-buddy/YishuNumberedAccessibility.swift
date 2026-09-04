@@ -16,6 +16,8 @@ enum YishuNumberedAccessibility {
         var enabled: Bool?
         var x: Double
         var y: Double
+        var width: Double = 0
+        var height: Double = 0
     }
 
     struct Snapshot {
@@ -32,13 +34,7 @@ enum YishuNumberedAccessibility {
 
     static func assignIds(_ candidates: [Candidate]) -> [NumberedAccessibilityTarget] {
         sorted(candidates).prefix(maxTargets).enumerated().map { index, item in
-            NumberedAccessibilityTarget(
-                id: String(index + 1),
-                role: item.role,
-                title: item.title,
-                description: item.description,
-                enabled: item.enabled
-            )
+            makeTarget(id: String(index + 1), candidate: item)
         }
     }
 
@@ -133,16 +129,24 @@ enum YishuNumberedAccessibility {
         }
         return ordered.prefix(maxTargets).enumerated().map { index, item in
             LiveHit(
-                target: NumberedAccessibilityTarget(
-                    id: String(index + 1),
-                    role: item.candidate.role,
-                    title: item.candidate.title,
-                    description: item.candidate.description,
-                    enabled: item.candidate.enabled
-                ),
+                target: makeTarget(id: String(index + 1), candidate: item.candidate),
                 element: item.element
             )
         }
+    }
+
+    private static func makeTarget(id: String, candidate: Candidate) -> NumberedAccessibilityTarget {
+        let hasSize = candidate.width > 0 && candidate.height > 0
+        return NumberedAccessibilityTarget(
+            id: id,
+            role: candidate.role,
+            title: candidate.title,
+            description: candidate.description,
+            enabled: candidate.enabled,
+            frame: hasSize
+                ? CGRect(x: candidate.x, y: candidate.y, width: candidate.width, height: candidate.height)
+                : nil
+        )
     }
 
     private static func focusedWindow(processIdentifier: pid_t) -> AXUIElement? {
@@ -181,7 +185,9 @@ enum YishuNumberedAccessibility {
             description: description,
             enabled: boolAttribute(kAXEnabledAttribute as String, from: element),
             x: frame.minX,
-            y: frame.minY
+            y: frame.minY,
+            width: frame.width,
+            height: frame.height
         )
     }
 

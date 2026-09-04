@@ -130,6 +130,14 @@ export class CompletionsStreamParser {
   private readonly toolCalls = new Map<number, AccumulatedToolCall>();
   private finishReason: string | null = null;
   private done = false;
+  private pendingReasoning = "";
+
+  /** Reasoning received since the last take; never spoken. */
+  takeReasoningDelta(): string {
+    const delta = this.pendingReasoning;
+    this.pendingReasoning = "";
+    return delta;
+  }
 
   push(payload: string): CompletionsStreamPiece | undefined {
     if (this.done) return undefined;
@@ -159,7 +167,12 @@ export class CompletionsStreamParser {
     const choice = chunk.choices?.[0];
     if (!choice) return undefined;
     // MiniMax puts chain-of-thought on `reasoning_content`. Spoken overlay
-    // only reads `content`. Empty-string content is a heartbeat, not a reply.
+    // only reads `content`; callers drain reasoning via takeReasoningDelta.
+    // Empty-string content is a heartbeat, not a reply.
+    const reasoning = choice.delta?.reasoning_content;
+    if (typeof reasoning === "string" && reasoning.length > 0) {
+      this.pendingReasoning += reasoning;
+    }
     const delta = choice.delta?.content;
     let trailingText: string | undefined;
     let piece: CompletionsStreamPiece | undefined;
@@ -216,10 +229,12 @@ export class CompletionsStreamParser {
 export async function* readSseData(
   body: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
+  onFirstByte?: () => void,
 ): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let firstByteNotified = false;
   const aborted = (): Error => new Error("Model stream aborted");
   const onAbort = (): void => {
     void reader.cancel().catch(() => undefined);
@@ -232,6 +247,10 @@ export async function* readSseData(
       const { done, value } = await reader.read();
       if (signal?.aborted) throw aborted();
       if (done) break;
+      if (!firstByteNotified && value !== undefined && value.byteLength > 0) {
+        firstByteNotified = true;
+        onFirstByte?.();
+      }
       buffer += decoder.decode(value, { stream: true });
       let newlineIndex = buffer.indexOf("\n");
       while (newlineIndex >= 0) {

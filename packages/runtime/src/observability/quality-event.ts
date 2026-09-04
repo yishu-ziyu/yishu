@@ -23,9 +23,14 @@ export const QUALITY_EVENT_NAMES = [
   "tts.requested",
   "tts.first_audio",
   "tts.interrupted",
+  "turn.start",
+  "runtime.turn_received",
+  "recall.done",
   "model.request_started",
+  "model.request_sent",
   "model.first_byte",
   "model.completed",
+  "model.done",
   "tool.started",
   "tool.completed",
   "desktop.action_committed",
@@ -71,6 +76,9 @@ export const QUALITY_ATTRIBUTE_ALLOWLIST = [
   "durationMs",
   "retryCount",
   "spanKind",
+  "recallSource",
+  "imageCount",
+  "imageBytes",
 ] as const;
 
 export type QualityAttributeName = (typeof QUALITY_ATTRIBUTE_ALLOWLIST)[number];

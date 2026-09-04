@@ -19,9 +19,20 @@ enum ClickyContextResolutionReason: String, CaseIterable {
 
 enum ClickyAnalytics {
     private static var pushToTalkStartedAt: UInt64?
+    private static var voiceTurnId = "voice"
+    private static var keyUpAt: UInt64?
+    private static var emittedVoiceEvents: Set<String> = []
 
     static func configure() {
         QualityEventRecorder.record(name: "app.ready", sessionId: "app")
+        let provider = BuddyTranscriptionProviderFactory.resolveProvider()
+        QualityEventRecorder.record(
+            name: "asr.provider",
+            sessionId: "voice",
+            attributes: [
+                "providerId": BuddyTranscriptionProviderFactory.providerId(for: provider),
+            ]
+        )
     }
 
     static func trackAppOpened() {
@@ -47,21 +58,72 @@ enum ClickyAnalytics {
         QualityEventRecorder.record(name: "permission.granted", sessionId: "app", attributes: ["permission": permission])
     }
 
-    static func trackPushToTalkStarted() {
+    static func trackPushToTalkStarted(turnId: String = "voice") {
         pushToTalkStartedAt = DispatchTime.now().uptimeNanoseconds
-        QualityEventRecorder.record(name: "ptt.key_down", sessionId: "voice")
+        voiceTurnId = turnId
+        keyUpAt = nil
+        emittedVoiceEvents = []
+        recordVoiceEvent("ptt.key_down", once: false)
     }
 
     static func trackPushToTalkReleased() {
+        let now = DispatchTime.now().uptimeNanoseconds
         let durationMs = pushToTalkStartedAt.map {
-            Int((DispatchTime.now().uptimeNanoseconds - $0) / 1_000_000)
+            Int((now - $0) / 1_000_000)
         }
         pushToTalkStartedAt = nil
+        keyUpAt = now
         QualityEventRecorder.record(
             name: "ptt.key_up",
             sessionId: "voice",
-            durationMs: durationMs
+            durationMs: durationMs,
+            attributes: voiceAttributes(sinceKeyUpMs: 0)
         )
+    }
+
+    static func trackVoiceEvent(
+        _ name: String,
+        once: Bool = true,
+        attributes: [String: Any] = [:]
+    ) {
+        recordVoiceEvent(name, once: once, extraAttributes: attributes)
+    }
+
+    static func trackTTSStopped() {
+        recordVoiceEvent("tts.stopped", once: true)
+    }
+
+    private static func recordVoiceEvent(
+        _ name: String,
+        once: Bool,
+        extraAttributes: [String: Any] = [:]
+    ) {
+        if once, emittedVoiceEvents.contains(name) { return }
+        var attributes = voiceAttributes(sinceKeyUpMs: sinceKeyUpMs())
+        for (key, value) in extraAttributes {
+            attributes[key] = value
+        }
+        QualityEventRecorder.record(
+            name: name,
+            sessionId: "voice",
+            durationMs: sinceKeyUpMs(),
+            attributes: attributes
+        )
+        if once { emittedVoiceEvents.insert(name) }
+    }
+
+    private static func voiceAttributes(sinceKeyUpMs: Int) -> [String: Any] {
+        [
+            "turnId": voiceTurnId,
+            "sinceKeyUpMs": max(0, sinceKeyUpMs),
+        ]
+    }
+
+    private static func sinceKeyUpMs() -> Int {
+        guard let keyUpAt else { return 0 }
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now < keyUpAt { return 0 }
+        return Int((now - keyUpAt) / 1_000_000)
     }
 
     static func trackContextResolution(
@@ -107,8 +169,27 @@ enum ClickyAnalytics {
         )
     }
 
+    static func trackAsrRequestSent(kind: String, audioMs: Int) {
+        QualityEventRecorder.record(
+            name: "asr.request_sent",
+            sessionId: "voice",
+            durationMs: sinceKeyUpMs(),
+            attributes: [
+                "turnId": voiceTurnId,
+                "sinceKeyUpMs": max(0, sinceKeyUpMs()),
+                "actionKind": kind,
+                "audioMs": max(0, audioMs),
+            ]
+        )
+    }
+
+    static func trackAsrFirstSSE() {
+        recordVoiceEvent("asr.first_sse", once: true)
+    }
+
     static func trackUserMessageSent(transcript: String) {
         _ = transcript
+        recordVoiceEvent("asr.final", once: true)
         QualityEventRecorder.record(name: "asr.completed", sessionId: "voice")
     }
 

@@ -226,6 +226,80 @@ final class QualityEventRecorderTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: storeURL.path))
     }
 
+    func testM0EventNamesAreRecorded() throws {
+        let names = [
+            "ptt.key_down", "ptt.key_up", "asr.first_partial", "asr.final",
+            "turn.start", "model.first_byte", "tts.first_audio",
+            "tts.stopped", "presence.cue",
+            "model.completed", "context.resolved",
+            "runtime.turn_received", "recall.done", "model.request_sent", "prompt.built",
+        ]
+        QualityEventRecorder.clear()
+        for name in names {
+            QualityEventRecorder.record(name: name, sessionId: "voice")
+        }
+        let recorded = try readEvents().compactMap { $0["name"] as? String }
+        XCTAssertEqual(Set(recorded), Set(names))
+        for name in names {
+            XCTAssertTrue(QualityEventRecorder.allowedNames.contains(name), name)
+        }
+    }
+
+    func testAsrRequestSentAndRuntimeTimingPassAllowlist() throws {
+        QualityEventRecorder.clear()
+        ClickyAnalytics.trackPushToTalkStarted(turnId: "turn-asr")
+        ClickyAnalytics.trackPushToTalkReleased()
+        ClickyAnalytics.trackAsrRequestSent(kind: "final", audioMs: 1200)
+        ClickyAnalytics.trackAsrFirstSSE()
+        QualityEventRecorder.record(
+            name: "model.request_sent",
+            sessionId: "voice",
+            attributes: ["imageCount": 0, "imageBytes": 0]
+        )
+        QualityEventRecorder.record(
+            name: "recall.done",
+            sessionId: "voice",
+            durationMs: 12,
+            attributes: ["recallSource": "prefetch"]
+        )
+        QualityEventRecorder.record(name: "runtime.turn_received", sessionId: "voice")
+        QualityEventRecorder.record(name: "prompt.built", sessionId: "voice")
+
+        let names = try readEvents().compactMap { $0["name"] as? String }
+        XCTAssertTrue(names.contains("asr.request_sent"))
+        XCTAssertTrue(names.contains("asr.first_sse"))
+        XCTAssertTrue(names.contains("model.request_sent"))
+        XCTAssertTrue(names.contains("recall.done"))
+        XCTAssertTrue(names.contains("runtime.turn_received"))
+        XCTAssertTrue(names.contains("prompt.built"))
+        ClickyAnalytics.trackVoiceEvent("turn.start")
+        ClickyAnalytics.trackVoiceEvent("model.first_byte")
+        ClickyAnalytics.trackAIResponseReceived(response: "secret")
+        ClickyAnalytics.trackContextResolution(
+            reason: .reuse,
+            sourceDimensionsAvailable: true
+        )
+        let restored = try readEvents().compactMap { $0["name"] as? String }
+        XCTAssertTrue(restored.contains("turn.start"))
+        XCTAssertTrue(restored.contains("model.first_byte"))
+        XCTAssertTrue(restored.contains("model.completed"))
+        XCTAssertTrue(restored.contains("context.resolved"))
+        let sent = try XCTUnwrap(try readEvents().first { $0["name"] as? String == "asr.request_sent" })
+        let attributes = try XCTUnwrap(sent["attributes"] as? [String: Any])
+        XCTAssertEqual(attributes["actionKind"] as? String, "final")
+        XCTAssertEqual(attributes["audioMs"] as? Int, 1200)
+    }
+
+    func testConfigureRecordsAsrProvider() throws {
+        QualityEventRecorder.clear()
+        ClickyAnalytics.configure()
+
+        let events = try readEvents()
+        XCTAssertEqual(events.map { $0["name"] as? String }, ["app.ready", "asr.provider"])
+        let attributes = try XCTUnwrap(events[1]["attributes"] as? [String: Any])
+        XCTAssertEqual(attributes["providerId"] as? String, "stepplan")
+    }
+
     func testPushToTalkReleaseRecordsHeldDuration() throws {
         QualityEventRecorder.clear()
         ClickyAnalytics.trackPushToTalkStarted()
@@ -235,6 +309,43 @@ final class QualityEventRecorderTests: XCTestCase {
         XCTAssertEqual(events.map { $0["name"] as? String }, ["ptt.key_down", "ptt.key_up"])
         let duration = try XCTUnwrap(events[1]["durationMs"] as? Int)
         XCTAssertGreaterThanOrEqual(duration, 0)
+        let keyDownAttributes = try XCTUnwrap(events[0]["attributes"] as? [String: Any])
+        XCTAssertEqual(keyDownAttributes["turnId"] as? String, "voice")
+        XCTAssertEqual(keyDownAttributes["sinceKeyUpMs"] as? Int, 0)
+        let keyUpAttributes = try XCTUnwrap(events[1]["attributes"] as? [String: Any])
+        XCTAssertEqual(keyUpAttributes["turnId"] as? String, "voice")
+        XCTAssertEqual(keyUpAttributes["sinceKeyUpMs"] as? Int, 0)
+    }
+
+    func testVoiceLatencyEventsCarryTurnIdAndSinceKeyUpMs() throws {
+        QualityEventRecorder.clear()
+        ClickyAnalytics.trackPushToTalkStarted(turnId: "turn-voice-1")
+        ClickyAnalytics.trackPushToTalkReleased()
+        ClickyAnalytics.trackVoiceEvent("presence.cue")
+        ClickyAnalytics.trackVoiceEvent("asr.first_partial")
+        ClickyAnalytics.trackVoiceEvent("asr.final")
+        ClickyAnalytics.trackVoiceEvent("turn.start")
+        ClickyAnalytics.trackVoiceEvent("model.first_byte")
+        ClickyAnalytics.trackVoiceEvent("tts.first_audio")
+        ClickyAnalytics.trackTTSStopped()
+
+        let names = try readEvents().map { $0["name"] as? String }
+        XCTAssertEqual(names, [
+            "ptt.key_down",
+            "ptt.key_up",
+            "presence.cue",
+            "asr.first_partial",
+            "asr.final",
+            "turn.start",
+            "model.first_byte",
+            "tts.first_audio",
+            "tts.stopped",
+        ])
+        for event in try readEvents() {
+            let attributes = try XCTUnwrap(event["attributes"] as? [String: Any])
+            XCTAssertEqual(attributes["turnId"] as? String, "turn-voice-1")
+            XCTAssertNotNil(attributes["sinceKeyUpMs"] as? Int)
+        }
     }
 
     func testContextResolutionStoresOnlyFixedReasonAndSourceAvailability() throws {

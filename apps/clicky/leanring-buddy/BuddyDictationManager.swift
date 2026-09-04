@@ -558,6 +558,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 Task { @MainActor in
                     guard let self, self.activeTranscriptionToken == token else { return }
                     self.latestRecognizedText = transcriptText
+                    let draft = self.composeDraftText(withTranscribedText: transcriptText)
+                    self.draftCallbacks?.updateDraftText(draft)
                 }
             },
             onFinalTranscriptReady: { [weak self] transcriptText in

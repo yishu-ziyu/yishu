@@ -65,6 +65,7 @@ enum YishuConversationModelCatalog {
 
     static let localModels: [YishuConversationModelOption] = [
         .init(provider: localProvider, model: "MiniMax-M3", label: "MiniMax M3", sourceLabel: localSourceLabel),
+        .init(provider: localProvider, model: "MiniMax-M2.5", label: "MiniMax M2.5", sourceLabel: localSourceLabel),
         .init(provider: localProvider, model: "grok-4.5", label: "Grok 4.5", sourceLabel: localSourceLabel),
         .init(provider: localProvider, model: "grok-4.6", label: "Grok 4.6", sourceLabel: localSourceLabel),
         .init(provider: localProvider, model: "grok-4.3", label: "Grok 4.3", sourceLabel: localSourceLabel),

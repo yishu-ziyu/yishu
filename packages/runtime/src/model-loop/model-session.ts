@@ -35,11 +35,33 @@ import type { TurnContextProviders } from "./turn-context.js";
 
 export const MAX_MODEL_ITERATIONS = 16;
 const MAX_HISTORY_MESSAGES = 200;
-const STREAM_FIRST_BYTE_TIMEOUT_MS = 45_000;
+const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 8_000;
 const TRANSIENT_RETRY_MAX = 2;
 export const FIRST_BYTE_TIMEOUT_MESSAGE = "Model stream timed out waiting for the first byte.";
+export const FIRST_BYTE_FALLBACK_SPEECH = "这句我想了太久，换个说法再来一次？";
 const FINAL_REPLY_HINT =
   "工具次数已用尽。根据已经打开的页面和搜索结果，直接说出结论。不要再调用工具。";
+const ACK_FIRST_HINT =
+  "先开口再说。用一句很短的话（一到三个字也可以）应答，然后再调用工具。不要解释这条提醒，不要报工具名。";
+
+export function resolveFirstByteTimeoutMs(
+  overrideMs?: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (typeof overrideMs === "number" && Number.isFinite(overrideMs) && overrideMs > 0) {
+    return overrideMs;
+  }
+  const raw = env.YISHU_MODEL_FIRST_BYTE_MS?.trim();
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_FIRST_BYTE_TIMEOUT_MS;
+}
+
+export function isModelStallFault(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.YISHU_FAULT === "model_stall";
+}
 
 export interface YishuModelSessionOptions {
   readonly model: ResolvedModel;
@@ -161,6 +183,8 @@ export class YishuModelSession implements ModelSession {
       const firstUserText = memoryBlock ? `${memoryBlock}\n\n${initialText}` : initialText;
       this.history.push({ role: "user", text: firstUserText, ...(options.images ? { images: options.images } : {}) });
       let lastHadTools = false;
+      let ackReminderInjected = false;
+      let requestSentEmitted = false;
       for (let iteration = 0; iteration < MAX_MODEL_ITERATIONS; iteration += 1) {
         if (controller.signal.aborted) throw abortError(controller.signal);
         const offerTools = iteration < MAX_MODEL_ITERATIONS - 1;
@@ -168,9 +192,20 @@ export class YishuModelSession implements ModelSession {
         const { text, toolCalls } = await this.streamOneMessage(
           controller.signal,
           reportPreflight,
-          { offerTools },
+          { offerTools, emitRequestSent: !requestSentEmitted },
         );
+        requestSentEmitted = true;
         const runnableCalls = offerTools ? toolCalls : [];
+        if (
+          !ackReminderInjected
+          && offerTools
+          && runnableCalls.length > 0
+          && text.trim().length === 0
+        ) {
+          ackReminderInjected = true;
+          this.pendingStatusText = ACK_FIRST_HINT;
+          continue;
+        }
         lastHadTools = runnableCalls.length > 0;
         this.history.push({
           role: "assistant",
@@ -231,7 +266,7 @@ export class YishuModelSession implements ModelSession {
   private async streamOneMessage(
     signal: AbortSignal,
     reportPreflight: (accepted: boolean) => void,
-    options: { offerTools?: boolean } = {},
+    options: { offerTools?: boolean; emitRequestSent?: boolean } = {},
   ): Promise<{ text: string; toolCalls: readonly WireToolCall[] }> {
     const { model, providerRuntime } = this.options;
     const activeTools = options.offerTools === false
@@ -256,13 +291,30 @@ export class YishuModelSession implements ModelSession {
       ...(isResponses ? { "OpenAI-Beta": "responses=experimental", originator: "codex_cli_rs" } : {}),
     };
     const url = isResponses ? `${model.baseUrl.replace(/\/$/, "")}/codex/responses` : `${model.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    if (options.emitRequestSent) {
+      const images = this.history.flatMap((message) => (
+        message.role === "user" && message.images ? message.images : []
+      ));
+      this.emit({
+        type: "request_sent",
+        imageCount: images.length,
+        imageBytes: images.reduce((sum, image) => sum + Buffer.byteLength(image.data, "utf8"), 0),
+      });
+    }
 
     const envelope = this.envelope("assistant", "");
     this.emit({ type: "message_start", message: envelope });
 
-    const timeoutMs = this.options.streamFirstByteTimeoutMs ?? STREAM_FIRST_BYTE_TIMEOUT_MS;
+    const timeoutMs = resolveFirstByteTimeoutMs(this.options.streamFirstByteTimeoutMs);
     const firstByteTimer = setTimeout(() => {
       if (!this.runController || this.runController.signal.aborted) return;
+      if (!sawFirstByte) {
+        this.emit({
+          type: "message_update",
+          message: this.envelope("assistant", FIRST_BYTE_FALLBACK_SPEECH),
+          assistantMessageEvent: { type: "text_delta", delta: FIRST_BYTE_FALLBACK_SPEECH },
+        });
+      }
       this.runController.abort(new Error(FIRST_BYTE_TIMEOUT_MESSAGE));
     }, timeoutMs);
     let sawFirstByte = false;
@@ -277,6 +329,16 @@ export class YishuModelSession implements ModelSession {
     const responsesParser = isResponses ? new ResponsesStreamParser() : undefined;
     let toolCalls: readonly WireToolCall[] = [];
     let streamDone = false;
+    let sseFirstByteEmitted = false;
+    const emitSseFirstByte = (): void => {
+      if (sseFirstByteEmitted) return;
+      sseFirstByteEmitted = true;
+      this.emit({ type: "sse_first_byte" });
+    };
+    const emitReasoning = (delta: string): void => {
+      if (delta.length === 0) return;
+      this.emit({ type: "reasoning_delta", delta });
+    };
     try {
       const response = await this.fetchWithRetry(url, body as Record<string, unknown>, headers, signal, isResponses);
       if (!response.ok) {
@@ -288,7 +350,7 @@ export class YishuModelSession implements ModelSession {
       if (!response.body) throw new Error("Model response has no body.");
 
       if (isResponses && responsesParser) {
-        for await (const event of readResponsesEvents(response.body, signal)) {
+        for await (const event of readResponsesEvents(response.body, signal, emitSseFirstByte)) {
           noteFirstByte();
           const piece = responsesParser.push(event);
           if (piece?.type === "text_delta") {
@@ -309,9 +371,10 @@ export class YishuModelSession implements ModelSession {
           toolCalls = piece.toolCalls;
         }
       } else if (completionsParser) {
-        for await (const payload of readSseData(response.body, signal)) {
+        for await (const payload of readSseData(response.body, signal, emitSseFirstByte)) {
           noteFirstByte();
           const piece = completionsParser.push(payload);
+          emitReasoning(completionsParser.takeReasoningDelta());
           if (piece?.type === "text_delta") {
             text += piece.delta;
             this.emit({
@@ -335,6 +398,7 @@ export class YishuModelSession implements ModelSession {
         }
         if (!streamDone) {
           const piece = completionsParser.finish();
+          emitReasoning(completionsParser.takeReasoningDelta());
           toolCalls = piece.toolCalls;
         }
       }
@@ -353,6 +417,16 @@ export class YishuModelSession implements ModelSession {
     signal: AbortSignal,
     isResponses: boolean,
   ): Promise<Response> {
+    if (isModelStallFault()) {
+      await new Promise<never>((_, reject) => {
+        const fail = (): void => reject(new Error("Model run aborted"));
+        if (signal.aborted) {
+          fail();
+          return;
+        }
+        signal.addEventListener("abort", fail, { once: true });
+      });
+    }
     let lastError: unknown;
     for (let attempt = 0; attempt <= TRANSIENT_RETRY_MAX; attempt += 1) {
       if (signal.aborted) throw new Error("Model run aborted");

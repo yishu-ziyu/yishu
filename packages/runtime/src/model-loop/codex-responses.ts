@@ -169,8 +169,9 @@ export class ResponsesStreamParser {
 export async function* readResponsesEvents(
   body: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
+  onFirstByte?: () => void,
 ): AsyncGenerator<ResponsesStreamEvent> {
-  for await (const payload of readSseData(body, signal)) {
+  for await (const payload of readSseData(body, signal, onFirstByte)) {
     if (payload === "[DONE]") return;
     try {
       yield JSON.parse(payload) as ResponsesStreamEvent;

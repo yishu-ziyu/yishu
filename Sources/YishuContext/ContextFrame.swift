@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 public let yishuProtocolVersion = 1
@@ -136,19 +137,24 @@ public struct NumberedAccessibilityTarget: Codable, Equatable, Sendable {
     public let title: String?
     public let description: String?
     public let enabled: Bool?
+    /// AX `kAXPosition`/`kAXSize` in Quartz global top-left coordinates.
+    /// Optional so protocol-v1 frames remain wire-compatible.
+    public let frame: CGRect?
 
     public init(
         id: String,
         role: String?,
         title: String?,
         description: String?,
-        enabled: Bool?
+        enabled: Bool?,
+        frame: CGRect? = nil
     ) {
         self.id = id
         self.role = role
         self.title = title
         self.description = description
         self.enabled = enabled
+        self.frame = frame
     }
 }
 
@@ -392,6 +398,25 @@ extension NumberedAccessibilityTarget {
         case title
         case description
         case enabled
+        case frame
+    }
+
+    private struct FramePayload: Codable {
+        var x: Double
+        var y: Double
+        var width: Double
+        var height: Double
+
+        init(_ rect: CGRect) {
+            x = rect.origin.x
+            y = rect.origin.y
+            width = rect.width
+            height = rect.height
+        }
+
+        var cgRect: CGRect {
+            CGRect(x: x, y: y, width: width, height: height)
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -401,6 +426,19 @@ extension NumberedAccessibilityTarget {
         try container.encodeNullable(title, forKey: .title)
         try container.encodeNullable(description, forKey: .description)
         try container.encodeNullable(enabled, forKey: .enabled)
+        if let frame {
+            try container.encode(FramePayload(frame), forKey: .frame)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        role = try container.decodeIfPresent(String.self, forKey: .role)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+        frame = try container.decodeIfPresent(FramePayload.self, forKey: .frame)?.cgRect
     }
 }
 

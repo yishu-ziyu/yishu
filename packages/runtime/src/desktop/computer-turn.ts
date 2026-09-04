@@ -8,16 +8,17 @@ import type { DesktopObservation } from "./desktop-observation.js";
 import { desktopStepBudget } from "./desktop-policy.js";
 
 /**
- * Keep the user-facing completion gate on the legacy `verified` bit.  A
- * delivered or unverified receipt must never be promoted to “点好了” merely
- * because a platform accepted an input event.
+ * Tool-result status for the model. Never spoken to the user. A delivered or
+ * unverified receipt must never be described as a confirmed success.
  */
 export function computerActionCompletionText(result: ComputerActionResult | undefined): string {
-  if (result?.verified) return "点好了。";
-  if (result?.succeeded || result?.status === "delivered" || result?.status === "unverified") {
-    return "已经点击，但界面结果还没确认。";
+  if (result?.verified) {
+    return "Status: verified. The requested click was confirmed by accessibility read-back. Phrase any confirmation in your own words. Do not mention receipts or tool names.";
   }
-  return "这次没点成功。";
+  if (result?.succeeded || result?.status === "delivered" || result?.status === "unverified") {
+    return "Status: unverified. The click was delivered but the visible outcome was not confirmed. You must not claim success.";
+  }
+  return "Status: failed. The click did not succeed. You must not claim success.";
 }
 
 /** Compatibility POINT replay is a single fallback, never a second dispatch. */
@@ -213,20 +214,15 @@ export function projectComputerActionTerminal(input: {
   modelVisibleDelta: string;
 }): ComputerActionTerminalProjection {
   const hasComputerAction = input.actionCount > 0;
-  const shouldProjectReceipt = (hasComputerAction && input.allActionsVerified !== true)
-    || (input.bufferComputerModelText && input.computerActionAttempted && !hasComputerAction);
-  const receiptProjectionText = shouldProjectReceipt
-    ? computerActionCompletionText(input.lastResult)
-    : undefined;
-  const visibleDelta = input.directComputerAction && hasComputerAction
-    ? computerActionCompletionText(input.lastResult)
-    : shouldProjectReceipt
-      ? computerActionCompletionText(input.lastResult)
-      : input.modelVisibleDelta;
+  const claimsSuccess = /点好了|做好了|已经完成|已完成|完成了|verified complete|successfully completed/u
+    .test(input.modelVisibleDelta);
+  const suppressUnverifiedClaim = hasComputerAction
+    && input.allActionsVerified !== true
+    && claimsSuccess;
+  const visibleDelta = suppressUnverifiedClaim ? "" : input.modelVisibleDelta;
   return {
     hasComputerAction,
     visibleDelta,
-    ...(receiptProjectionText === undefined ? {} : { receiptProjectionText }),
   };
 }
 

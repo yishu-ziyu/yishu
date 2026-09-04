@@ -23,12 +23,30 @@ enum QualityEventRecorder {
     ]
     private static let fixedTaskTerminals: Set<String> = ["verified", "unverified"]
 
+    static let allowedNames: Set<String> = [
+        "ptt.key_down", "ptt.key_up", "asr.first_partial", "asr.final",
+        "turn.start", "turn.failed", "model.first_byte", "tts.first_audio",
+        "tts.stopped", "tts.clip_gap", "tts.clip_done", "presence.cue",
+        "model.completed", "context.resolved",
+        "runtime.turn_received", "recall.done", "model.request_sent", "prompt.built",
+        "app.ready", "app.launched", "asr.provider", "asr.completed",
+        "asr.request_sent", "asr.first_sse", "asr.session",
+        "permission.granted", "onboarding.started",
+        "onboarding.first_verified_action", "onboarding.step_completed",
+        "context.capture_completed", "tts.requested",
+        "computer.action.completed", "computer.result.sending", "computer.result.sent",
+        "memory.remembered", "memory.used", "memory.forgotten",
+        "device.test",
+    ]
+
     private static let allowlist: Set<String> = [
         "appCategory", "actionKind", "providerId", "modelId", "errorCode",
         "stepCount", "verified", "permission", "milestone", "scenarioId",
         "receiptStatus", "toolName", "capabilityProfile", "taskTerminal",
         "committed", "durationMs", "retryCount", "spanKind", "memoryIdHash",
         "reason", "sourceDimensionsAvailable", "method", "code", "receiptHash", "scopeHash",
+        "turnId", "sinceKeyUpMs", "audioMs", "gapMs", "playedMs", "recallSource", "imageCount", "imageBytes",
+        "reused", "proxyUsed", "connectMs",
     ]
 
     private static let forbidden = try! NSRegularExpression(
@@ -46,6 +64,13 @@ enum QualityEventRecorder {
         guard !paused else { return }
         if let durationMs, durationMs < 0 { return }
         do {
+            let nameFolded = name.replacingOccurrences(of: "[\\s_-]", with: "", options: .regularExpression)
+            if forbidden.firstMatch(
+                in: nameFolded,
+                range: NSRange(location: 0, length: nameFolded.utf16.count)
+            ) != nil, !allowedNames.contains(name) {
+                return
+            }
             for (key, value) in attributes {
                 let folded = key.replacingOccurrences(of: "[\\s_-]", with: "", options: .regularExpression)
                 if forbidden.firstMatch(in: folded, range: NSRange(location: 0, length: folded.utf16.count)) != nil {
@@ -121,9 +146,10 @@ enum QualityEventRecorder {
             return isFixedString(value, allowed: fixedCodes)
         case "taskTerminal":
             return isFixedString(value, allowed: fixedTaskTerminals)
-        case "sourceDimensionsAvailable", "verified":
+        case "sourceDimensionsAvailable", "verified", "reused", "proxyUsed":
             return type(of: value) == Bool.self
-        case "durationMs", "retryCount":
+        case "durationMs", "retryCount", "sinceKeyUpMs", "audioMs", "gapMs", "playedMs", "imageCount",
+             "imageBytes", "connectMs":
             guard type(of: value) == Int.self, let number = value as? Int else { return false }
             return number >= 0
         default:

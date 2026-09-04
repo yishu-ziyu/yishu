@@ -137,6 +137,12 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
         }
 
         transcriptionUploadTask?.cancel()
+        urlSession.getAllTasks { $0.forEach { $0.cancel() } }
+    }
+
+    // Invalidate only in deinit: creating a URL task on an invalidated session
+    // raises an uncatchable NSGenericException (see StepPlanTranscriptionProvider).
+    deinit {
         urlSession.invalidateAndCancel()
     }
 
@@ -280,9 +286,6 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
         onFinalTranscriptReady(transcriptText)
     }
 
-    deinit {
-        cancel()
-    }
 }
 
 private extension Data {
