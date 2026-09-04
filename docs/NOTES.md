@@ -2,7 +2,12 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-04 16:40）
+## 当前状态（2026-09-04 23:00）
+
+- 用户拍：实时档用 **MiniMax-M3 + `thinking.disabled`**。Grok Voice 不接。卡 `docs/evals/20260904-m3-no-think.md`。
+- 代码：M3 的 chat completions（对话 / 记忆抽取 / 口播摘录）带 `thinking:{type:disabled}`。本机实时档若仍是 M2.5，启动时迁一次到 M3。要装新包才进真机。
+- M3 vs Grok 表：`evals/voice/results/2026-09-04-m3-vs-grok.md`（关思考 609 ms vs Grok 988 ms）。
+- 阶跃 realtime 工具纪律不可解。B 轨维持关闭。Grok Voice 不接。
 
 - 新增治理文件（16:40）：`docs/ROADMAP.md`（M0–M5 目标、依赖、硬条、给来干活 Agent 的手册）、`docs/ARCHITECTURE.md`（三层与方向、接缝表、不可越的线、并行切分、门禁、已知坑）、`docs/evals/M1-hands.md`、`M2-conversation-window.md`、`M3-brain.md`、`M4-memory-polish.md`、`M5-helpers.md`（draft，开工时改日期转 active）。领导权：架构与核心判断归主代理，用户定价值。
 
@@ -47,7 +52,9 @@
 - **promptChars 79→2655 不是泄漏**：history 按 conversationId 隔离；涨的是 personal-scope recent trail（2 分钟、最多 8 条），换 conversationId 仍共享。1→2 的 +623 = 第一条 trail JSON；之后每条观察约 +279；第 9–10 轮顶到 8 条上限。已加分段计量 + 单测。不修。
 - 评测脚本（主代理，20:30）：`check-latency.mjs` 新增默认门 #20 `tts.clip_done played≥95%`（每句 `playedMs ≥ 0.95 × durationMs`）与 #22 `tts.clip_gap p95 ≤120`；fixture 重生成（392 行），13 测试过；对 v8 真机日志两项均 FAIL「no event」，等 v9。**待办**：Swift builder 交付后追加 `tts.clip_done {durationMs, playedMs}` 事件（首轮任务书只写了 `tts.clip_gap`）。
 - exp4b（Gemini Live 复开 C 轨）**搁置**（20:22）：用户暂时拿不到 Gemini API key。C 轨维持实验 4 的结论（关闭），拿到 key 再派；不阻塞 M0。
-- 下一步：v9 已装（pid 60883）。用户说一句能出两句回答的话（例如「今天怎么样」），听「天气凉快下来了」和下一句之间还有没有死气；主代理读 `tts.clip_gap` / `tts.clip_done` 再放行 30 句。模型段本轮不指望压到 1 s。
+- 提交：`b5e858a` 已推 `origin/main`（2026-09-04 21:50）。卡 `docs/evals/20260904-m0-voice.md`。不含 `.dev.vars` / `.work/` / 音频。
+- **非思考模型（对照桌面 `AI组件工作流库/docs/llm-service-asset-catalog.md` 2026-09-04 `/models`）**：MiniMax 目录 8 个 ID **全是思考模型**，M2.x 官方不能关；M3 `thinking.disabled` 实测更慢。本机真正标了 non-reasoning 的是 8317 的 `grok-4.20-0309-non-reasoning`；相邻的 `kimi-k2`（对照 `kimi-k2-thinking`）、`step-3.5-flash`、`grok-3-mini` 是「轻量/低延迟」档，未用真提示量过。业界做法是**说话路径换非思考模型**，不是调 prompt 让思考模型少想（我们 −7% 已否）。下一步若换口：先用真 3k 提示对 `grok-4.20-0309-non-reasoning` / `step-3.5-flash` / `kimi-k2` 各 10 轮，sse→可见字，再定实时档。
+- **全双工怎么接**：不替换 runtime。Swift 开一条 StepFun/Gemini realtime WebSocket 当嘴和耳朵（PCM 进、`audio.delta` 出，绕过 MiniMax TTS）；需要屏幕/记忆/动手时 `function_call` → 现有 `turn.start` → 把可见回答塞回 `function_call_output`。卡在中文指令不调产品工具（exp5：英文+教科书工具会调，`ask_yishu` 仍 0/6）。Gemini Live 同形状，没 key。A 轨继续扛 M0。
 - 债：重签名后钥匙串 ACL 每次弹窗（需固定签名身份或把 ACL 加入本地证书）；`xcodebuild test` 不能与 run-local 共用 derived data（run-local 重签名后 `奕枢.debug.dylib` 签名不匹配，测试宿主 dyld 启动即崩），测试用默认 DerivedData。 → 主代理真机安装 + 30 轮实测（串行） → `node evals/voice/check-latency.mjs --last 30` 填卡「基线」与结果 → 第二批：光球画法接进 CompanionManager、免按键连续聆听（#16）、停顿哼声（#17）。
 - 待用户：盲听 `.work/voice-experiments/tts/blind-short/` 16 个文件填 `listening-sheet.md`。
 - 提交节奏已定（用户 15:54）：每里程碑机器绿 + 人评过后提交一次，message 引用卡；提交由 shell 子代理执行，主代理只核对。首次提交在 M0 真机实测通过后，届时把今天的方法论文件、实验脚本与结果一并提交（不含 `.dev.vars`、`.work/`）。
@@ -81,7 +88,7 @@ Hard bar：每个里程碑先出验收卡，机器项全绿、人评项用户裁
 16. 说话规则：先出声再干活，干完可不总结，固定台词清零由模型说，朋友不是客服，长度跟用户，一个人干几件事的口吻。参考 grok-bot `system-prompt.ts:80-152` 与两个 ack 中间件。
 17. 光球到达动作全要：描边、下划线、高亮框、连线、编号、敲两下、箭头、看过即隐。
 18. 聊天模型出口：实时对话档直连；网关（CLIProxyAPI 8317，鉴权 `~/.cli-proxy-api/config.yaml` `api-keys[0]`，上游 xai/codex/antigravity/kimi，经 socks5 7897）首字 3.6–113 s，只作深任务可选出口。
-19. 模型定案：MiniMax 直连，不再比供应商。实时对话档 MiniMax-M2.5（首 token p50 520 ms），屏幕协作 / 深任务档 MiniMax-M3（1179 ms）。M3 关思考不降首字。同一把 key，装机时配置。
+19. 模型定案：MiniMax 直连，不再比供应商。实时对话档 MiniMax-M3 + `thinking.disabled`（2026-09-04 22:52 用户拍；在吗可见字 p50 609 ms）。屏幕协作 / 深任务档仍 MiniMax-M3，同一把请求也关思考。网关不作语音默认。
 20. 记忆：用足 EverOS（情节、cases/skills、反思）。`记忆.md` 必须回到唯一真相——假设：让它成为 EverOS 管理的 profile 文件，M4 验证。召回在按下 PTT 时预取。MotherDuck 三层（上下文层 / 语义层 / 本体）作坐标：奕枢实体（App / 窗口 / 文件 / 例程 / 任务）进本体，确定性问题走本地 SQL。
 21. 语音架构：只做 A 轨（流式听写 → 文本模型流式 → 流式 TTS）。B 轨（StepFun realtime 负责语音输入输出，`ask_yishu` 转交 runtime）四轮实测否决：中文指令 0/12、英文指令 0/6、具体工具名 0/6、文字对照 0/1；`get_weather` 教科书工具能调、产品语义工具不调；会编造记忆。重开条件：新的会调工具的实时模型；`evals/voice/exp4-duplex/run.mjs --concrete-tools` 一条命令复测。
 22. 听写定案：终稿 Step Plan `stepaudio-2.5-asr` 整段（松手后 0.4–0.7 s）；按住期间每 0.8 s 发累计音频出中间稿（前 10 s，5 s 后 1.5 s 间隔），平方计费用户已接受。Apple（CER 0.09–0.55）、增量拼接、窗口拼接、realtime 转写否决。
@@ -97,6 +104,7 @@ Hard bar：每个里程碑先出验收卡，机器项全绿、人评项用户裁
 | 只做可验证语义动作，不猜像素 | `computer-control-tool.ts`、旧能力清单 | 分层验证，坐标是退路 |
 | 能力矩阵是唯一能力事实源 | `docs/capabilities/CAPABILITY_MATRIX.md` | 冻结，验收卡取代 |
 | 「StepFun realtime 完全不支持工具」（当天早先的判断） | 本文件 | 更正：教科书工具会调，产品语义工具不调 |
+| 「M3 关思考不降首字」；实时档必须 M2.5 | 本文件 19；exp1 短提示 | 真 persona：M3 默认 `<think>` 后 3502 ms；关思考 609 ms。用户改实时档为 M3 关思考 |
 
 ### 证据位置
 

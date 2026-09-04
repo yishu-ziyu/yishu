@@ -139,6 +139,10 @@ enum YishuModelRoutingDefaults {
         "clicky.modelRouting.\(profile.rawValue).model.v1"
     }
 
+    /// One-shot: this machine's realtime mouth was MiniMax-M2.5. Product now uses M3 with thinking off.
+    static let migrateRealtimeM25ToM3Key = "clicky.modelRouting.migrateRealtimeM25toM3.v1"
+    static let retiredRealtimeModel = "MiniMax-M2.5"
+
     static func persistFixed(_ preference: YishuModelPreference, in defaults: UserDefaults) {
         defaults.set(preference.provider, forKey: legacySelectedProviderKey)
         defaults.set(preference.model, forKey: legacySelectedModelKey)
@@ -153,7 +157,8 @@ enum YishuModelRoutingBootstrap {
             storedModel: defaults.string(forKey: YishuModelRoutingDefaults.legacySelectedModelKey),
             storedProvider: defaults.string(forKey: YishuModelRoutingDefaults.legacySelectedProviderKey)
         )
-        let preference = YishuModelPreference(provider: resolved.provider, model: resolved.model)
+        var preference = YishuModelPreference(provider: resolved.provider, model: resolved.model)
+        preference = YishuModelRoutingSettings.migratedFixedPreference(preference, in: defaults)
         defaults.set(preference.provider, forKey: YishuModelRoutingDefaults.legacySelectedProviderKey)
         defaults.set(preference.model, forKey: YishuModelRoutingDefaults.legacySelectedModelKey)
         return preference
@@ -203,13 +208,52 @@ struct YishuModelRoutingSettings: Equatable {
             persist(preference, profile: profile, in: defaults)
         }
 
+        var profiles = YishuModelProfileAssignments(
+            realtimeConversation: loaded[.realtimeConversation] ?? fixedPreference,
+            screenCollaboration: loaded[.screenCollaboration] ?? fixedPreference,
+            deepTask: loaded[.deepTask] ?? fixedPreference
+        )
+        migrateRealtimeMouthIfNeeded(profiles: &profiles, in: defaults)
+
         return YishuModelRoutingSettings(
             mode: mode,
-            profiles: YishuModelProfileAssignments(
-                realtimeConversation: loaded[.realtimeConversation] ?? fixedPreference,
-                screenCollaboration: loaded[.screenCollaboration] ?? fixedPreference,
-                deepTask: loaded[.deepTask] ?? fixedPreference
-            )
+            profiles: profiles
+        )
+    }
+
+    static func migratedFixedPreference(
+        _ preference: YishuModelPreference,
+        in defaults: UserDefaults
+    ) -> YishuModelPreference {
+        guard defaults.object(forKey: YishuModelRoutingDefaults.migrateRealtimeM25ToM3Key) == nil else {
+            return preference
+        }
+        return rewrittenLocalM25(preference)
+    }
+
+    private static func migrateRealtimeMouthIfNeeded(
+        profiles: inout YishuModelProfileAssignments,
+        in defaults: UserDefaults
+    ) {
+        guard defaults.object(forKey: YishuModelRoutingDefaults.migrateRealtimeM25ToM3Key) == nil else {
+            return
+        }
+        let next = rewrittenLocalM25(profiles.realtimeConversation)
+        if next != profiles.realtimeConversation {
+            profiles.realtimeConversation = next
+            persist(next, profile: .realtimeConversation, in: defaults)
+        }
+        defaults.set(true, forKey: YishuModelRoutingDefaults.migrateRealtimeM25ToM3Key)
+    }
+
+    private static func rewrittenLocalM25(_ preference: YishuModelPreference) -> YishuModelPreference {
+        guard preference.provider == YishuConversationModelCatalog.localProvider,
+              preference.model == YishuModelRoutingDefaults.retiredRealtimeModel else {
+            return preference
+        }
+        return YishuModelPreference(
+            provider: YishuConversationModelCatalog.localProvider,
+            model: YishuConversationModelCatalog.defaultModel
         )
     }
 

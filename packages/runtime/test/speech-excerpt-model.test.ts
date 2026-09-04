@@ -81,6 +81,23 @@ test("completions excerpt uses the turn provider/model and clips to two sentence
   assert.notEqual(spoken, ESSAY);
 });
 
+test("MiniMax-M3 excerpt disables thinking", async () => {
+  let body: Record<string, unknown> = {};
+  const m3: ResolvedModel = { ...COMPLETIONS_MODEL, id: "MiniMax-M3", name: "MiniMax-M3", providerId: "yishu-local-grok", baseUrl: "https://api.minimaxi.com/v1" };
+  const model = createSpeechExcerptModel(
+    fakeRuntime(m3),
+    async (_input, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: "在。" } }] }),
+        { status: 200 },
+      );
+    },
+  );
+  await model.excerpt({ providerId: m3.providerId, modelId: m3.id, visibleText: "在。" });
+  assert.deepEqual(body.thinking, { type: "disabled" });
+});
+
 test("Codex excerpt follows the same responses wire as memory extraction", async () => {
   let url = "";
   let headers: Record<string, string> = {};

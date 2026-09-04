@@ -96,6 +96,27 @@ struct YishuModelRoutingTests {
         #expect(reloaded.profiles[.deepTask] == fixed)
     }
 
+    @Test func oneShotMigratesStoredRealtimeM25ToM3ThenStops() throws {
+        let defaults = try temporaryDefaults()
+        let local = YishuConversationModelCatalog.localProvider
+        let m25 = YishuModelPreference(provider: local, model: "MiniMax-M2.5")
+        let m3 = YishuModelPreference(
+            provider: local,
+            model: YishuConversationModelCatalog.defaultModel
+        )
+        defaults.set(m25.provider, forKey: YishuModelRoutingDefaults.providerKey(for: .realtimeConversation))
+        defaults.set(m25.model, forKey: YishuModelRoutingDefaults.modelKey(for: .realtimeConversation))
+
+        let first = YishuModelRoutingSettings.load(from: defaults, fixedPreference: m3)
+        #expect(first.profiles[.realtimeConversation] == m3)
+        #expect(defaults.bool(forKey: YishuModelRoutingDefaults.migrateRealtimeM25ToM3Key))
+
+        defaults.set(m25.provider, forKey: YishuModelRoutingDefaults.providerKey(for: .realtimeConversation))
+        defaults.set(m25.model, forKey: YishuModelRoutingDefaults.modelKey(for: .realtimeConversation))
+        let second = YishuModelRoutingSettings.load(from: defaults, fixedPreference: m3)
+        #expect(second.profiles[.realtimeConversation] == m25)
+    }
+
     @Test func routingWireKeepsFixedAndProfiledShapesDistinct() throws {
         let fixed = YishuModelPreference(
             provider: YishuConversationModelCatalog.localProvider,

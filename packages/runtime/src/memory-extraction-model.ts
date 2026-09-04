@@ -5,6 +5,7 @@
  * POST /chat/completions; Codex POSTs /codex/responses.
  */
 
+import { minimaxCompletionsExtras } from "./model-loop/openai-completions.js";
 import type { ModelProviderRuntime, ResolvedModel } from "./model-loop/types.js";
 import {
   buildResponsesBody,
@@ -86,6 +87,7 @@ async function extractViaCompletions(
         ],
         stream: false,
         max_tokens: 512,
+        ...minimaxCompletionsExtras(model.id),
       }),
     },
   );

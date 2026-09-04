@@ -1,6 +1,35 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CompletionsStreamParser } from "../src/model-loop/openai-completions.js";
+import { CompletionsStreamParser, buildCompletionsBody, minimaxCompletionsExtras } from "../src/model-loop/openai-completions.js";
+import type { ResolvedModel } from "../src/model-loop/types.js";
+
+test("MiniMax-M3 chat extras disable thinking", () => {
+  assert.deepEqual(minimaxCompletionsExtras("MiniMax-M3"), {
+    reasoning_split: true,
+    thinking: { type: "disabled" },
+  });
+  assert.deepEqual(minimaxCompletionsExtras("MiniMax-M2.5"), { reasoning_split: true });
+  assert.deepEqual(minimaxCompletionsExtras("grok-4.20-0309-non-reasoning"), {});
+});
+
+test("MiniMax-M3 completions body sends thinking.disabled", () => {
+  const model: ResolvedModel = {
+    providerId: "yishu-local-grok",
+    id: "MiniMax-M3",
+    name: "MiniMax-M3",
+    api: "openai-completions",
+    baseUrl: "https://api.minimaxi.com/v1",
+    input: ["text"],
+    contextWindow: 128_000,
+    maxTokens: 4_096,
+  };
+  const body = buildCompletionsBody(model, "sys", [{ role: "user", text: "在吗" }], []);
+  assert.equal(body.thinking?.type, "disabled");
+  assert.equal(body.reasoning_split, true);
+  const m25 = buildCompletionsBody({ ...model, id: "MiniMax-M2.5", name: "MiniMax-M2.5" }, "sys", [], []);
+  assert.equal(m25.thinking, undefined);
+  assert.equal(m25.reasoning_split, true);
+});
 
 test("MiniMax reasoning_content is not spoken", () => {
   const parser = new CompletionsStreamParser();

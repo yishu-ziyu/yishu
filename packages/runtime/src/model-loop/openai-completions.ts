@@ -15,6 +15,19 @@ export interface CompletionsRequestBody {
   stream: boolean;
   max_tokens: number;
   reasoning_split?: boolean;
+  thinking?: { type: "disabled" };
+}
+
+/** MiniMax chat extras. M3 thinking is on by default and leaks `<think>` into content. */
+export function minimaxCompletionsExtras(modelId: string): Pick<
+  CompletionsRequestBody,
+  "reasoning_split" | "thinking"
+> {
+  if (!modelId.startsWith("MiniMax-")) return {};
+  if (modelId === "MiniMax-M3" || modelId.startsWith("MiniMax-M3-")) {
+    return { reasoning_split: true, thinking: { type: "disabled" } };
+  }
+  return { reasoning_split: true };
 }
 
 export interface WireToolCall {
@@ -105,7 +118,7 @@ export function buildCompletionsBody(
     messages,
     stream: true,
     max_tokens: model.maxTokens,
-    ...(model.id.startsWith("MiniMax-") ? { reasoning_split: true } : {}),
+    ...minimaxCompletionsExtras(model.id),
   };
   if (activeTools.length > 0) {
     body.tools = activeTools.map((tool) => ({
