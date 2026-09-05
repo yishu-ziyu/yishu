@@ -12,7 +12,7 @@
 - GUI 接入修复：优先 ChatGPT.app 原生 Codex **0.153.3**，避免 npm 包装器依赖终端 Node PATH；账号查询按 provider 独立，xAI 超时不再盖掉 ChatGPT。GUI 最小环境账号测试和实际界面均通过。原生 Codex 正式 stdio 第二次 51.462 s 返回 377，主代理 AX 复核；日志 `/tmp/yishu-codex-real-native.log`。真实取消日志 `/tmp/yishu-codex-real-cancel.log`。
 - runtime 全量 503/503、kernel 219/219；Swift 独立目录显式构建设置复跑及新增跨供应商超时隔离测试均 TEST SUCCEEDED；最终签名构建、diff check 通过。`product:check` 仍仅预存 collector 880/856，不称全门禁绿。
 - **修复版下一步由用户按住 Control+Option 重试说「打开计算器，用界面算三十一乘十七」**。该句已用真实意图/路由代码核对到 GPT-6。待真实麦克风、进度显示和口播验收；未据 stdio/模型目录测试称语音通过。
-- 用户要求把本机未提交工作推到远端：WIP 提交在 `feat/m1-file-upload-drag`，推 `origin`。人评与 M1 真机 3/3 仍未裁，不把里程碑算完成。
+- 用户要求只留主线：`main` / `origin/main` 已快进到 `bbc78ca`（M1 文件拖放 + Codex App Server）。`feat/m1-file-upload-drag` 已删；Pi spike 工作树和分支一并去掉，未并进主线。人评与 M1 真机 3/3 仍未裁，不把里程碑算完成。
 
 ### 已完成的独立接入烟测
 
@@ -23,7 +23,7 @@
 
 ### M1 暂停现场（2026-09-05 11:04）
 
-- **已暂停，不派新任务、不启动人工验收窗口、不提交或推送。** 正式分支仍为 `feat/m1-file-upload-drag`，保留 Cursor/M1 全部未提交改动。Grok 只读结果已回收，见下条。
+- **已暂停，不派新任务、不启动人工验收窗口。** 正式线为 `main`（`bbc78ca`）。Grok 只读结果已回收，见下条。
 - 本轮对象定位修复已安装并启动 `/Applications/奕枢.app`，pid **35660**（替换 56899）。装机与源码 manifest 一致，sourceInputHash `5bcc0c63cfe8a546c65327a8dca0f082e4b4efdcacf3670efd051a52092f4b21`；Downloads usage description 已在正式包。正式模型循环仍是 current/YishuModelSession，未切 Pi。
 - 收尾机器证据：runtime **497/497**（`/tmp/yishu-downloads-runtime-final.log`）；kernel **219/219**；共享 Swift **14/14**；Xcode 文件拖放/协议聚焦 **TEST SUCCEEDED**；最终签名构建、安装、`git diff --check` 通过。`product:check` 与 `product:verify` 仍在预存 `quality-observation-collector.mjs 880/856` 停止，不能称全门禁通过。
 - 固定真实 MiniMax 回放两个不同名称均完成「真实候选提示 → 确认 → 正确 basename 发给测试执行器」。入口 `pnpm --filter @yishu/runtime exec tsx ../../evals/hands/check-download-grounding.mts`，另一名称加 `--alternate`；后者记录 `/tmp/yishu-downloads-real-model-alternate.log`。执行器故意返回未执行，验证失败解释与不报成功；**没有发生实际文件拖放**，不算真机通过。
