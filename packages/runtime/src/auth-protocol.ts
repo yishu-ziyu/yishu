@@ -17,6 +17,7 @@ export const authProviderSchema = z.enum(AUTH_PROVIDER_IDS);
  */
 export const AUTH_CONTROLLED_MODEL_IDS = {
   "openai-codex": [
+    "gpt-6-astra",
     "gpt-5.3-codex-spark",
     "gpt-5.4",
     "gpt-5.4-mini",

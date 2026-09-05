@@ -1,3 +1,4 @@
+import { processCodexApprovals } from "./providers/codex-approval.js";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { clientCommandSchema, PROTOCOL_VERSION, runtimeEvent } from "./protocol.js";
@@ -162,6 +163,10 @@ lineReader.on("line", (line) => {
   }
 
   const command = parsedCommand.data;
+  if (command.type === "codex.approval.reply") {
+    processCodexApprovals.reply(command);
+    return;
+  }
 
   const emitAuthServiceEvent = (
     context: { requestId: string; traceId: string },

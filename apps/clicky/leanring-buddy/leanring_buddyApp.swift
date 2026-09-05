@@ -17,11 +17,11 @@ struct leanring_buddyApp: App {
     @NSApplicationDelegateAdaptor(CompanionAppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // The app lives entirely in the menu bar panel managed by the AppDelegate.
-        // This empty Settings scene satisfies SwiftUI's requirement for at least
-        // one scene but is never shown (LSUIElement=true removes the app menu).
+        // macOS can expose Settings even for an accessory app. Reuse the same
+        // manager and controls instead of opening an empty settings window.
         Settings {
-            EmptyView()
+            CompanionPanelView(companionManager: appDelegate.companionManager)
+                .frame(width: 360, height: 620)
         }
     }
 }
@@ -31,7 +31,7 @@ struct leanring_buddyApp: App {
 @MainActor
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
-    private let companionManager = CompanionManager()
+    fileprivate let companionManager = CompanionManager()
     private let singleInstance = YishuSingleInstanceLock()
 
     func applicationWillFinishLaunching(_ notification: Notification) {

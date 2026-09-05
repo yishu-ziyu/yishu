@@ -100,6 +100,26 @@ describe("deriveTurnIntentFrame", () => {
     assert.equal(contract.risk, "medium");
   });
 
+  it("classifies a Downloads file drop as high-risk explicit external disclosure", () => {
+    const frame = deriveTurnIntentFrame("把下载里的 奕枢测试文件.txt 拖到这个上传框");
+    assert.equal(frame.speechAct, "command");
+    assert.equal(frame.effect, "external");
+    assert.equal(frame.route.kind, "model");
+    assert.equal(frame.authority, "explicit_approval");
+    assert.equal(frame.risk, "high");
+    const contract = taskExecutionContractForIntent(frame);
+    assert.equal(contract.authority, "explicit_approval");
+    assert.equal(contract.risk, "high");
+
+    for (const utterance of [
+      "怎么把下载里的 奕枢测试文件.txt 拖进去？",
+      "不要上传下载里的 奕枢测试文件.txt",
+    ]) {
+      const rejected = deriveTurnIntentFrame(utterance);
+      assert.equal(rejected.effect, "none", utterance);
+    }
+  });
+
   it("keeps future model parsing behind the same product policy seam", () => {
     const frame = resolveTurnIntentCandidate({
       objective: "打开当前文件",

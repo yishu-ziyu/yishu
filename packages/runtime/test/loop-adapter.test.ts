@@ -31,6 +31,9 @@ import {
 } from "../src/protocol.js";
 import { makeTurnStartCommand } from "./fixtures.js";
 import { FIRST_BYTE_TIMEOUT_MESSAGE } from "../src/model-loop/model-session.js";
+import { fileDropTargetFingerprint } from "../src/desktop/file-drop-approval.js";
+import { attachTurnIntentFrame } from "../src/intent-frame.js";
+import { attachTaskExecutionContract, createTaskExecutionContract } from "../src/task-contract.js";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -1827,8 +1830,14 @@ test("model computer turns project an unverified receipt instead of model comple
   const { adapter, workdir } = await makeAdapter(harness, port);
   cleanupAfter(t, adapter, workdir);
 
+  let modelCalls = 0;
   harness.configureSession = (session) => {
     session.promptHandler = async (current) => {
+      if (modelCalls++ > 0) {
+        assert.deepEqual(current.getActiveToolNames(), []);
+        current.emitTextDelta("点下去了，但页面变化还没确认。");
+        return;
+      }
       const tool = harness.capturedTools[0]!;
       current.emitSessionEvent({
         type: "tool_execution_start",
@@ -1892,7 +1901,7 @@ test("model computer turns project an unverified receipt instead of model comple
   const completed = events.find((event) => event.type === "response.completed");
   assert.ok(completed);
   assert.equal(completed.payload.verified, false);
-  assert.equal(completed.payload.text, "");
+  assert.equal(completed.payload.text, "点下去了，但页面变化还没确认。");
   assert.doesNotMatch(String(completed.payload.text), /完成|点好了/u);
 });
 
@@ -2065,4 +2074,401 @@ test("empty-text-completion: no text + nothing fails", async (t) => {
   assert.ok(failed);
   assert.equal(failed.payload.code, "pi_turn_failed");
   assert.equal(events.some((event) => event.type === "response.completed"), false);
+});
+
+const FILE_DROP_UTTERANCE = "把下载里的 奕枢测试文件.txt 拖到这个上传框";
+const FILE_DROP_NAME = "奕枢测试文件.txt";
+const FILE_DROP_TARGET = {
+  id: "3",
+  role: "AXGroup",
+  title: "上传文件",
+  description: "拖放到这里",
+  enabled: true,
+  frame: { x: 100, y: 200, width: 240, height: 80 },
+} as const;
+
+function createFileDropClock(start = new Date("2026-09-05T00:00:00.000Z")) {
+  let current = start.getTime();
+  return {
+    now: () => new Date(current),
+    set(date: Date) { current = date.getTime(); },
+    advance(ms: number) { current += ms; },
+  };
+}
+
+function recordingFileDropPort(dispatched: unknown[]): ComputerUsePort {
+  return {
+    async perform(action, context) {
+      dispatched.push({ action, context });
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: "appkit_drag",
+        message: "The named file is attached.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+}
+
+function noneEffectConfirmCommand(command: TurnStartCommand): TurnStartCommand {
+  attachTurnIntentFrame(command, {
+    schemaVersion: 1,
+    objective: "确认",
+    speechAct: "statement",
+    effect: "none",
+    route: { kind: "model" },
+    successMode: "read_only_delivery",
+    authority: "automatic",
+    risk: "low",
+    steerable: true,
+    source: "deterministic",
+  });
+  attachTaskExecutionContract(command, createTaskExecutionContract({
+    objective: "确认",
+    successMode: "read_only_delivery",
+    authority: "automatic",
+    risk: "low",
+    maxAttempts: 1,
+  }));
+  return command;
+}
+
+function makeFileDropCommand(input: {
+  utterance: string;
+  conversationId: string;
+  at: Date;
+  windowNumber?: number;
+  target?: { id: string; role: string | null; title: string | null; description: string | null; enabled?: boolean };
+  bundleId?: string;
+}): TurnStartCommand {
+  const command = makeCommand(input.utterance, input.conversationId);
+  const at = input.at.toISOString();
+  command.sentAt = at;
+  command.payload.contextFrame.capturedAt = at;
+  command.payload.contextFrame.expiresAt = new Date(input.at.getTime() + 30_000).toISOString();
+  command.payload.contextFrame.frontmostApplication = {
+    value: {
+      name: "Safari",
+      bundleIdentifier: input.bundleId ?? "com.apple.Safari",
+      processIdentifier: 321,
+    },
+    source: "NSWorkspace",
+    capturedAt: at,
+    confidence: 1,
+  };
+  command.payload.contextFrame.activeWindow = {
+    value: {
+      title: "Upload",
+      ownerName: "Safari",
+      processIdentifier: 321,
+      windowNumber: input.windowNumber ?? 17,
+      bounds: { x: 20, y: 40, width: 900, height: 700 },
+    },
+    source: "CGWindowList",
+    capturedAt: at,
+    confidence: 0.9,
+  };
+  command.payload.contextFrame.numberedTargets = [input.target ?? FILE_DROP_TARGET];
+  return command;
+}
+
+async function callFileDropTool(
+  harness: FakePiHarness,
+  session: FakeModelSession,
+  fileName = FILE_DROP_NAME,
+  targetId = "3",
+): Promise<string> {
+  const tool = harness.capturedTools.find((candidate) => candidate.name === "computer_control");
+  assert.ok(tool, "computer_control must be registered");
+  session.emitSessionEvent({ type: "tool_execution_start", toolName: "computer_control" });
+  let text = "";
+  try {
+    const result = await tool.execute(
+      "file-drop-call",
+      { action: "drop_download_file", fileName, targetId },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    text = result.content[0]?.type === "text" ? result.content[0].text : "";
+  } catch (error) {
+    text = error instanceof Error ? error.message : String(error);
+  }
+  session.emitSessionEvent({ type: "tool_execution_end", toolName: "computer_control", isError: false });
+  return text;
+}
+
+async function startFileDropTurn(
+  adapter: YishuLoopRuntimeAdapter,
+  command: TurnStartCommand,
+  events: RuntimeEvent[],
+): Promise<void> {
+  await adapter.startTurn(command, (event) => events.push(event));
+}
+
+test("spoken Downloads name uses native candidate, stages then confirms once", async (t) => {
+  const clock = createFileDropClock();
+  const harness = createFakePiHarness();
+  harness.adapterOptions.now = clock.now;
+  const dispatched: unknown[] = [];
+  const events: RuntimeEvent[] = [];
+  const { adapter, workdir } = await makeAdapter(harness, recordingFileDropPort(dispatched));
+  cleanupAfter(t, adapter, workdir);
+  const conversationId = randomUUID();
+  let calls = 0;
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      if (calls++ === 0) {
+        const prompt = current.prompts.at(-1)?.text ?? "";
+        assert.match(prompt, /independent of folder workspace grants/);
+        assert.match(prompt, /奕枢测试文件\.txt/);
+        assert.match(prompt, /available/);
+        assert.deepEqual(current.getActiveToolNames(), []);
+        current.emitTextDelta("找到奕枢测试文件.txt，放到这里吗？说去就放。");
+        return;
+      }
+      assert.ok(current.getActiveToolNames().includes("computer_control"));
+      const text = await callFileDropTool(harness, current);
+      current.emitTextDelta(text.includes("去") ? "找到奕枢测试文件.txt，放到这里吗？说去就放。" : "文件已放入。");
+    };
+  };
+  const command = makeFileDropCommand({ utterance: "把下载里的易书测试文件点.txt拖到这个上传框", conversationId, at: clock.now() });
+  command.payload.contextFrame.downloadFiles = {
+    status: "available", capturedAt: clock.now().toISOString(), candidates: [FILE_DROP_NAME], truncated: false,
+  };
+  await startFileDropTurn(adapter, command, events);
+  assert.equal(dispatched.length, 0);
+  assert.match(String(events.find((event) => event.type === "response.completed")?.payload.text), /找到奕枢测试文件/);
+  for (let index = 0; index < 2; index++) {
+    await startFileDropTurn(adapter, noneEffectConfirmCommand(makeFileDropCommand({ utterance: "去", conversationId, at: clock.now() })), events);
+    assert.equal(dispatched.length, 1, "confirmation is consumed only once");
+  }
+  assert.equal((dispatched[0] as { action: { fileName: string } }).action.fileName, FILE_DROP_NAME);
+});
+
+test("staged file completion claim is repaired before speech, without another tool action", async (t) => {
+  const clock = createFileDropClock();
+  const harness = createFakePiHarness();
+  harness.adapterOptions.now = clock.now;
+  const dispatched: unknown[] = [];
+  const events: RuntimeEvent[] = [];
+  const { adapter, workdir } = await makeAdapter(harness, recordingFileDropPort(dispatched));
+  cleanupAfter(t, adapter, workdir);
+  let prompts = 0;
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      if (prompts++ === 0) {
+        await callFileDropTool(harness, current);
+        current.emitTextDelta("好，把奕枢测试文件.txt拖到上传框了。说去就放。");
+      } else {
+        assert.deepEqual(current.getActiveToolNames(), []);
+        current.emitTextDelta("找到奕枢测试文件.txt了，放到这里吗？说去就放。");
+      }
+    };
+  };
+  await startFileDropTurn(adapter, makeFileDropCommand({ utterance: FILE_DROP_UTTERANCE, conversationId: randomUUID(), at: clock.now() }), events);
+  assert.equal(prompts, 2);
+  assert.equal(dispatched.length, 0);
+  assert.match(String(events.find((event) => event.type === "response.completed")?.payload.text), /找到奕枢测试文件/);
+  for (const event of events.filter((event) => event.type === "response.delta")) {
+    assert.doesNotMatch(String(event.payload.text ?? event.payload.delta ?? ""), /拖到上传框了/);
+  }
+});
+
+test("file drop stages on the first turn and dispatches once after 去", async (t) => {
+  const clock = createFileDropClock();
+  const harness = createFakePiHarness();
+  harness.adapterOptions.now = clock.now;
+  const events: RuntimeEvent[] = [];
+  const dispatched: unknown[] = [];
+  const { adapter, workdir } = await makeAdapter(harness, recordingFileDropPort(dispatched));
+  cleanupAfter(t, adapter, workdir);
+  const conversationId = randomUUID();
+  let phase: "stage" | "confirm" | "replay" = "stage";
+
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      if (phase === "stage") {
+        const text = await callFileDropTool(harness, current);
+        current.emitTextDelta(text.includes("去") ? "要把奕枢测试文件.txt 放到这个上传框，去吗。" : "已经放进去了。");
+        return;
+      }
+      if (phase === "confirm") {
+        assert.match(current.prompts.at(-1)?.text ?? "", /奕枢测试文件\.txt/);
+        assert.match(current.prompts.at(-1)?.text ?? "", /targetId="3"/);
+        const text = await callFileDropTool(harness, current);
+        current.emitTextDelta(text.includes("verified") || text.includes("attached") ? "文件已经在上传框里。" : "这次没放进去。");
+        return;
+      }
+      await callFileDropTool(harness, current);
+      current.emitTextDelta("不再拖一次。");
+    };
+  };
+
+  await startFileDropTurn(adapter, makeFileDropCommand({
+    utterance: FILE_DROP_UTTERANCE,
+    conversationId,
+    at: clock.now(),
+  }), events);
+  assert.equal(dispatched.length, 0, "confirmation is required before computer.action.requested");
+  const preview = events.find((event) => event.type === "response.completed");
+  assert.match(String(preview?.payload.text ?? ""), /去吗/);
+  assert.doesNotMatch(String(preview?.payload.text ?? ""), /已经放进去了/);
+
+  phase = "confirm";
+  await startFileDropTurn(adapter, noneEffectConfirmCommand(makeFileDropCommand({
+    utterance: "去",
+    conversationId,
+    at: clock.now(),
+  })), events);
+  assert.equal(dispatched.length, 1);
+  const payload = dispatched[0] as {
+    action: Record<string, unknown>;
+    context: { effectClass?: string };
+  };
+  assert.equal(payload.action.action, "drop_download_file");
+  assert.equal(payload.action.fileName, FILE_DROP_NAME);
+  assert.equal(payload.action.targetId, "3");
+  assert.equal(payload.action.targetBundleId, "com.apple.Safari");
+  assert.equal(payload.action.targetPid, 321);
+  assert.equal(payload.action.targetWindowNumber, 17);
+  assert.equal(payload.action.targetFingerprint, fileDropTargetFingerprint(FILE_DROP_TARGET));
+  assert.equal(Object.hasOwn(payload.action, "path"), false);
+  assert.equal(Object.hasOwn(payload.action, "x"), false);
+  assert.equal(payload.context.effectClass, "external_disclosure");
+
+  phase = "replay";
+  await startFileDropTurn(adapter, makeFileDropCommand({
+    utterance: "去",
+    conversationId,
+    at: clock.now(),
+  }), events);
+  assert.equal(dispatched.length, 1, "the one-shot confirmation cannot replay");
+});
+
+test("file drop confirmation mismatches on window, fingerprint, or file name", async (t) => {
+  for (const mismatch of [
+    { windowNumber: 18 },
+    { target: { ...FILE_DROP_TARGET, description: "changed" } },
+    { target: { ...FILE_DROP_TARGET, frame: { ...FILE_DROP_TARGET.frame, x: 124 } } },
+    { toolFileName: "other.txt" },
+  ] as const) {
+    const clock = createFileDropClock();
+    const harness = createFakePiHarness();
+    harness.adapterOptions.now = clock.now;
+    const dispatched: unknown[] = [];
+    const { adapter, workdir } = await makeAdapter(harness, recordingFileDropPort(dispatched));
+    cleanupAfter(t, adapter, workdir);
+    const conversationId = randomUUID();
+    let phase: "stage" | "confirm" = "stage";
+    let stagedText = "";
+    harness.configureSession = (session) => {
+      session.promptHandler = async (current) => {
+        const text = await callFileDropTool(
+          harness,
+          current,
+          phase === "confirm" && "toolFileName" in mismatch ? mismatch.toolFileName : FILE_DROP_NAME,
+        );
+        if (phase === "stage") stagedText = text;
+        current.emitTextDelta(phase === "stage" ? "要把文件放进去，去吗。" : "收到。");
+      };
+    };
+    await adapter.startTurn(makeFileDropCommand({
+      utterance: FILE_DROP_UTTERANCE,
+      conversationId,
+      at: clock.now(),
+    }), () => undefined);
+    assert.match(stagedText, /去/);
+    assert.equal(dispatched.length, 0);
+    phase = "confirm";
+    await adapter.startTurn(makeFileDropCommand({
+      utterance: "去",
+      conversationId,
+      at: clock.now(),
+      ...("windowNumber" in mismatch ? { windowNumber: mismatch.windowNumber } : {}),
+      ...("target" in mismatch ? { target: mismatch.target } : {}),
+    }), () => undefined);
+    assert.equal(dispatched.length, 0, JSON.stringify(mismatch));
+    await adapter.startTurn(makeFileDropCommand({
+      utterance: "去",
+      conversationId,
+      at: clock.now(),
+    }), () => undefined);
+    assert.equal(dispatched.length, 0, `revive after ${JSON.stringify(mismatch)}`);
+  }
+});
+
+test("file drop confirmation expires after 60s and does not dispatch", async (t) => {
+  const clock = createFileDropClock();
+  const harness = createFakePiHarness();
+  harness.adapterOptions.now = clock.now;
+  const dispatched: unknown[] = [];
+  const { adapter, workdir } = await makeAdapter(harness, recordingFileDropPort(dispatched));
+  cleanupAfter(t, adapter, workdir);
+  const conversationId = randomUUID();
+  let stagedText = "";
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      stagedText = await callFileDropTool(harness, current);
+      current.emitTextDelta("收到。");
+    };
+  };
+  await adapter.startTurn(makeFileDropCommand({
+    utterance: FILE_DROP_UTTERANCE,
+    conversationId,
+    at: clock.now(),
+  }), () => undefined);
+  assert.match(stagedText, /去/);
+  assert.equal(dispatched.length, 0);
+  clock.advance(60_001);
+  await adapter.startTurn(makeFileDropCommand({
+    utterance: "去",
+    conversationId,
+    at: clock.now(),
+  }), () => undefined);
+  assert.equal(dispatched.length, 0);
+});
+
+test("file drop confirmation cancels pending when the current binding cannot be rebuilt", async (t) => {
+  const clock = createFileDropClock();
+  const harness = createFakePiHarness();
+  harness.adapterOptions.now = clock.now;
+  const dispatched: unknown[] = [];
+  const { adapter, workdir } = await makeAdapter(harness, recordingFileDropPort(dispatched));
+  cleanupAfter(t, adapter, workdir);
+  const conversationId = randomUUID();
+  let stagedText = "";
+  harness.configureSession = (session) => {
+    session.promptHandler = async (current) => {
+      stagedText = await callFileDropTool(harness, current);
+      current.emitTextDelta("收到。");
+    };
+  };
+  await adapter.startTurn(makeFileDropCommand({
+    utterance: FILE_DROP_UTTERANCE,
+    conversationId,
+    at: clock.now(),
+  }), () => undefined);
+  assert.match(stagedText, /去/);
+  assert.equal(dispatched.length, 0);
+
+  await adapter.startTurn(makeFileDropCommand({
+    utterance: "去",
+    conversationId,
+    at: clock.now(),
+    bundleId: "com.apple.Preview",
+  }), () => undefined);
+  assert.equal(dispatched.length, 0);
+
+  await adapter.startTurn(makeFileDropCommand({
+    utterance: "去",
+    conversationId,
+    at: clock.now(),
+  }), () => undefined);
+  assert.equal(dispatched.length, 0, "cancelled pending must not revive on a later 去");
 });

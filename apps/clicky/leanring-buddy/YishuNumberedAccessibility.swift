@@ -39,7 +39,30 @@ enum YishuNumberedAccessibility {
     }
 
     static func fingerprint(_ target: NumberedAccessibilityTarget) -> String {
-        [target.role ?? "", target.title ?? "", target.description ?? ""].joined(separator: "\u{1e}")
+        let frameKey = target.frame.map { frame in
+            [frame.origin.x, frame.origin.y, frame.width, frame.height]
+                .map { String(Int(floor(Double($0) * 2 + 0.5))) }
+                .joined(separator: ",")
+        } ?? ""
+        return [target.role ?? "", target.title ?? "", target.description ?? "", frameKey]
+            .joined(separator: "\u{1e}")
+    }
+
+    /// Named web drop/upload zones only. Static text and unlabeled groups stay out.
+    static func isNamedDropZone(role: String?, title: String?, description: String?) -> Bool {
+        guard let role, dropZoneRoles.contains(role) else { return false }
+        let haystack = [title, description]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .lowercased()
+        guard !haystack.isEmpty else { return false }
+        let needles = [
+            "上传", "拖放", "拖到", "拖入", "拖拽", "投放", "选择文件", "添加文件", "添加附件",
+            "upload", "drop file", "drop files", "drop here", "drag and drop", "drag-and-drop",
+            "attach file", "choose file", "add file", "file drop",
+        ]
+        return needles.contains { haystack.contains($0) }
     }
 
     static func isStale(expected: NumberedAccessibilityTarget, live: NumberedAccessibilityTarget) -> Bool {
@@ -162,20 +185,20 @@ enum YishuNumberedAccessibility {
         let isRowOrText = role == (kAXRowRole as String)
             || role == (kAXCellRole as String)
             || role == (kAXStaticTextRole as String)
+        guard let frame = frame(of: element), frame.width > 0, frame.height > 0 else {
+            return nil
+        }
+        let title = truncated(stringAttribute(kAXTitleAttribute as String, from: element))
+        let description = truncated(stringAttribute(kAXDescriptionAttribute as String, from: element))
         if isNamedRole {
             if !advertisesPress && !editableRoles.contains(role) {
                 return nil
             }
         } else if isRowOrText {
             guard advertisesPress else { return nil }
-        } else {
+        } else if !isNamedDropZone(role: role, title: title, description: description) {
             return nil
         }
-        guard let frame = frame(of: element), frame.width > 0, frame.height > 0 else {
-            return nil
-        }
-        let title = truncated(stringAttribute(kAXTitleAttribute as String, from: element))
-        let description = truncated(stringAttribute(kAXDescriptionAttribute as String, from: element))
         guard title != nil || description != nil || isNamedRole else {
             return nil
         }
@@ -190,6 +213,12 @@ enum YishuNumberedAccessibility {
             height: frame.height
         )
     }
+
+    private static let dropZoneRoles: Set<String> = [
+        "AXGroup",
+        "AXWebArea",
+        "AXImage",
+    ]
 
     private static let interactiveRoles: Set<String> = [
         kAXButtonRole as String,

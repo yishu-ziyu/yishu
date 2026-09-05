@@ -263,10 +263,13 @@ const SAFE_RUNTIME_STATUSES = new Set([
   "steering_received",
   "trajectory_summary",
   "model.request_sent",
+  "codex_running",
 ]);
 
 const SAFE_FAILURE_CODES = new Set([
   "agent_core_turn_failed",
+  "codex_execution_failed",
+  "desktop_busy",
   "conversation_ledger_failed",
   "conversation_ledger_unavailable",
   "action_committed_after_cancel",
@@ -370,6 +373,13 @@ export function sanitizeClientEvent(event: RuntimeEvent): RuntimeEvent | undefin
         "compatibilityMode",
         "generation",
       ]));
+    case "codex.approval.requested": {
+      const approvalId = safeIdentifier(payload.approvalId);
+      const message = boundedVisibleString(payload.message, 3000);
+      const generation = safeGeneration(payload.generation);
+      if (!approvalId || !message || generation === undefined) return undefined;
+      return withClientPayload(event, { approvalId, message, generation });
+    }
     case "computer.action.requested": {
       const safeAction = safeComputerActionPayload(payload);
       const generation = safeGeneration(payload.generation);

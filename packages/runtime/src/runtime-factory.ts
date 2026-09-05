@@ -1,3 +1,4 @@
+import { CodexRuntime } from "./providers/codex-runtime.js";
 import { MockAgentRuntime } from "./mock-runtime.js";
 import {
   createDefaultProviderRuntime,
@@ -76,6 +77,7 @@ function createInnerRuntime(
   return {
     inner: new YishuLoopRuntimeAdapter(process.cwd(), ports.computerUse, {
       modelRuntimePromise: Promise.resolve(providerRuntime),
+      codexRuntime: new CodexRuntime(),
       qualityRecorder,
     }),
     providerRuntime,
@@ -106,12 +108,18 @@ export function createAgentRuntime(
         },
       })
     : undefined;
+  const excerpt = providerRuntime ? createSpeechExcerptModel(providerRuntime) : undefined;
+  const extraction = providerRuntime ? createCompletionsExtractionModel(providerRuntime) : undefined;
+  // Codex owns its login; short spoken excerpts and memory extraction use the existing fast route.
+  const auxiliaryPreference = (input: { providerId: string; modelId: string }) => input.providerId === "openai-codex"
+    ? { providerId: LOCAL_GROK_PROVIDER, modelId: LOCAL_GROK_DEFAULT_MODEL }
+    : { providerId: input.providerId, modelId: input.modelId };
   return new ProductKernelRuntime(inner, undefined, ports.computerUse, {
     ...(providerRuntime !== undefined
       ? {
-          speechExcerptModel: createSpeechExcerptModel(providerRuntime),
+          speechExcerptModel: { excerpt: (input) => excerpt!.excerpt({ ...input, ...auxiliaryPreference(input) }) },
           ...(everos === undefined
-            ? { memoryExtractionModel: createCompletionsExtractionModel(providerRuntime) }
+            ? { memoryExtractionModel: { extract: (input) => extraction!.extract({ ...input, ...auxiliaryPreference(input) }) } }
             : {}),
         }
       : {}),

@@ -6,6 +6,15 @@ import type { ContextFrame } from "../protocol.js";
 import type { DesktopLoopState } from "./desktop-loop.js";
 import type { DesktopObservation } from "./desktop-observation.js";
 import { desktopStepBudget } from "./desktop-policy.js";
+import {
+  fileDropTargetFingerprint,
+  isExactFileDropConfirmation,
+  isFileDropRequestUtterance,
+  isLikelyFileDropTarget,
+  isSupportedBrowserBundleId,
+  isValidDownloadFileName,
+  type FileDropTargetBinding,
+} from "./file-drop-approval.js";
 
 /**
  * Tool-result status for the model. Never spoken to the user. A delivered or
@@ -115,14 +124,98 @@ function isSequencedDesktopUtterance(utterance: string): boolean {
 export function isDesktopWorkUtterance(utterance: string): boolean {
   return isDirectComputerActionUtterance(utterance)
     || isExplicitTextInputUtterance(utterance)
-    || isSequencedDesktopUtterance(utterance);
+    || isSequencedDesktopUtterance(utterance)
+    || authorizedDownloadFileNameForUtterance(utterance) !== undefined;
+}
+
+const quotedFileNamePattern = /["“「『']([^"”」』']+)["”」』']/u;
+const downloadsMarkerPattern = /(?:下载(?:文件夹|目录|里|中的)?|downloads?)/iu;
+const fileNameTailCutPattern = /(?:拖(?:到|进|入|放)|放到|到这里|到这个|上传框|上传区)/u;
+
+/** One exact Downloads basename from an imperative drop/upload utterance. */
+export function authorizedDownloadFileNameForUtterance(utterance: string): string | undefined {
+  if (!isFileDropRequestUtterance(utterance)) return undefined;
+  const quoted = utterance.match(quotedFileNamePattern)?.[1]?.trim();
+  if (quoted !== undefined) {
+    return isValidDownloadFileName(quoted) ? quoted : undefined;
+  }
+  const marker = downloadsMarkerPattern.exec(utterance);
+  if (marker === null || marker.index === undefined) return undefined;
+  const afterMarker = utterance.slice(marker.index + marker[0].length);
+  const stripped = afterMarker.replace(/^(?:\s*)(?:文件夹|目录|里|中)?(?:的)?\s*/u, "");
+  const cut = stripped.split(fileNameTailCutPattern)[0]?.trim() ?? "";
+  if (cut.length === 0 || /\s/u.test(cut) || /[\\/]/.test(cut) || cut.includes("..")) return undefined;
+  return isValidDownloadFileName(cut) ? cut : undefined;
+}
+
+/** Native candidates resolve speech; the model never chooses a path or grants access. */
+export function groundedDownloadFileName(utterance: string, frame: ContextFrame, now: Date): string | undefined {
+  if (!isFileDropRequestUtterance(utterance)) return undefined;
+  const observation = frame.downloadFiles;
+  // Backward compatibility for v1 clients predating native discovery.
+  if (observation === undefined) return authorizedDownloadFileNameForUtterance(utterance);
+  const age = now.getTime() - Date.parse(observation.capturedAt);
+  if (observation.status !== "available" || observation.truncated
+    || !Number.isFinite(age) || age < 0 || age > 60_000
+    || observation.candidates.length !== 1) return undefined;
+  const name = observation.candidates[0]!;
+  return isValidDownloadFileName(name) ? name : undefined;
+}
+
+export function fileDropBindingFromContext(input: {
+  conversationId: string;
+  fileName: string;
+  targetId: string;
+  frame: ContextFrame;
+}): FileDropTargetBinding | undefined {
+  if (!isValidDownloadFileName(input.fileName)) return undefined;
+  const app = input.frame.frontmostApplication?.value;
+  const window = input.frame.activeWindow?.value;
+  if (!app?.bundleIdentifier || !(app.processIdentifier > 0)) return undefined;
+  if (!isSupportedBrowserBundleId(app.bundleIdentifier)) return undefined;
+  if (window?.windowNumber === undefined || window.windowNumber <= 0) return undefined;
+  if (window.processIdentifier !== app.processIdentifier) return undefined;
+  const target = (input.frame.numberedTargets ?? []).find((item) => item.id === input.targetId);
+  if (target === undefined || target.enabled === false) return undefined;
+  if (!isLikelyFileDropTarget({
+    role: target.role,
+    title: target.title,
+    description: target.description,
+  })) return undefined;
+  const targetFrame = target.frame;
+  if (targetFrame === undefined || targetFrame === null
+    || ![targetFrame.x, targetFrame.y, targetFrame.width, targetFrame.height].every(Number.isFinite)
+    || targetFrame.width <= 0 || targetFrame.height <= 0) return undefined;
+  const targetFingerprint = fileDropTargetFingerprint({
+    role: target.role,
+    title: target.title,
+    description: target.description,
+    frame: targetFrame,
+  });
+  if (targetFingerprint.replaceAll("\u001e", "").length === 0) return undefined;
+  return {
+    conversationId: input.conversationId,
+    fileName: input.fileName,
+    targetId: input.targetId,
+    targetBundleId: app.bundleIdentifier,
+    targetPid: app.processIdentifier,
+    targetWindowNumber: window.windowNumber,
+    targetFingerprint,
+  };
 }
 
 export function desktopActionBudgetForTurn(input: {
   utterance: string;
   intentAllowsEffect: boolean;
+  fileDropPending?: boolean;
+  groundedFileName?: string | undefined;
 }): number {
+  if (isExactFileDropConfirmation(input.utterance)) {
+    return input.fileDropPending === true ? 1 : 0;
+  }
   if (!input.intentAllowsEffect) return 0;
+  if (input.groundedFileName !== undefined) return 1;
+  if (authorizedDownloadFileNameForUtterance(input.utterance) !== undefined) return 1;
   if (!isDesktopWorkUtterance(input.utterance)) return 0;
   return computerActionLimitForUtterance(input.utterance);
 }
@@ -204,6 +297,11 @@ export interface ComputerActionTerminalProjection {
   readonly receiptProjectionText?: string;
 }
 
+/** A receipt-free past-tense completion must not escape the buffered action turn. */
+export function claimsComputerActionCompleted(text: string): boolean {
+  return /点好了|做好了|已经完成|已完成|完成了|verified complete|successfully completed|(?:拖|放|传)(?:到|进|过|上|好)[^。！？\n]{0,30}了|(?:拖|放|传)了|(?:上传|附加|拖放)成功/u.test(text);
+}
+
 export function projectComputerActionTerminal(input: {
   directComputerAction: boolean;
   actionCount: number;
@@ -214,10 +312,9 @@ export function projectComputerActionTerminal(input: {
   modelVisibleDelta: string;
 }): ComputerActionTerminalProjection {
   const hasComputerAction = input.actionCount > 0;
-  const claimsSuccess = /点好了|做好了|已经完成|已完成|完成了|verified complete|successfully completed/u
-    .test(input.modelVisibleDelta);
-  const suppressUnverifiedClaim = hasComputerAction
-    && input.allActionsVerified !== true
+  const claimsSuccess = claimsComputerActionCompleted(input.modelVisibleDelta);
+  const suppressUnverifiedClaim = (hasComputerAction || input.computerActionAttempted)
+    && (input.allActionsVerified !== true || input.lastResult?.code === "approval_required")
     && claimsSuccess;
   const visibleDelta = suppressUnverifiedClaim ? "" : input.modelVisibleDelta;
   return {
@@ -253,7 +350,9 @@ export function nextDesktopObservation(
   action: ComputerControlToolAction,
   now = new Date(),
 ): DesktopObservation {
-  const targetId = action.action === "left_click" ? action.targetId : undefined;
+  const targetId = action.action === "left_click" || action.action === "drop_download_file"
+    ? action.targetId
+    : undefined;
   const recaptured = result.numberedTargets ?? [];
   const targets = recaptured.length > 0
     ? recaptured

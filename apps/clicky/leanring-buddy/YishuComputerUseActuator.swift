@@ -779,10 +779,18 @@ enum YishuComputerUseActuator {
         notesExecutor: NotesExecutor? = nil,
         sourceWindowValidator: @escaping SourceWindowValidator = sourceWindowStillMatches,
         timeReminderExecutor: TimeReminderExecutor? = nil,
-        destinationExecutor: DestinationExecutor? = nil
+        destinationExecutor: DestinationExecutor? = nil,
+        fileDrop: YishuFileDropSeams? = nil
     ) async -> YishuComputerActionResult {
         let receiptId = UUID().uuidString
         let attemptId = request.attemptId ?? UUID().uuidString
+        if request.action == "drop_download_file" {
+            return await YishuFileDropAction.perform(
+                request,
+                authorizationFence: authorizationFence,
+                seams: fileDrop
+            )
+        }
         if request.action == "create_note" {
             return await performCreateNote(
                 request,

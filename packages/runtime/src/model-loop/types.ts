@@ -110,7 +110,7 @@ export interface ModelSession {
 }
 
 /** Which wire protocol a resolved model speaks. */
-export type ModelApiKind = "openai-completions" | "codex-responses";
+export type ModelApiKind = "openai-completions" | "codex-responses" | "codex-app-server";
 
 export interface ResolvedModel {
   readonly providerId: string;

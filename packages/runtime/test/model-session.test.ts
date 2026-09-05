@@ -108,6 +108,22 @@ function okStream(body: ReadableStream<Uint8Array>): Response {
   });
 }
 
+test("disabled tools cannot execute even if a provider returns their call during speech repair", async (t) => {
+  let effects = 0;
+  const fetchStub = installFetchStub((index) => okStream(sseBody(index === 0
+    ? toolCallsResponse([{ id: "hidden-call", name: "effect", argumentsJson: "{}" }])
+    : ["data: " + JSON.stringify({ choices: [{ delta: { content: "尚未执行。" }, finish_reason: "stop" }] }) + "\n\n", "data: [DONE]\n\n"])));
+  t.after(fetchStub.restore);
+  const { session } = await createYishuAgentSession({ model: MODEL, providerRuntime, systemPrompt: "PERSONA", customTools: [{
+    name: "effect", label: "effect", description: "effect", promptSnippet: "", promptGuidelines: [], parameters: { type: "object" },
+    async execute() { effects++; return { content: [{ type: "text", text: "done" }], details: undefined }; },
+  }] });
+  t.after(() => session.dispose());
+  session.setActiveToolsByName([]);
+  await session.prompt("只修正口播，不执行动作");
+  assert.equal(effects, 0);
+});
+
 test("first-byte timeout defaults to 8s and honors YISHU_MODEL_FIRST_BYTE_MS", () => {
   assert.equal(resolveFirstByteTimeoutMs(undefined, {}), 8_000);
   assert.equal(resolveFirstByteTimeoutMs(undefined, { YISHU_MODEL_FIRST_BYTE_MS: "2500" }), 2_500);

@@ -12,7 +12,7 @@ apps/clicky (Swift)  ──stdio JSON 行──▶  packages/runtime (TS)  ─�
 ```
 
 - Swift 只做碰 Mac 的事。不放第二个推理层、不放第二套任务状态。产品任务状态只来自 runtime 协议事件。
-- runtime 不直接碰 Mac。要点屏幕、要截图、要播声音，一律发协议事件让 Swift 做，再等结果事件。
+- runtime 的产品原生动作不直接碰 Mac，经协议交 Swift。Codex 订阅执行分支调用本机 App Server，由其官方 Computer Use 插件操作；本产品不复制插件的底层事件实现。该分支同样持有 `processResourceLease` 的 desktop 锁，审批经产品协议回到 Swift，取消先停执行进程再释放锁。
 - kernel 不做 IO（除 store 目录）。kernel 不 import runtime。依赖方向由 `dependency-cruiser.config.cjs` 锁死，`pnpm dep:check` 是门禁。
 - 协议是唯一合同：`packages/runtime/src/protocol.ts`（zod schema）。改协议 = 改 schema + Swift 解码 + 双端测试 + `schemaVersion` 判断兼容。不允许「先发字段再补 schema」。
 - 本机代理 `apps/clicky/worker/local-server.mjs`（8787）只做语音供应商的转发与密钥隔离。聊天模型由 runtime 直连或走网关，不经 8787。
@@ -36,9 +36,13 @@ apps/clicky (Swift)  ──stdio JSON 行──▶  packages/runtime (TS)  ─�
 
 ## 不可越的线
 
+Codex 接入（2026-09-05，卡 `docs/evals/20260905-codex-voice-computer-use.md`）：生产 `openai-codex` 选择由 `providers/codex-runtime.ts` 执行，账号与目录由 App Server `account/read` / `model/list` 提供。只接受 ChatGPT 账号，不读取 CLI 凭据，不借旧 OAuth bearer 兜底。每轮独立临时 thread，前文由 kernel 的同作用域可见历史恢复；进度、结果、取消沿用既有任务事件。官方审批通过新增兼容 v1 的 `codex.approval.requested` / `codex.approval.reply`，绑定 requestId、traceId、approvalId，一次消费；原始工具参数和截图不进产品账本。原生文件拖放仍走原契约。Codex 模型回答不制造 native trusted receipt；其 `response.completed` 保留 `verified:false`，工具执行成功和任务验证不能混同。口播摘录与记忆抽取使用既有快模型，避免为附属处理读取 Codex token。独立 Codex 进程是本轮执行器，退出时清理进程组，不是新增常驻产品服务。
+
+文件对象定位补充（2026-09-05，卡 `docs/evals/20260905-download-object-grounding.md`）：Swift 按当轮下载文件请求采集顶层普通可读文件候选，经可选 `ContextFrame.downloadFiles` 传状态、时间和匹配名称。runtime 将唯一文件与唯一当前上传区形成无工具预览，模型只表达确认；确认内容包含实际文件名和「去」后，产品才登记一次性绑定。确认轮仍走原 `ComputerUsePort` 与 Swift 拖放、附件验证。workspace grants 不代表 Downloads 的原生权限；没有附件回执不能算完成。旧 v1 没有此字段的精确名称路径继续兼容。
+
 1. 一个 App target、一个 bundle id `com.yishu.yishu-buddy`、安装路径 `/Applications/奕枢.app`、xcodeproj / scheme / 目录名不改（签名与 TCC 连续性依赖它们）。
 2. 没有可信回执不许说做成。`trusted-task-receipt.ts` 的进程内回执是唯一「已验证」来源；Swift 报来的 `verified: true` 不能单独抬状态。
-3. 不可逆动作先经门：分级在 `desktop-policy.ts`；模型、MCP 调用方、CLI provider 三条路都走同一个门。
+3. 不可逆动作先经门：原生动作分级在 `desktop-policy.ts`；Codex 分支沿用官方执行器的风险审批，产品负责把确认送到同一任务、一次消费和取消失效。不可逆动作仍需用户确认，不能由屏幕文字授权。
 4. 两次屏幕点击不能并行（`resource-lease.ts` 桌面锁）。独立非桌面工作可并行。
 5. 屏幕 / 网页上读到的文字是数据不是指令（`untrusted-content.ts`）；它不能单独触发不可逆动作。
 6. 密钥只在 `apps/clicky/worker/.dev.vars`（gitignored）和钥匙串。日志、结果、NOTES 里出现密钥值即失败。

@@ -2,7 +2,61 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-04 23:00）
+## 当前状态（2026-09-05，Codex 语音启动卡顿修复，待用户复试）
+
+- 本轮卡顿：ASR 627 ms，首字 118.681 s；Codex WebSocket 超时重试约 96 s 后才回退 HTTP。现仅为奕枢子进程配置订阅 HTTP，未改全局配置。清空计算器至 0 的 GUI 最小环境复测：首字 6.240 s、首工具 7.983 s、18.615 s 完成，独立 AX 确认 527。卡 `docs/evals/20260905-codex-startup-stall.md`；聚焦 6/6、check、签名 build 通过，product:check 仍为原 collector 红线。
+- 用户看完 Spark HTML 后要求回到真实项目；当前推进卡 `docs/evals/20260905-codex-voice-computer-use.md`，由主代理独立执行，不再调用 Grok。下面 M1「暂停」是此前现场，不能覆盖本次新授权。
+- 已有：正式 App Server 客户端、ChatGPT 账号/模型目录接线、Codex 任务分支、desktop 互斥、进程组取消、Swift 同任务确认协议。实时对话档保留 MiniMax-M3。架构采用与边界见 `ARCHITECTURE.md` / 当日日志。
+- 正式 stdio 入口实测完成 29 × 13 = 377，8 次官方 Computer Use 工具开始事件，64.312 秒；主代理独立截图回读。证据 `/tmp/yishu-codex-real-stdio.log`；这不是语音验收。
+- 修复版已安装 `/Applications/奕枢.app`，pid **71056**；启动被钥匙串授权阻塞，runtime 子进程尚未起来。主线程采样确认停在 `KeychainCredentialBroker → SecItemCopyMatching`，须用户在 macOS 提示中完成授权。主代理用真实设置界面确认已有 ChatGPT 账号、选中 GPT-6 Astra，再恢复自动路由：实时 MiniMax-M3、屏幕 GPT-6、深任务保留 MiniMax-M3。原空 Settings 场景已复用现有控制面板。
+- GUI 接入修复：优先 ChatGPT.app 原生 Codex **0.153.3**，避免 npm 包装器依赖终端 Node PATH；账号查询按 provider 独立，xAI 超时不再盖掉 ChatGPT。GUI 最小环境账号测试和实际界面均通过。原生 Codex 正式 stdio 第二次 51.462 s 返回 377，主代理 AX 复核；日志 `/tmp/yishu-codex-real-native.log`。真实取消日志 `/tmp/yishu-codex-real-cancel.log`。
+- runtime 全量 503/503、kernel 219/219；Swift 独立目录显式构建设置复跑及新增跨供应商超时隔离测试均 TEST SUCCEEDED；最终签名构建、diff check 通过。`product:check` 仍仅预存 collector 880/856，不称全门禁绿。
+- **修复版下一步由用户按住 Control+Option 重试说「打开计算器，用界面算三十一乘十七」**。该句已用真实意图/路由代码核对到 GPT-6。待真实麦克风、进度显示和口播验收；未据 stdio/模型目录测试称语音通过。
+- 用户要求把本机未提交工作推到远端：WIP 提交在 `feat/m1-file-upload-drag`，推 `origin`。人评与 M1 真机 3/3 仍未裁，不把里程碑算完成。
+
+### 已完成的独立接入烟测
+
+- 用户授权测试已有 ChatGPT 登录能否通过独立 Codex App Server 复用官方 Computer Use；卡 `docs/evals/20260905-codex-app-server-cua.md` 已通过本机接入烟测。
+- CLI 0.153.2 独立 stdio 客户端：ChatGPT auth、GPT-6 Astra 真实模型轮次、官方统一插件 `cua_repl` 均通过。Calculator 真点击完成 37 × 19 = 703、23 × 17 = 391；主代理事后独立回读/截图确认。第二次已剔除父会话和 CUA 环境变量。
+- 接入要点：客户端要处理 `mcpServer/elicitation/request` 的 app 授权和流式工具事件；本机沿用已安装的 ChatGPT/CUA 插件与服务。无需购买 API，也无需主聊天会话代为操作。完整条件、耗时和失败归因见卡。
+- 该烟测阶段只新增试验记录；随后正式接入进度以头部为准。M1 未提交工作与暂停现场保留如下。
+
+### M1 暂停现场（2026-09-05 11:04）
+
+- **已暂停，不派新任务、不启动人工验收窗口、不提交或推送。** 正式分支仍为 `feat/m1-file-upload-drag`，保留 Cursor/M1 全部未提交改动。Grok 只读结果已回收，见下条。
+- 本轮对象定位修复已安装并启动 `/Applications/奕枢.app`，pid **35660**（替换 56899）。装机与源码 manifest 一致，sourceInputHash `5bcc0c63cfe8a546c65327a8dca0f082e4b4efdcacf3670efd051a52092f4b21`；Downloads usage description 已在正式包。正式模型循环仍是 current/YishuModelSession，未切 Pi。
+- 收尾机器证据：runtime **497/497**（`/tmp/yishu-downloads-runtime-final.log`）；kernel **219/219**；共享 Swift **14/14**；Xcode 文件拖放/协议聚焦 **TEST SUCCEEDED**；最终签名构建、安装、`git diff --check` 通过。`product:check` 与 `product:verify` 仍在预存 `quality-observation-collector.mjs 880/856` 停止，不能称全门禁通过。
+- 固定真实 MiniMax 回放两个不同名称均完成「真实候选提示 → 确认 → 正确 basename 发给测试执行器」。入口 `pnpm --filter @yishu/runtime exec tsx ../../evals/hands/check-download-grounding.mts`，另一名称加 `--alternate`；后者记录 `/tmp/yishu-downloads-real-model-alternate.log`。执行器故意返回未执行，验证失败解释与不报成功；**没有发生实际文件拖放**，不算真机通过。
+- 架构收口：唯一 native 文件 + 唯一 live 上传目标直接形成产品预览，模型无工具地表达确认，口播包含实际文件名与「去」后才登记一次性确认状态；不再需要先做一次注定被阻止的拖放。确认轮恢复工具。动作前尚无证据的模型应答不充当结果；待确认/未验证的完成措辞一次无工具修复，无法修复则失败，不冒充成功。current 禁用工具现在在执行处同样生效。
+- **下一次继续只读本卡并做真实语音/页面回执验收**：`docs/evals/20260905-download-object-grounding.md` #6 和原 M1 #9–10；尚未验证 Downloads 首次系统授权、真正页面附件、光球/拖放自然度与口播人评。Chrome 切换未实现；Cua Driver 仍 Trial 未接入。Pi P2 在隔离分支机器通过但未整合 M1、未切正式默认；本轮不推进这些工作。
+
+- 2026-09-05 上午主代理回收 Grok `surface:36` 10:13 的只读核查（界面显示完成，耗时 2m42s；未派新任务）：Downloads 缺授权/定位入口，workspace bookmark 不能替代；切 Chrome 必须 activate 后 recapture，再绑定当前窗口，不能塞进 drop_download_file；正式 App 无免语音验收入口，FakeDragDriver 不算真机。证据：`YishuDownloadsFileResolver.swift`、`YishuFileDragSession.swift`、`YishuComputerUseActuator.swift`、`YishuDirectClickResolver.swift`。无新代码可合并。
+- 本轮中途证据（已由上述收尾状态取代）：无截图提示遗漏目标编号、待确认口播误用完成时态、失败解释被过滤为空，均由真实模型剧本暴露后补回归。第一次 runtime 全量 Stagehand 表单 title 时序失败，单独 3/3 和最终全量 497/497 复绿。
+
+- Cua Driver 执行底座进入有退出条件的 Trial，卡 `docs/evals/20260905-cua-driver-trial.md`。根据锁定源码和本机观察基线：Nuphus 0.2.2 的 macOS `desktop_windows_list` 直接返回 `Platform not supported`；`pi-computer-use` 0.5.1 的 `listRoots` 12 次均无可用目标；Peekaboo 3.1.2 的窗口观察 12 次均因 bridge 错误失败。Cua Driver 0.7.1 在当前 ZCode 窗口上 `list_windows` 12/12（p50 20.3 ms / p95 30.2 ms），AX 窗口观察不带图 10/10（p50 67.3 ms / p95 71.3 ms），带图 7/7（p50 338.5 ms / p95 399.9 ms）。这只确立 Trial 优先级，不算产品通过。
+- Trial 不替换模型/工具循环，不删现有 `NSDraggingSession` 拖放；候选只能从 `ComputerUsePort` ↔ Swift actuator 接缝进入。通过条件是 M1 真机剧本成功 ≥90%、假完成 0、文件上传 3/3；失败则回到现有 actuator，再评 Peekaboo。
+
+- M1 真机验收文件统一命名为 `奕枢测试文件.txt`，方便语音表达。验收脚本、验收卡、runtime / kernel / Swift 测试中的旧夹具名已归零；runtime 聚焦 138/138、kernel 7/7、Swift 文件拖放与协议聚焦测试通过，验收脚本确认能创建并在中断后清理该中文名文件。生产动作仍支持任意精确 basename，权限、安全门和上传行为未改。
+
+- 主代理复核 Cursor 的 M1 工作区后保留现有实现，并补上确认错绑安全门：AX 目标 `frame` 现在通过协议保留；runtime 和 Swift 用同一套半点精度位置指纹。上传框移动、页面重排或确认帧缺位置时，待确认状态失效且 0 次拖放。
+- 新安全门已红绿验证：runtime 聚焦 128/128；Swift 文件拖放/协议聚焦与双端指纹编码测试通过。runtime 全量用串行模式 490/490，kernel 219/219；签名 `product:build:clicky` 通过。并行 runtime 全量曾有 OAuth 文件锁心跳时序 1 次抖动，单测 19/19 和串行全量均复绿。
+- 新包已安装启动 `/Applications/奕枢.app`（pid 56899）。本地上传验收页曾在 ChromeMain 打开；第一轮 180 秒人工窗口无人执行，报告为 `drop=0 / submit=0 / invalid=0 / timeout_before_three_drops`，临时 Downloads 文件已删除。这不算产品通过或失败；仍待真实语音 3/3 和用户人评，因此不提交。
+- `product:check` 仍只撞预存 `quality-observation-collector.mjs 880/856`；`git diff --check` 通过。
+
+- 主代理已固定文件拖放协议与安全门：`drop_download_file` 的模型面只有 `fileName + targetId`；kernel 判为 `explicit_approval/high`；待确认状态绑定 conversation、文件、browser/window/AX 指纹，60 秒过期、一次消费。runtime 聚焦协议/策略测试已绿。
+- 本地验收夹具 `evals/hands/check-file-drop.mjs` 已用三次同名 drop 自测通过：`drop=3 / submit=0 / invalid=0`，临时 Downloads 文件退出后已删除。此证据只证明夹具，不代表奕枢真机路径已通过。
+- Swift Grok（surface:36）已交：Downloads 精确解析、浏览器白名单、Overlay `NSDraggingSession`、commit 前 fresh AX、附件 basename 计数增加回读；Overlay 在 HID drag/up 前恢复 click-through。主代理独立复跑文件拖放、协议、描边、编号 AX 四组 Swift 测试，`TEST SUCCEEDED`（文件拖放 21/21）；生产文件 426/169 行。真浏览器拖放尚未验收。
+- runtime Grok（surface:35）已交：两轮确认、一次性 policy token、`external_disclosure` 元数据、确认轮安全契约和防错绑测试。主代理复跑 runtime 聚焦 136/136、runtime 全量、kernel 全量 219/219、双方 typecheck，均绿。
+- 本分支签名产品构建通过，并已安装启动 `/Applications/奕枢.app`（pid 4341）；ChromeMain 已打开 `http://127.0.0.1:59563/` 上传页，目标 AX 名为「上传文件，拖放到这里」。尚待用户按真实 Control+Option 语音剧本完成 3/3，因此不提交、不把 M1 算完成。
+- `product:check` 依赖边界和本次相关门均过；仍只撞预存 `quality-observation-collector.mjs 880/856` 尺寸红线。`git diff --check` 通过。
+
+- 用户阶段验收 M0：当前 MiniMax-M3 发声可继续，未达延迟/连续聆听等指标转集中优化质量债；路线转入 M1。
+- M1 第一条闭环改为文件上传拖放，卡 `docs/evals/20260904-m1-file-upload-drag.md`（active）；分支 `feat/m1-file-upload-drag`。边界：Downloads 顶层精确 basename、可见浏览器 AX 上传区、说「去」后一次性真实 file URL 拖放、同名附件 AX 回读、绝不自动提交。
+- 两个 Grok 只读探索完成：runtime/Swift 均无现成桌面文件拖放；`browser.upload(workspaceFileId)` 只管 agent 自有浏览器，不能复用。推荐 Overlay `NSView` + `NSDraggingSession`，commit 前重解析 AX 目标，禁用旧列表 fallback。
+
+- 真机已装 `60ab9d0`：正式包 pid **94548**（旧 60883），runtime 94815，proxy 94820。装机 dist 含 M3 `thinking.disabled`；二进制含 M2.5→M3 一次迁移。
+- 用户拍：实时档用 **MiniMax-M3 + `thinking.disabled`**。Grok Voice 不接。卡 `docs/evals/20260904-m3-no-think.md`。
+- 待用户：说一句「在吗」；若弹钥匙串点始终允许。主代理再读 `quality.jsonl` 核 `turn.start` 的模型是 MiniMax-M3。
 
 - 用户拍：实时档用 **MiniMax-M3 + `thinking.disabled`**。Grok Voice 不接。卡 `docs/evals/20260904-m3-no-think.md`。
 - 代码：M3 的 chat completions（对话 / 记忆抽取 / 口播摘录）带 `thinking:{type:disabled}`。本机实时档若仍是 M2.5，启动时迁一次到 M3。要装新包才进真机。

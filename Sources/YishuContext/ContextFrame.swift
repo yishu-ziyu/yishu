@@ -213,6 +213,7 @@ public struct ContextFrame: Codable, Sendable {
     public let elementUnderCursor: ObservedValue<AccessibilityElementContext>?
     public let screenshots: [ScreenshotContext]
     public let numberedTargets: [NumberedAccessibilityTarget]
+    public var downloadFiles: DownloadsObservation?
     public let warnings: [String]
 
     public init(
@@ -227,6 +228,7 @@ public struct ContextFrame: Codable, Sendable {
         elementUnderCursor: ObservedValue<AccessibilityElementContext>?,
         screenshots: [ScreenshotContext],
         numberedTargets: [NumberedAccessibilityTarget] = [],
+        downloadFiles: DownloadsObservation? = nil,
         warnings: [String]
     ) {
         self.schemaVersion = schemaVersion
@@ -240,6 +242,7 @@ public struct ContextFrame: Codable, Sendable {
         self.elementUnderCursor = elementUnderCursor
         self.screenshots = Array(screenshots.prefix(4))
         self.numberedTargets = Array(numberedTargets.prefix(50))
+        self.downloadFiles = downloadFiles
         self.warnings = warnings
     }
 
@@ -455,6 +458,7 @@ extension ContextFrame {
         case elementUnderCursor
         case screenshots
         case numberedTargets
+        case downloadFiles
         case warnings
     }
 
@@ -474,6 +478,7 @@ extension ContextFrame {
             try container.encode(numberedTargets, forKey: .numberedTargets)
         }
         try container.encode(warnings, forKey: .warnings)
+        try container.encodeIfPresent(downloadFiles, forKey: .downloadFiles)
     }
 
     public init(from decoder: Decoder) throws {
@@ -502,6 +507,7 @@ extension ContextFrame {
                 [NumberedAccessibilityTarget].self,
                 forKey: .numberedTargets
             ) ?? [],
+            downloadFiles: try container.decodeIfPresent(DownloadsObservation.self, forKey: .downloadFiles),
             warnings: try container.decode([String].self, forKey: .warnings)
         )
     }

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>奕枢文件拖放验收</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f4f1e9; color: #18243a; }
+    main { width: min(620px, calc(100vw - 48px)); }
+    h1 { font-size: 28px; margin: 0 0 12px; }
+    p { color: #526078; margin: 0 0 24px; }
+    #drop-zone { min-height: 220px; border: 3px dashed #3564d4; border-radius: 20px; display: grid; place-items: center; background: white; font-size: 22px; font-weight: 650; outline: none; }
+    #drop-zone[data-active="true"] { background: #e9efff; border-style: solid; }
+    #attachments { margin: 20px 0; padding-left: 24px; min-height: 28px; }
+    button { border: 0; border-radius: 999px; padding: 11px 20px; background: #18243a; color: white; font-size: 16px; }
+    #status { margin-left: 12px; color: #526078; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>文件拖放测试页</h1>
+    <p>只应附加文件，不应自动提交。</p>
+    <div id="drop-zone" role="button" tabindex="0" aria-label="上传文件，拖放到这里">把文件拖到这里</div>
+    <ul id="attachments" aria-label="已附加文件"></ul>
+    <button id="submit" type="button">提交</button><span id="status" aria-live="polite">尚未提交</span>
+  </main>
+  <script>
+    const zone = document.querySelector('#drop-zone');
+    const attachments = document.querySelector('#attachments');
+    const status = document.querySelector('#status');
+    async function record(event) {
+      await fetch('/event', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(event),
+      });
+    }
+    zone.addEventListener('dragenter', (event) => { event.preventDefault(); zone.dataset.active = 'true'; });
+    zone.addEventListener('dragover', (event) => { event.preventDefault(); });
+    zone.addEventListener('dragleave', () => { zone.dataset.active = 'false'; });
+    zone.addEventListener('drop', async (event) => {
+      event.preventDefault();
+      zone.dataset.active = 'false';
+      const names = [...event.dataTransfer.files].map((file) => file.name);
+      for (const name of names) {
+        const item = document.createElement('li');
+        item.textContent = name;
+        attachments.append(item);
+      }
+      status.textContent = names.length === 1 ? `已附加 ${names[0]}` : `收到 ${names.length} 个文件`;
+      await record({ type: 'drop', names });
+    });
+    document.querySelector('#submit').addEventListener('click', async () => {
+      status.textContent = '发生了提交';
+      await record({ type: 'submit' });
+    });
+  </script>
+</body>
+</html>
