@@ -1,3 +1,4 @@
+import type { CodexAccount } from "../providers/codex-account.js";
 /**
  * Product-owned provider registry (ADR 0014).
  *
@@ -69,6 +70,7 @@ const CODEX_PROVIDER: ProviderDefinition = {
   baseUrl: "https://chatgpt.com/backend-api",
   oauth: true,
   models: [
+    { id: "gpt-6-astra", name: "GPT-6 Astra" },
     { id: "gpt-5.3-codex-spark", name: "GPT-5.3 Codex Spark" },
     { id: "gpt-5.4", name: "GPT-5.4" },
     { id: "gpt-5.4-mini", name: "GPT-5.4 mini" },
@@ -83,6 +85,7 @@ export interface YishuProviderRuntimeOptions {
   credentialStore: YishuCredentialStore;
   localGrokBearer: LocalGrokBearer;
   modelConfig?: LocalModelConfig;
+  codexAccount?: CodexAccount;
 }
 
 export class YishuProviderRuntime implements ModelProviderRuntime {
@@ -121,6 +124,9 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   }
 
   async getAvailable(providerId: string): Promise<readonly ProviderModelListing[]> {
+    if (providerId === CODEX_PROVIDER.id && this.options.codexAccount) {
+      return (await this.options.codexAccount.read()).models;
+    }
     const provider = this.getProvider(providerId);
     return provider?.models ?? [];
   }
@@ -133,6 +139,9 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
         ?? this.options.localGrokBearer.value();
       return key && key.length > 0 ? { type: "api_key" } : undefined;
     }
+    if (providerId === CODEX_PROVIDER.id && this.options.codexAccount) {
+      return (await this.options.codexAccount.read()).account ? { type: "oauth" } : undefined;
+    }
     const provider = this.getProvider(providerId);
     if (!provider?.oauth) return undefined;
     const credential = await this.readCredential(providerId);
@@ -140,6 +149,7 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   }
 
   async getAuth(providerId: string): Promise<unknown> {
+    if (providerId === CODEX_PROVIDER.id && this.options.codexAccount) return (await this.options.codexAccount.read()).account;
     if (providerId === LOCAL_GROK_PROVIDER) {
       const config = this.modelConfig();
       const key = resolveEffectiveApiKey(config, providerById(config))
@@ -155,6 +165,11 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   }
 
   async login(providerId: string, _type: "oauth", interaction: OAuthInteraction): Promise<unknown> {
+    if (providerId === CODEX_PROVIDER.id && this.options.codexAccount) {
+      const account = await this.options.codexAccount.login(interaction);
+      this.bumpVersion(providerId);
+      return account;
+    }
     const flow = oauthFlows[providerId];
     if (!flow) throw new Error(`OAuth is not supported for ${providerId}.`);
     const credential = await flow.login(interaction);
@@ -164,6 +179,9 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   }
 
   async logout(providerId: string): Promise<void> {
+    if (providerId === CODEX_PROVIDER.id && this.options.codexAccount) {
+      await this.options.codexAccount.logout(); this.bumpVersion(providerId); return;
+    }
     await this.options.credentialStore.delete(providerId);
     this.bumpVersion(providerId);
   }
@@ -182,6 +200,12 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
     if (!provider) throw new Error(`Unknown provider: ${providerId}`);
     const listing = provider.models.find((candidate) => candidate.id === modelId);
     if (!listing) throw new Error(`Model is unavailable: ${providerId}/${modelId}`);
+    if (providerId === CODEX_PROVIDER.id && this.options.codexAccount) {
+      const state = await this.options.codexAccount.read();
+      if (!state.account || !state.models.some((model) => model.id === modelId)) throw new Error("Codex 登录或模型不可用。");
+      return { providerId, id: modelId, name: listing.name ?? modelId, api: "codex-app-server",
+        baseUrl: "stdio://codex-app-server", input: ["text", "image"], contextWindow: 128_000, maxTokens: 16_384 };
+    }
     if (provider.oauth) {
       const credential = await this.usableCredential(providerId);
       if (!credential) throw new Error(`OAuth is not configured for ${providerId}.`);
@@ -199,6 +223,7 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   }
 
   async bearer(providerId: string): Promise<string> {
+    if (providerId === CODEX_PROVIDER.id && this.options.codexAccount) throw new Error("Codex 订阅通过 App Server 执行，不提供 bearer。");
     if (providerId === LOCAL_GROK_PROVIDER) {
       const config = this.modelConfig();
       const key = resolveEffectiveApiKey(config, providerById(config))
@@ -211,7 +236,7 @@ export class YishuProviderRuntime implements ModelProviderRuntime {
   }
 
   async extraHeaders(providerId: string): Promise<Record<string, string>> {
-    if (providerId !== CODEX_PROVIDER.id) return {};
+    if (providerId !== CODEX_PROVIDER.id || this.options.codexAccount) return {};
     const credential = await this.usableCredential(providerId);
     if (!credential?.accountId) return {};
     return { "chatgpt-account-id": credential.accountId };

@@ -10,11 +10,16 @@ import {
   authorizedTextForUtterance,
   computerActionLimitForUtterance,
   computerActionCompletionText,
+  desktopActionBudgetForTurn,
   isExplicitTextInputUtterance,
   piSessionCacheKey,
   YishuLoopRuntimeAdapter,
   shouldRunCompatibilityComputerAction,
 } from "../src/loop-adapter.js";
+import { authorizedDownloadFileNameForUtterance, fileDropBindingFromContext } from "../src/desktop/computer-turn.js";
+import { createTaskExecutionContract } from "../src/task-contract.js";
+import { createDesktopLoopState } from "../src/desktop/desktop-loop.js";
+import type { ContextFrame } from "../src/protocol.js";
 import { computerActionRequestedPayloadSchema } from "../src/protocol.js";
 import { PROTOCOL_VERSION, type RuntimeEvent } from "../src/protocol.js";
 import type { ComputerUsePort } from "../src/computer-use-port.js";
@@ -1056,4 +1061,385 @@ test("Pi dispose waits for an initializing local turn to cross its cancellation 
   await Promise.all([start, disposing]);
 
   assert.equal(sessionCreated, false);
+});
+
+test("file-drop utterances admit budget 1 and an exact basename; bare 去 does not", () => {
+  assert.equal(
+    authorizedDownloadFileNameForUtterance("把下载里的 奕枢测试文件.txt 拖到这个上传框"),
+    "奕枢测试文件.txt",
+  );
+  assert.equal(
+    authorizedDownloadFileNameForUtterance("请上传 Downloads 里的合同.pdf 到这里"),
+    "合同.pdf",
+  );
+  assert.equal(authorizedDownloadFileNameForUtterance("把下载里的 ../secret.txt 拖到这个上传框"), undefined);
+  assert.equal(authorizedDownloadFileNameForUtterance("怎么把下载里的合同.pdf 拖进去？"), undefined);
+  assert.equal(authorizedDownloadFileNameForUtterance('把下载里的 "合同 v2.pdf" 拖到这个上传框'), "合同 v2.pdf");
+  assert.equal(authorizedDownloadFileNameForUtterance("把下载里的 合同 v2.pdf 拖到这个上传框"), undefined);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "把下载里的 奕枢测试文件.txt 拖到这个上传框",
+    intentAllowsEffect: true,
+  }), 1);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "去",
+    intentAllowsEffect: true,
+  }), 0);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "去",
+    intentAllowsEffect: true,
+    fileDropPending: true,
+  }), 1);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "去",
+    intentAllowsEffect: false,
+    fileDropPending: true,
+  }), 1);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "去",
+    intentAllowsEffect: false,
+  }), 0);
+  assert.equal(desktopActionBudgetForTurn({
+    utterance: "去提交",
+    intentAllowsEffect: true,
+    fileDropPending: true,
+  }), 0);
+});
+
+test("computer_control exposes drop_download_file without model-owned identity and does not label it Click", async () => {
+  const actions: unknown[] = [];
+  const tool = createComputerControlTool(async (action) => {
+    actions.push(action);
+    return {
+      succeeded: false,
+      verified: false,
+      status: "blocked",
+      code: "approval_required",
+      method: "unknown",
+      message: "This file drop needs the user to say 去 before it is performed.",
+    };
+  });
+
+  const result = await tool.execute("tool-call", {
+    action: "drop_download_file",
+    fileName: "奕枢测试文件.txt",
+    targetId: "3",
+    targetBundleId: "evil.bundle",
+    targetPid: 999,
+    targetWindowNumber: 1,
+    targetFingerprint: "spoof",
+  } as never, undefined, undefined, {} as never);
+
+  assert.deepEqual(actions, [{
+    action: "drop_download_file",
+    fileName: "奕枢测试文件.txt",
+    targetId: "3",
+  }]);
+  const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+  assert.match(text, /去/);
+  assert.doesNotMatch(text, /Click/);
+  assert.doesNotMatch(text, /was delivered|succeeded/i);
+  assert.doesNotMatch(text, /targetPid|targetBundleId|\/Users\//);
+});
+
+test("runtime injects the file-drop binding and never dispatches spoofed path, pid, or coordinates", async () => {
+  const requests: unknown[] = [];
+  const port: ComputerUsePort = {
+    async perform(action, context) {
+      requests.push({ action, context });
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: "appkit_drag",
+        message: "The named file is attached.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const now = new Date("2026-09-05T00:00:00.000Z");
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), port, { now: () => now });
+  const internals = adapter as any;
+  const conversationId = "conversation-file-drop";
+  const fingerprint = ["AXGroup", "上传文件", "拖放到这里", "200,400,480,160"].join("\u001e");
+  const current = {
+    conversationId,
+    fileName: "奕枢测试文件.txt",
+    targetId: "3",
+    targetBundleId: "com.apple.Safari",
+    targetPid: 321,
+    targetWindowNumber: 17,
+    targetFingerprint: fingerprint,
+  };
+  internals.fileDropApprovals.stage(current, now);
+  internals.fileDropApprovals.authorize({
+    conversationId,
+    confirmationRequestId: "request-confirm",
+    utterance: "去",
+    current,
+    now,
+  });
+  const observation = {
+    observationId: randomUUID(),
+    capturedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 30_000).toISOString(),
+    targets: [{ targetId: "3" }],
+    warnings: [],
+  };
+
+  const activeTurn: any = {
+    requestId: "request-confirm",
+    traceId: randomUUID(),
+    intentId: randomUUID(),
+    basisFrameId: observation.observationId,
+    conversationId,
+    directComputerAction: false,
+    authorizedFileName: "奕枢测试文件.txt",
+    allowedActionSequence: ["drop_download_file"],
+    actionBudget: 1,
+    fileDropCurrent: current,
+    desktop: Object.assign(createDesktopLoopState({ budget: 1 }), { lastObservation: observation }),
+    emit: () => {},
+    actionCount: 0,
+    allActionsVerified: true,
+  };
+
+  await internals.activeComputerTurn.run(activeTurn, async () => {
+    await internals.performComputerAction({
+      action: "drop_download_file",
+      fileName: "奕枢测试文件.txt",
+      targetId: "3",
+      targetBundleId: "evil.bundle",
+      targetPid: 999,
+      targetWindowNumber: 1,
+      targetFingerprint: "spoof",
+      path: "/etc/passwd",
+      x: 12,
+      y: 34,
+    });
+  });
+
+  assert.equal(requests.length, 1);
+  const dispatched = requests[0] as { action: Record<string, unknown>; context: { effectClass?: string } };
+  assert.deepEqual(dispatched.action, {
+    action: "drop_download_file",
+    fileName: "奕枢测试文件.txt",
+    targetId: "3",
+    targetBundleId: "com.apple.Safari",
+    targetPid: 321,
+    targetWindowNumber: 17,
+    targetFingerprint: fingerprint,
+  });
+  assert.equal(Object.hasOwn(dispatched.action, "path"), false);
+  assert.equal(Object.hasOwn(dispatched.action, "x"), false);
+  assert.equal(dispatched.context.effectClass, "external_disclosure");
+  await adapter.dispose();
+});
+
+test("file drop dispatch is blocked without a matching desktop policy observation", async () => {
+  const requests: unknown[] = [];
+  const port: ComputerUsePort = {
+    async perform(action, context) {
+      requests.push({ action, context });
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: "appkit_drag",
+        message: "The named file is attached.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const now = new Date("2026-09-05T00:00:00.000Z");
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), port, { now: () => now });
+  const internals = adapter as any;
+  const conversationId = "conversation-file-drop-stale";
+  const fingerprint = ["AXGroup", "上传文件", "拖放到这里", "200,400,480,160"].join("\u001e");
+  const current = {
+    conversationId,
+    fileName: "奕枢测试文件.txt",
+    targetId: "3",
+    targetBundleId: "com.apple.Safari",
+    targetPid: 321,
+    targetWindowNumber: 17,
+    targetFingerprint: fingerprint,
+  };
+  internals.fileDropApprovals.stage(current, now);
+  internals.fileDropApprovals.authorize({
+    conversationId,
+    confirmationRequestId: "request-stale",
+    utterance: "去",
+    current,
+    now,
+  });
+  const activeTurn: any = {
+    requestId: "request-stale",
+    traceId: randomUUID(),
+    intentId: randomUUID(),
+    basisFrameId: randomUUID(),
+    conversationId,
+    directComputerAction: false,
+    authorizedFileName: "奕枢测试文件.txt",
+    allowedActionSequence: ["drop_download_file"],
+    actionBudget: 1,
+    fileDropCurrent: current,
+    emit: () => {},
+    actionCount: 0,
+    allActionsVerified: true,
+  };
+  await internals.activeComputerTurn.run(activeTurn, async () => {
+    await assert.rejects(
+      () => internals.performComputerAction({
+        action: "drop_download_file",
+        fileName: "奕枢测试文件.txt",
+        targetId: "3",
+      }),
+      /observation|stale|approval/i,
+    );
+  });
+  assert.equal(requests.length, 0);
+  await adapter.dispose();
+});
+
+function fileDropFrame(overrides: {
+  bundleId?: string;
+  appPid?: number;
+  windowPid?: number;
+  windowNumber?: number | undefined;
+  target?: { id: string; role: string | null; title: string | null; description: string | null; enabled?: boolean | null };
+}): ContextFrame {
+  const command = makeTurnStartCommand();
+  const frame = command.payload.contextFrame;
+  const appPid = overrides.appPid ?? 321;
+  frame.frontmostApplication = {
+    value: {
+      name: "Browser",
+      bundleIdentifier: overrides.bundleId ?? "com.apple.Safari",
+      processIdentifier: appPid,
+    },
+    source: "NSWorkspace",
+    capturedAt: frame.capturedAt,
+    confidence: 1,
+  };
+  frame.activeWindow = {
+    value: {
+      title: "Upload",
+      ownerName: "Browser",
+      processIdentifier: overrides.windowPid ?? appPid,
+      ...(overrides.windowNumber === undefined && !("windowNumber" in overrides)
+        ? { windowNumber: 17 }
+        : overrides.windowNumber === undefined
+          ? {}
+          : { windowNumber: overrides.windowNumber }),
+      bounds: { x: 20, y: 40, width: 900, height: 700 },
+    },
+    source: "CGWindowList",
+    capturedAt: frame.capturedAt,
+    confidence: 0.9,
+  };
+  frame.numberedTargets = [overrides.target ?? {
+    id: "3",
+    role: "AXGroup",
+    title: "上传文件",
+    description: "拖放到这里",
+    enabled: true,
+    frame: { x: 100, y: 200, width: 240, height: 80 },
+  }];
+  return frame;
+}
+
+test("fileDropBindingFromContext admits live browser upload targets and rejects the rest", () => {
+  const input = {
+    conversationId: "conversation-a",
+    fileName: "奕枢测试文件.txt",
+    targetId: "3",
+  };
+  assert.equal(fileDropBindingFromContext({ ...input, frame: fileDropFrame({}) })?.targetBundleId, "com.apple.Safari");
+  assert.equal(fileDropBindingFromContext({ ...input, frame: fileDropFrame({ bundleId: "com.google.Chrome" }) })?.targetBundleId, "com.google.Chrome");
+  assert.equal(fileDropBindingFromContext({ ...input, frame: fileDropFrame({ bundleId: "com.apple.Preview" }) }), undefined);
+  assert.equal(fileDropBindingFromContext({ ...input, frame: fileDropFrame({ windowPid: 999 }) }), undefined);
+  assert.equal(fileDropBindingFromContext({
+    ...input,
+    frame: fileDropFrame({ target: { id: "3", role: "AXButton", title: "保存", description: null, enabled: true } }),
+  }), undefined);
+  assert.equal(fileDropBindingFromContext({
+    ...input,
+    frame: fileDropFrame({ target: { id: "3", role: null, title: null, description: null, enabled: true } }),
+  }), undefined);
+  assert.equal(fileDropBindingFromContext({
+    ...input,
+    frame: fileDropFrame({ target: { id: "3", role: "AXGroup", title: "上传文件", description: "拖放到这里", enabled: true } }),
+  }), undefined);
+});
+
+test("drop_download_file proposes explicit_approval/high at the task contract boundary", async () => {
+  const requests: unknown[] = [];
+  const port: ComputerUsePort = {
+    async perform(action) {
+      requests.push(action);
+      return {
+        succeeded: true,
+        verified: true,
+        status: "verified",
+        code: "verified_accessibility",
+        method: "appkit_drag",
+        message: "The named file is attached.",
+      };
+    },
+    resolve: () => false,
+    cancelRequest: () => {},
+    dispose: () => {},
+  };
+  const adapter = new YishuLoopRuntimeAdapter(process.cwd(), port);
+  const internals = adapter as any;
+  const reversible = {
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    intentId: randomUUID(),
+    basisFrameId: randomUUID(),
+    conversationId: "conversation-file-drop",
+    directComputerAction: false,
+    authorizedFileName: "奕枢测试文件.txt",
+    allowedActionSequence: ["drop_download_file"],
+    actionBudget: 1,
+    contract: createTaskExecutionContract({
+      objective: "drop a downloads file",
+      successMode: "external_effect",
+      authority: "reversible",
+      risk: "medium",
+      maxAttempts: 1,
+    }),
+    contextFrame: fileDropFrame({}),
+    emit: () => {},
+    actionCount: 0,
+    allActionsVerified: true,
+  };
+  await internals.activeComputerTurn.run(reversible, async () => {
+    await assert.rejects(
+      () => internals.performComputerAction({
+        action: "drop_download_file",
+        fileName: "奕枢测试文件.txt",
+        targetId: "3",
+      }),
+      /authority_changed|escalation/i,
+    );
+  });
+  assert.equal(requests.length, 0);
+
+  const clickTurn = {
+    ...reversible,
+    actionCount: 0,
+    allowedActionSequence: ["left_click"],
+  };
+  await internals.activeComputerTurn.run(clickTurn, async () => {
+    await internals.performComputerAction({ action: "left_click", targetId: "3" });
+  });
+  assert.equal(requests.length, 1);
+  await adapter.dispose();
 });

@@ -8,6 +8,7 @@ export const DESKTOP_ACTION_KINDS = [
   "select_menu_item",
   "copy",
   "paste",
+  "drop_file",
   "wait",
 ] as const;
 
@@ -23,6 +24,7 @@ export type DesktopAction =
   | { kind: "select_menu_item"; appBundleId: string; path: string[] }
   | { kind: "copy" }
   | { kind: "paste" }
+  | { kind: "drop_file"; targetId: string; fileName: string }
   | { kind: "wait"; milliseconds: number };
 
 export const DESKTOP_RECEIPT_STATUSES = [

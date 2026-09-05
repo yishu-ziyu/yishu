@@ -43,17 +43,17 @@ struct YishuProviderAccountState: Equatable {
     }
 }
 
-/// Pure projection used when a dual-provider status refresh fails.  A single
-/// status request owns both rows, so one typed failure must retire both loading
-/// surfaces together instead of leaving the other provider spinning.
+/// A provider-specific refresh failure must not overwrite another account.
+/// A nil provider preserves the legacy all-account failure projection.
 enum YishuProviderStatusFailureReducer {
     static func apply(
         to states: [YishuAuthProvider: YishuProviderAccountState],
+        provider requestedProvider: YishuAuthProvider? = nil,
         code: String,
         message: String
     ) -> [YishuAuthProvider: YishuProviderAccountState] {
         var nextStates = states
-        for provider in YishuAuthProvider.allCases {
+        for provider in requestedProvider.map({ [$0] }) ?? YishuAuthProvider.allCases {
             var state = nextStates[provider] ?? YishuProviderAccountState()
             state.phase = .idle
             state.failure = YishuAuthFailure(
@@ -81,7 +81,7 @@ final class ProviderAccountsViewModel: ObservableObject {
     /// Runtime events can still be in flight; a tombstone prevents them from
     /// reviving a newer account surface for the same provider.
     private var tombstonedRequestIDs: Set<UUID> = []
-    private var statusRequestID: UUID?
+    private var statusRequestIDs: Set<UUID> = []
 
     init(
         runtimeClient: YishuAgentRuntimeClient? = nil,
@@ -105,33 +105,28 @@ final class ProviderAccountsViewModel: ObservableObject {
     }
 
     func refreshStatus() {
-        if let statusRequestID {
-            tombstone(statusRequestID)
-            requestTasks[statusRequestID]?.cancel()
-            self.statusRequestID = nil
+        for requestID in statusRequestIDs {
+            tombstone(requestID)
+            requestTasks[requestID]?.cancel()
         }
-
+        statusRequestIDs.removeAll()
         guard let runtimeClient else {
             setRuntimeUnavailable()
             return
         }
-
         for provider in YishuAuthProvider.allCases {
             update(provider) { state in
-                if state.phase == .idle {
-                    state.phase = .loading
-                }
+                if state.phase == .idle { state.phase = .loading }
                 state.message = nil
                 state.failure = nil
             }
-        }
-
-        do {
-            let request = try runtimeClient.startAuthStatus()
-            statusRequestID = request.requestId
-            consume(request, fallbackProvider: nil, operation: .status)
-        } catch {
-            handleTransportFailure(provider: nil, requestID: nil)
+            do {
+                let request = try runtimeClient.startAuthStatus(provider: provider)
+                statusRequestIDs.insert(request.requestId)
+                consume(request, fallbackProvider: provider, operation: .status(provider))
+            } catch {
+                handleTransportFailure(provider: provider, requestID: nil)
+            }
         }
     }
 
@@ -252,15 +247,13 @@ final class ProviderAccountsViewModel: ObservableObject {
     }
 
     private enum AuthOperation {
-        case status
+        case status(YishuAuthProvider)
         case login(YishuAuthProvider)
         case logout(YishuAuthProvider)
 
         var provider: YishuAuthProvider? {
             switch self {
-            case .status:
-                return nil
-            case let .login(provider), let .logout(provider):
+            case let .status(provider), let .login(provider), let .logout(provider):
                 return provider
             }
         }
@@ -290,7 +283,7 @@ final class ProviderAccountsViewModel: ObservableObject {
                 // cancellation never surfaces raw errors or credential data.
             } catch {
                 if case .status = operation {
-                    self.handleStatusStreamFailure(error, requestID: requestID)
+                    self.handleStatusStreamFailure(error, requestID: requestID, provider: operation.provider!)
                 } else {
                     self.handleTransportFailure(
                         provider: fallbackProvider ?? operation.provider,
@@ -429,9 +422,7 @@ final class ProviderAccountsViewModel: ObservableObject {
     private func finishTask(_ requestID: UUID, operation: AuthOperation) {
         tombstone(requestID)
         requestTasks.removeValue(forKey: requestID)
-        if statusRequestID == requestID {
-            statusRequestID = nil
-        }
+        statusRequestIDs.remove(requestID)
         if let provider = operation.provider,
            activeRequestIDs[provider] == requestID {
             activeRequestIDs.removeValue(forKey: provider)
@@ -442,9 +433,7 @@ final class ProviderAccountsViewModel: ObservableObject {
         if let requestID {
             tombstone(requestID)
             requestTasks[requestID]?.cancel()
-            if statusRequestID == requestID {
-                statusRequestID = nil
-            }
+            statusRequestIDs.remove(requestID)
         }
 
         if let provider {
@@ -467,17 +456,16 @@ final class ProviderAccountsViewModel: ObservableObject {
 
     private func applyStatusFailure(_ failure: YishuAuthFailure, requestID: UUID) {
         tombstone(requestID)
-        if statusRequestID == requestID {
-            statusRequestID = nil
-        }
+        statusRequestIDs.remove(requestID)
         states = YishuProviderStatusFailureReducer.apply(
             to: states,
+            provider: failure.provider,
             code: failure.code,
             message: failure.message
         )
     }
 
-    private func handleStatusStreamFailure(_ error: Error, requestID: UUID) {
+    private func handleStatusStreamFailure(_ error: Error, requestID: UUID, provider: YishuAuthProvider) {
         let details: (code: String, message: String)
         if let runtimeError = error as? YishuAgentRuntimeClientError {
             switch runtimeError {
@@ -498,7 +486,7 @@ final class ProviderAccountsViewModel: ObservableObject {
         }
         applyStatusFailure(
             YishuAuthFailure(
-                provider: .openAICodex,
+                provider: provider,
                 code: details.code,
                 message: details.message
             ),

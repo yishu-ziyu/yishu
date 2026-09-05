@@ -36,6 +36,16 @@ struct OverlayMarksTests {
         #expect(point.y == 50)
     }
 
+    @Test func quartzFrameCenterMapsToAppKitBottomLeft() {
+        let quartz = CGRect(x: 100, y: 200, width: 240, height: 80)
+        let center = OverlayCoordinateSpace.appKitCenter(
+            ofQuartzFrame: quartz,
+            primaryDisplayHeight: primaryHeight
+        )
+        #expect(center.x == 220)
+        #expect(center.y == 742)
+    }
+
     @Test func ringRectPadsTheTargetAndContainsIt() {
         let target = CGRect(x: 10, y: 20, width: 100, height: 30)
         let ring = OverlayCoordinateSpace.ringRect(around: target, padding: 4)

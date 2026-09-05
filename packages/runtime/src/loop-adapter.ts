@@ -1,3 +1,5 @@
+import { CodexAccount } from "./providers/codex-account.js";
+import type { CodexRuntime } from "./providers/codex-runtime.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
@@ -27,11 +29,14 @@ import {
 } from "./computer-control-tool.js";
 import { createDesktopLoopState, type DesktopLoopState } from "./desktop/desktop-loop.js";
 import {
+  groundedDownloadFileName,
+  claimsComputerActionCompleted,
   authorizedTextForUtterance,
   assertContextFrameFresh,
   ContextFrameFreshnessError,
   desktopActionBudgetForTurn,
   digestComputerControlAction,
+  fileDropBindingFromContext,
   nextDesktopObservation,
   observationFromContextFrame,
   projectComputerActionTerminal,
@@ -41,9 +46,17 @@ import {
   unknownCommitBlocksRetry,
   withFreshObservation,
 } from "./desktop/computer-turn.js";
-import { desktopStepBudget } from "./desktop/desktop-policy.js";
+import { digestDesktopAction } from "./desktop/desktop-action.js";
+import { desktopStepBudget, evaluateDesktopProposal } from "./desktop/desktop-policy.js";
+import {
+  FileDropApprovalRegistry,
+  isExactFileDropConfirmation,
+  isValidDownloadFileName,
+  type FileDropTargetBinding,
+} from "./desktop/file-drop-approval.js";
 
 export {
+  authorizedDownloadFileNameForUtterance,
   authorizedTextForUtterance,
   computerActionCompletionText,
   computerActionLimitForUtterance,
@@ -86,7 +99,7 @@ import {
   type TurnSteerCommand,
 } from "./protocol.js";
 import type { AgentRuntime, RuntimeEventSink } from "./runtime-port.js";
-import { evaluateActionBoundary, taskExecutionContractFromCommand } from "./task-contract.js";
+import { createTaskExecutionContract, evaluateActionBoundary, taskExecutionContractFromCommand } from "./task-contract.js";
 import {
   normalizeSessionScope,
   sessionScopeKey,
@@ -125,14 +138,18 @@ interface ActiveComputerTurn {
   traceId: string;
   intentId: string;
   basisFrameId: string;
+  conversationId: string;
   directComputerAction: boolean;
   authorizedText?: string;
-  allowedActionSequence?: Array<"set_text" | "left_click">;
+  authorizedFileName?: string;
+  allowedActionSequence?: Array<"set_text" | "left_click" | "drop_download_file">;
   actionBudget: number;
   frontmostTarget?: {
     targetBundleId: string;
     targetPid: number;
   };
+  fileDropCurrent?: FileDropTargetBinding;
+  contextFrame?: TurnStartCommand["payload"]["contextFrame"];
   contract?: TaskExecutionContract;
   emit: RuntimeEventSink;
   actionCount: number;
@@ -575,6 +592,7 @@ export function createDefaultProviderRuntime(): ModelProviderRuntime {
     credentialStore: createYishuCredentialStore(),
     localGrokBearer: { value: () => LOCAL_PROXY_AUTH_SENTINEL },
     modelConfig: readModelConfigSync(),
+    codexAccount: new CodexAccount(),
   });
 }
 
@@ -601,6 +619,7 @@ export function piSessionCacheKey(
 export interface YishuLoopRuntimeAdapterOptions {
   modelRuntimePromise?: Promise<ModelProviderRuntime>;
   createSession?: typeof createYishuAgentSession;
+  codexRuntime?: CodexRuntime;
   interruptionSteerTimeoutMs?: number;
   now?: () => Date;
   qualityRecorder?: QualityRecorder;
@@ -609,6 +628,7 @@ export interface YishuLoopRuntimeAdapterOptions {
 export class YishuLoopRuntimeAdapter implements AgentRuntime {
   private readonly modelRuntimePromise: Promise<ModelProviderRuntime>;
   private readonly createSession: typeof createYishuAgentSession;
+  private readonly codexRuntime: CodexRuntime | undefined;
   private readonly interruptionSteerTimeoutMs: number;
   private readonly now: () => Date;
   private readonly qualityRecorder: QualityRecorder | undefined;
@@ -636,6 +656,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
   /** Product-owned turn context providers (ADR 0015); unset keeps the engine bare. */
   private turnContextProviderFactory: TurnContextProviderFactory | undefined;
   private readonly activeComputerTurn = new AsyncLocalStorage<ActiveComputerTurn>();
+  private readonly fileDropApprovals = new FileDropApprovalRegistry();
   // Additive product seam: per-conversation session tool policy, decided at
   // the createSession boundary. Delegated child conversations receive neither
   // computer_control nor recursive delegate; the default keeps every session unchanged.
@@ -648,6 +669,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     private readonly computerUsePort: ComputerUsePort = new UnavailableComputerUsePort(),
     options: YishuLoopRuntimeAdapterOptions = {},
   ) {
+    this.codexRuntime = options.codexRuntime;
     this.createSession = options.createSession ?? createYishuAgentSession;
     this.interruptionSteerTimeoutMs = options.interruptionSteerTimeoutMs
       ?? INTERRUPTION_STEER_TIMEOUT_MS;
@@ -797,6 +819,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
    * old operation may still finish cleanup, but can no longer be reused.
    */
   releaseConversationSession(conversationId: string): void {
+    void this.codexRuntime?.releaseConversation(conversationId);
     const suffix = `:${conversationId}`;
     for (const [key, session] of this.sessions.entries()) {
       if (!key.endsWith(suffix)) continue;
@@ -846,7 +869,9 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     }
 
     this.pendingRequestIds.add(command.requestId);
-    const operation = this.runTurn(command, emit);
+    const operation = command.payload.modelPreference?.provider === "openai-codex" && this.codexRuntime
+      ? this.runCodexTurn(command, emit)
+      : this.runTurn(command, emit);
     this.activeTurnOperations.add(operation);
     try {
       await operation;
@@ -855,6 +880,19 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       this.pendingRequestIds.delete(command.requestId);
       this.cancelledRequestIds.delete(command.requestId);
       endRuntimeTiming(command.requestId);
+    }
+  }
+
+  private async runCodexTurn(command: TurnStartCommand, emit: RuntimeEventSink): Promise<void> {
+    try {
+      this.ensureProviderAvailable("openai-codex");
+      const policy = this.sessionToolPolicy(command.payload.conversationId ?? command.requestId);
+      if (!policy.computerControl) throw new Error("此子会话没有电脑执行权限。");
+      await this.codexRuntime!.start(command, emit);
+    } catch (error) {
+      emit(runtimeEvent("turn.failed", command.requestId, command.traceId, {
+        code: "codex_execution_failed", message: safeRuntimeErrorMessage(error),
+      }));
     }
   }
 
@@ -936,19 +974,70 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     }
 
     const intentAllowsEffect = intentAllowsComputerEffect(command);
-    const directComputerAction = intentAllowsEffect
+    const conversationId = command.payload.conversationId ?? command.requestId;
+    let fileDropCurrent: FileDropTargetBinding | undefined;
+    const pending = this.fileDropApprovals.pendingBinding(conversationId, this.now());
+    if (pending !== undefined && isExactFileDropConfirmation(command.payload.utterance)) {
+      const current = fileDropBindingFromContext({
+        conversationId,
+        fileName: pending.fileName,
+        targetId: pending.targetId,
+        frame: command.payload.contextFrame,
+      });
+      if (current === undefined) {
+        this.fileDropApprovals.cancelPending(conversationId);
+      } else {
+        const decision = this.fileDropApprovals.authorize({
+          conversationId,
+          confirmationRequestId: command.requestId,
+          utterance: command.payload.utterance,
+          current,
+          now: this.now(),
+        });
+        if (decision.decision === "authorized") {
+          fileDropCurrent = decision.binding;
+        }
+      }
+    }
+    const effectiveIntentAllowsEffect = intentAllowsEffect || fileDropCurrent !== undefined;
+    const directComputerAction = effectiveIntentAllowsEffect
       && isDirectComputerActionUtterance(command.payload.utterance);
     const observedFrontmost = command.payload.contextFrame.frontmostApplication?.value;
-    const taskContract = taskExecutionContractFromCommand(command);
-    const authorizedText = intentAllowsEffect
+    let taskContract = taskExecutionContractFromCommand(command);
+    if (fileDropCurrent !== undefined) {
+      taskContract = createTaskExecutionContract({
+        objective: taskContract?.objective?.trim() || "Drop the named Downloads file onto the visible upload target",
+        successMode: "external_effect",
+        authority: "explicit_approval",
+        risk: "high",
+        maxAttempts: 1,
+      });
+    }
+    const authorizedText = effectiveIntentAllowsEffect
       ? authorizedTextForUtterance(command.payload.utterance)
       : undefined;
+    let authorizedFileName = intentAllowsEffect
+      ? groundedDownloadFileName(command.payload.utterance, command.payload.contextFrame, this.now())
+      : undefined;
+    if (fileDropCurrent !== undefined) {
+      authorizedFileName = fileDropCurrent.fileName;
+    }
+    const previewCandidates = fileDropCurrent === undefined && authorizedFileName !== undefined
+      && command.payload.contextFrame.downloadFiles !== undefined
+      ? (command.payload.contextFrame.numberedTargets ?? []).flatMap((target) => {
+        const binding = fileDropBindingFromContext({ conversationId: command.payload.conversationId ?? command.requestId,
+          fileName: authorizedFileName!, targetId: target.id, frame: command.payload.contextFrame });
+        return binding === undefined ? [] : [binding];
+      }) : [];
+    const fileDropPreview = previewCandidates.length === 1 ? previewCandidates[0] : undefined;
     const actionBudget = desktopActionBudgetForTurn({
       utterance: command.payload.utterance,
-      intentAllowsEffect,
+      intentAllowsEffect: effectiveIntentAllowsEffect,
+      fileDropPending: fileDropCurrent !== undefined,
+      groundedFileName: authorizedFileName,
     });
     const bufferComputerModelText = shouldBufferComputerModelText({
-      intentAllowsEffect,
+      intentAllowsEffect: effectiveIntentAllowsEffect,
       actionBudget,
     });
     let computerActionAttempted = false;
@@ -1097,8 +1186,15 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
       traceId: command.traceId,
       intentId: randomUUID(),
       basisFrameId: command.payload.contextFrame.frameId,
+      conversationId,
       directComputerAction,
       ...(authorizedText !== undefined ? { authorizedText } : {}),
+      ...(authorizedFileName !== undefined ? { authorizedFileName } : {}),
+      ...(fileDropCurrent !== undefined ? { fileDropCurrent } : {}),
+      contextFrame: command.payload.contextFrame,
+      ...(authorizedFileName !== undefined
+        ? { allowedActionSequence: ["drop_download_file"] }
+        : {}),
       actionBudget,
       ...(observedFrontmost?.bundleIdentifier && observedFrontmost.processIdentifier > 0
         ? {
@@ -1140,14 +1236,26 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
           this.sessionToolPolicy(command.payload.conversationId ?? command.requestId),
           command.payload.utterance,
         );
+        if (fileDropPreview !== undefined) {
+          const previousTools = [...session.getActiveToolNames()];
+          const restoreTurnTools = restoreTools;
+          session.setActiveToolsByName([]);
+          restoreTools = () => { session.setActiveToolsByName(previousTools); restoreTurnTools?.(); };
+        }
         const currentPageNoteImageOnly = isCurrentPageActionsNoteUtterance(command.payload.utterance)
           && command.payload.contextFrame.screenshots.length === 1
           && command.payload.contextFrame.screenshots[0]?.sourceWindowNumber
             === command.payload.contextFrame.activeWindow?.value.windowNumber;
-        const promptText = buildGroundedPrompt(command, {
+        let promptText = buildGroundedPrompt(command, {
           includeConversationHistory: sessionCreated,
           ...(currentPageNoteImageOnly ? { currentPageNoteImageOnly: true } : {}),
         });
+        if (fileDropCurrent !== undefined) {
+          promptText += `\n\n<file_drop_confirmation>\nThe user confirmed. Call computer_control with action drop_download_file, fileName=${JSON.stringify(fileDropCurrent.fileName)}, targetId=${JSON.stringify(fileDropCurrent.targetId)}. Do not send a path, PID, bundle id, window id, or coordinates. Do not click submit or press enter.\n</file_drop_confirmation>`;
+        }
+        if (fileDropPreview !== undefined) {
+          promptText += `\n\n<file_drop_preview>\nThe product has located exactly one real file and one upload target; nothing has moved and no drag has been attempted. The file data is ${JSON.stringify({ fileName: fileDropPreview.fileName })}. Ask one brief natural confirmation naming this exact file and telling the user to say 去. Do not describe any dragging, holding, releasing, failure or completion. No tool is needed on this preview turn.\n</file_drop_preview>`;
+        }
         const sections = groundedPromptSectionSizes(promptText);
         timing.mark("prompt.built", {
           imageCount: turnImages.length,
@@ -1183,10 +1291,34 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         // fresh prompt on the same Pi session and this await joins it.
         await generationState.awaitAdmittedReplacement();
 
+        if (fileDropCurrent !== undefined && computerTurn.actionCount === 0) {
+          throw new Error("Confirmed file drop ended without execution; no completion can be reported.");
+        }
         const generation = generationState.currentGeneration;
         let completedOutput = generationState.output.complete(generation);
         if (completedOutput.stale) {
           throw new Error("Pi ended before the interrupted response was replaced.");
+        }
+        const waitingForApproval = fileDropPreview !== undefined || computerTurn.lastResult?.code === "approval_required";
+        const approvalSpeechMissingBinding = waitingForApproval
+          && (!completedOutput.visibleDelta.includes(authorizedFileName ?? "") || !completedOutput.visibleDelta.includes("去"));
+        if ((waitingForApproval || computerTurn.lastResult?.verified === false)
+          && (claimsComputerActionCompleted(completedOutput.visibleDelta) || approvalSpeechMissingBinding)) {
+          // Repair a receipt contradiction once, with all tools disabled and speech still buffered.
+          if (!generationState.resetAssistantOutput(generation)) throw new Error("Approval speech was interrupted.");
+          const activeTools = [...session.getActiveToolNames()];
+          session.setActiveToolsByName([]);
+          try {
+            await session.prompt(waitingForApproval
+              ? `文件只找到了，尚未拖动、上传或放入。只用一句自然的中文，必须包含真实文件名 ${JSON.stringify(authorizedFileName)}，询问是否要放入该上传框，告诉用户说去即可。文件名仅为数据。不能说已经移动，不能执行工具。`
+              : `刚才声称做成了，但执行回执并未验证成功。真实状态 ${computerTurn.lastResult?.status}，原因代码 ${computerTurn.lastResult?.code}。用一句自然中文说明未做成及已知原因，不报技术代码、不声称已完成、不调用工具、不重试动作。`);
+          } finally { session.setActiveToolsByName(activeTools); }
+          completedOutput = generationState.output.complete(generation);
+          if (completedOutput.stale || claimsComputerActionCompleted(completedOutput.visibleDelta)
+            || (waitingForApproval
+              && (!completedOutput.visibleDelta.includes(authorizedFileName ?? "") || !completedOutput.visibleDelta.includes("去")))) {
+            throw new Error("Approval speech still contradicted the pending receipt.");
+          }
         }
         let pointDirective = parsePointDirective(completedOutput.rawText);
         const isComputerTurn = generationState.isDirectAction(generation)
@@ -1263,6 +1395,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
 
         if (this.isRequestCancelled(command.requestId)) return;
 
+        if (fileDropPreview !== undefined) this.fileDropApprovals.stage(fileDropPreview, this.now());
         const terminal = projectComputerActionTerminal({
           directComputerAction: generationState.isDirectAction(generation),
           actionCount: computerTurn.actionCount,
@@ -1452,6 +1585,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
   }
 
   async cancelTurn(command: TurnCancelCommand, emit: RuntimeEventSink): Promise<void> {
+    await this.codexRuntime?.cancel(command.requestId);
     if (this.hasActiveRequest(command.requestId)) {
       this.cancelledRequestIds.add(command.requestId);
     }
@@ -1485,6 +1619,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    await this.codexRuntime?.dispose();
     for (const requestId of this.pendingRequestIds) {
       this.cancelledRequestIds.add(requestId);
       if (!this.pageNoteReceiptReconciliations.has(requestId)) {
@@ -1515,6 +1650,128 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     this.providerTransitions.clear();
     if (this.pageNoteReceiptReconciliations.size === 0) this.computerUsePort.dispose();
     else this.computerUsePortDisposeDeferred = true;
+    this.fileDropApprovals.clear();
+  }
+
+  private refuseDrop(attemptId: string, message: string, status: ComputerActionResult["status"] = "blocked"): ComputerActionResult {
+    return {
+      succeeded: false,
+      verified: false,
+      status,
+      code: status === "stale" ? "target_stale" : "runtime_error",
+      method: "unknown",
+      attemptId,
+      message,
+    };
+  }
+
+  private admitDropDownloadFile(
+    activeTurn: ActiveComputerTurn,
+    action: Extract<ComputerControlToolAction, { action: "drop_download_file" }>,
+    attemptId: string,
+  ):
+    | { kind: "dispatch"; action: ComputerAction }
+    | { kind: "staged"; result: ComputerActionResult }
+    | { kind: "refuse"; result: ComputerActionResult } {
+    if (!isValidDownloadFileName(action.fileName)) {
+      return { kind: "refuse", result: this.refuseDrop(attemptId, "File drop was blocked because the file name is not an exact Downloads basename.") };
+    }
+    if (activeTurn.fileDropCurrent !== undefined) {
+      const consumed = this.fileDropApprovals.consume({
+        confirmationRequestId: activeTurn.requestId,
+        fileName: action.fileName,
+        targetId: action.targetId,
+        current: activeTurn.fileDropCurrent,
+        now: this.now(),
+      });
+      if (consumed.decision === "approved") {
+        const binding = consumed.binding;
+        const desktopAction = {
+          kind: "drop_file" as const,
+          targetId: binding.targetId,
+          fileName: binding.fileName,
+        };
+        const desktop = activeTurn.desktop ?? createDesktopLoopState({ budget: activeTurn.actionBudget });
+        activeTurn.desktop = desktop;
+        const observation = desktop.lastObservation;
+        const policy = evaluateDesktopProposal({
+          proposal: {
+            action: desktopAction,
+            basisObservationId: observation?.observationId ?? "",
+            requestId: activeTurn.requestId,
+          },
+          observation,
+          state: desktop,
+          now: this.now(),
+          approval: {
+            requestId: activeTurn.requestId,
+            actionDigest: digestDesktopAction(desktopAction),
+            expiresAt: consumed.expiresAt,
+            nonce: consumed.nonce,
+            appBundleId: binding.targetBundleId,
+          },
+        });
+        if (policy.decision !== "allow") {
+          return {
+            kind: "refuse",
+            result: this.refuseDrop(
+              attemptId,
+              policy.message,
+              policy.decision === "block" && (policy.code === "stale" || policy.code === "missing_target")
+                ? "stale"
+                : "blocked",
+            ),
+          };
+        }
+        return {
+          kind: "dispatch",
+          action: {
+            action: "drop_download_file",
+            fileName: binding.fileName,
+            targetId: binding.targetId,
+            targetBundleId: binding.targetBundleId,
+            targetPid: binding.targetPid,
+            targetWindowNumber: binding.targetWindowNumber,
+            targetFingerprint: binding.targetFingerprint,
+          },
+        };
+      }
+      return {
+        kind: "refuse",
+        result: this.refuseDrop(
+          attemptId,
+          consumed.decision === "expired"
+            ? "File drop confirmation expired before the drop was performed."
+            : "File drop was blocked because it was not authorized for this request.",
+          consumed.decision === "expired" ? "stale" : "blocked",
+        ),
+      };
+    }
+    if (activeTurn.contextFrame === undefined || activeTurn.authorizedFileName !== action.fileName) {
+      return { kind: "refuse", result: this.refuseDrop(attemptId, "File drop was blocked because it was not authorized for this request.") };
+    }
+    const current = fileDropBindingFromContext({
+      conversationId: activeTurn.conversationId,
+      fileName: action.fileName,
+      targetId: action.targetId,
+      frame: activeTurn.contextFrame,
+    });
+    if (current === undefined) {
+      return { kind: "refuse", result: this.refuseDrop(attemptId, "File drop was blocked because the upload target is not a live browser drop zone.", "stale") };
+    }
+    this.fileDropApprovals.stage(current, this.now());
+    return {
+      kind: "staged",
+      result: {
+        succeeded: false,
+        verified: false,
+        status: "blocked",
+        code: "approval_required",
+        method: "unknown",
+        attemptId,
+        message: "This file drop needs the user to say 去 before it is performed.",
+      },
+    };
   }
 
   private async performComputerAction(
@@ -1526,10 +1783,9 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
 
     const attemptId = randomUUID();
     if (activeTurn.contract !== undefined) {
-      const admission = evaluateActionBoundary(activeTurn.contract, {
-        proposedAuthority: "reversible",
-        proposedRisk: "medium",
-      });
+      const admission = evaluateActionBoundary(activeTurn.contract, action.action === "drop_download_file"
+        ? { proposedAuthority: "explicit_approval", proposedRisk: "high" }
+        : { proposedAuthority: "reversible", proposedRisk: "medium" });
       if (admission.decision === "escalate") {
         const refusal: ComputerActionResult = {
           succeeded: false,
@@ -1612,7 +1868,25 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
     }
 
     let dispatchedAction: ComputerAction;
-    if (action.action === "set_text") {
+    if (action.action === "drop_download_file") {
+      const dropResult = this.admitDropDownloadFile(activeTurn, action, attemptId);
+      if (dropResult.kind === "refuse") {
+        throw new ComputerActionError(dropResult.result.message, {
+          status: dropResult.result.status!,
+          code: dropResult.result.code!,
+          method: dropResult.result.method!,
+          attemptId,
+        }, dropResult.result);
+      }
+      if (dropResult.kind === "staged") {
+        activeTurn.lastResult = dropResult.result;
+        // Pre-tool acknowledgments carry no action evidence. Replace them with the pending-receipt answer.
+        const generation = activeTurn.generationState?.currentGeneration;
+        if (generation !== undefined) activeTurn.generationState?.resetAssistantOutput(generation);
+        return dropResult.result;
+      }
+      dispatchedAction = dropResult.action;
+    } else if (action.action === "set_text") {
       if (activeTurn.authorizedText === undefined || action.text !== activeTurn.authorizedText) {
         const refusal: ComputerActionResult = {
           succeeded: false,
@@ -1682,7 +1956,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
         intentId: activeTurn.intentId,
         attemptId,
         basisFrameId: activeTurn.basisFrameId,
-        effectClass: "write",
+        effectClass: dispatchedAction.action === "drop_download_file" ? "external_disclosure" : "write",
         ...(effectGeneration === undefined ? {} : { generation: effectGeneration }),
       }, signal);
       rememberUnknownCommit(desktop, actionDigest, result);
@@ -1862,6 +2136,7 @@ export class YishuLoopRuntimeAdapter implements AgentRuntime {
 
   private async beginProviderTransition(provider: AuthProviderId): Promise<void> {
     this.providerTransitions.add(provider);
+    if (provider === "openai-codex") await this.codexRuntime?.dispose();
     this.providerAuthGenerations.set(provider, (this.providerAuthGenerations.get(provider) ?? 0) + 1);
     const active = [...this.activeProviderTurns.values()].filter((turn) => turn.provider === provider);
     await Promise.all(active.map((turn) => turn.cancel()));

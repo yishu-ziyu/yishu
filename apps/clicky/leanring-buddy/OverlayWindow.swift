@@ -50,6 +50,13 @@ class OverlayWindow: NSWindow {
     override var canBecomeMain: Bool {
         return false
     }
+
+    static func displayedDraggingSourceView() -> NSView? {
+        NSApp.windows
+            .compactMap { $0 as? OverlayWindow }
+            .first { $0.isVisible && $0.contentView != nil }
+            .flatMap(\.contentView)
+    }
 }
 
 // PreferenceKey for tracking bubble size

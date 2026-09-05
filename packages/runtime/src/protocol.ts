@@ -111,6 +111,29 @@ const setTextComputerActionSchema = z.object({
 });
 
 /**
+ * A user-confirmed local-file disclosure. The model supplies only fileName and
+ * targetId; the runtime binds the current browser/window/AX identity before
+ * this wire action is emitted.
+ */
+const dropDownloadFileComputerActionSchema = z.object({
+  action: z.literal("drop_download_file"),
+  fileName: z.string().min(1).max(255).refine(
+    (value) => value === value.trim()
+      && value !== "."
+      && value !== ".."
+      && !/[\\/\u0000-\u001f\u007f]/u.test(value)
+      && value.lastIndexOf(".") > 0
+      && value.lastIndexOf(".") < value.length - 1,
+    { message: "fileName must be one exact basename with an extension" },
+  ),
+  targetId: numberedTargetIdSchema,
+  targetBundleId: z.string().trim().min(1).max(255),
+  targetPid: z.number().int().positive(),
+  targetWindowNumber: z.number().int().positive(),
+  targetFingerprint: z.string().min(1).max(500),
+}).strict();
+
+/**
  * A product-owned, create-only Notes action. Content is carried only to the
  * trusted macOS actuator; it must never be copied into audit summaries.
  */
@@ -168,6 +191,7 @@ export const computerActionSchema = z.discriminatedUnion("action", [
   leftClickComputerActionSchema,
   finderHistoryBackComputerActionSchema,
   setTextComputerActionSchema,
+  dropDownloadFileComputerActionSchema,
   createNoteComputerActionSchema,
   scheduleReminderComputerActionSchema,
   openDestinationComputerActionSchema,
@@ -196,6 +220,7 @@ export const COMPUTER_ACTION_METHODS = [
   "quartz",
   "native_command",
   "shortcut",
+  "appkit_drag",
   "unknown",
 ] as const;
 export const computerActionMethodSchema = z.enum(COMPUTER_ACTION_METHODS);
@@ -222,6 +247,13 @@ export const COMPUTER_ACTION_RESULT_CODES = [
   "ax_set_value_unverified",
   "frontmost_mismatch",
   "target_stale",
+  "approval_required",
+  "file_not_found",
+  "file_ambiguous",
+  "file_unreadable",
+  "file_outside_downloads",
+  "drag_session_failed",
+  "drop_unverified",
   "quartz_event_creation_failed",
   "quartz_unverified",
   "verified_accessibility",
@@ -256,6 +288,7 @@ export const computerActionRequestedPayloadSchema = z.discriminatedUnion("action
   leftClickComputerActionSchema.extend(computerActionRequestMetadata),
   finderHistoryBackComputerActionSchema.extend(computerActionRequestMetadata),
   setTextComputerActionSchema.extend(computerActionRequestMetadata),
+  dropDownloadFileComputerActionSchema.extend(computerActionRequestMetadata),
   createNoteComputerActionSchema.extend(computerActionRequestMetadata),
   scheduleReminderComputerActionSchema.extend(computerActionRequestMetadata),
   openDestinationComputerActionSchema.extend(computerActionRequestMetadata),
@@ -343,6 +376,12 @@ export const numberedAccessibilityTargetSchema = z.object({
   title: z.string().nullable(),
   description: z.string().nullable(),
   enabled: z.boolean().nullable().optional(),
+  frame: z.object({
+    x: z.number().finite(),
+    y: z.number().finite(),
+    width: z.number().finite().nonnegative(),
+    height: z.number().finite().nonnegative(),
+  }).nullable().optional(),
 });
 
 export const screenshotSchema = z.object({
@@ -367,6 +406,15 @@ export const screenshotSchema = z.object({
   { message: "display origin requires both x and y" },
 );
 
+export const downloadsObservationSchema = z.object({
+  status: z.enum(["available", "permission_denied", "unavailable"]),
+  capturedAt: z.string().datetime(),
+  candidates: z.array(z.string().min(1).max(255).refine((name) =>
+    !/[\\/\u0000-\u001f\u007f]/u.test(name) && !name.includes(".."))).max(20),
+  truncated: z.boolean(),
+}).refine((observation) => new Set(observation.candidates).size === observation.candidates.length
+  && (observation.status === "available" || observation.candidates.length === 0));
+
 export const contextFrameSchema = z.object({
   schemaVersion: z.literal(PROTOCOL_VERSION),
   frameId: z.string().uuid(),
@@ -379,6 +427,7 @@ export const contextFrameSchema = z.object({
   elementUnderCursor: observedValueSchema(accessibilityElementSchema).nullable(),
   screenshots: z.array(screenshotSchema).max(4),
   numberedTargets: z.array(numberedAccessibilityTargetSchema).max(50).optional(),
+  downloadFiles: downloadsObservationSchema.optional(),
   warnings: z.array(z.string()),
 });
 
@@ -891,8 +940,17 @@ export const automationDeleteCommandSchema = z.object({
   }).strict(),
 });
 
+export const codexApprovalReplySchema = z.object({
+  schemaVersion: z.literal(PROTOCOL_VERSION),
+  type: z.literal("codex.approval.reply"),
+  requestId: z.string().uuid(), traceId: z.string().uuid(), sentAt: z.string().datetime(),
+  payload: z.object({ approvalId: z.string().uuid(), accept: z.boolean() }).strict(),
+});
+export type CodexApprovalReplyCommand = z.infer<typeof codexApprovalReplySchema>;
+
 export const clientCommandSchema = z.discriminatedUnion("type", [
   turnStartCommandSchema,
+  codexApprovalReplySchema,
   turnInterruptCommandSchema,
   turnSteerCommandSchema,
   turnCancelCommandSchema,
@@ -993,6 +1051,7 @@ export type RuntimeEventType =
   | "tool.started"
   | "tool.completed"
   | "computer.action.requested"
+  | "codex.approval.requested"
   | "response.completed"
   | "turn.cancelled"
   | "turn.failed"

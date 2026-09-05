@@ -78,6 +78,30 @@ test("menu selection requires a bound approval token", () => {
   assert.equal(decision.decision, "approval_required");
 });
 
+test("dropping a local file is high risk and requires a bound approval token", () => {
+  const state = createDesktopLoopState({ budget: 1 });
+  const action = { kind: "drop_file" as const, targetId: "1", fileName: "奕枢测试文件.txt" };
+  const proposal = { action, basisObservationId: "obs-1", requestId: "r1" };
+  assert.equal(evaluateDesktopProposal({
+    proposal,
+    observation: observation(),
+    state,
+    now: new Date("2026-08-27T00:00:00.000Z"),
+  }).decision, "approval_required");
+  assert.equal(evaluateDesktopProposal({
+    proposal,
+    observation: observation(),
+    state,
+    now: new Date("2026-08-27T00:00:00.000Z"),
+    approval: {
+      requestId: "r1",
+      actionDigest: JSON.stringify(action),
+      expiresAt: "2026-08-27T00:01:00.000Z",
+      nonce: "one-shot",
+    },
+  }).decision, "allow");
+});
+
 test("multi-step look/click/type/submit utterances are not actionBudget 0", () => {
   assert.equal(isDesktopWorkUtterance("先点击 A，再点击 B"), true);
   assert.equal(isDesktopWorkUtterance("look / click / type / submit"), true);

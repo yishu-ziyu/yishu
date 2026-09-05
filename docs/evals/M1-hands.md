@@ -1,9 +1,9 @@
 # M1 通用操控：验收卡
 
-- 日期：草稿 2026-09-04；开工时改成当天日期并转 active
-- 状态：draft
+- 日期：2026-09-04
+- 状态：active（第一条纵向闭环：`docs/evals/20260904-m1-file-upload-drag.md`）
 - 上下文：`docs/ROADMAP.md` M1；`docs/ARCHITECTURE.md` 接缝表第一行；内核页 A、F
-- 前置：M0 已过（先应答规则、光球画法 `OverlayMarks.swift`、埋点）
+- 前置：M0 已获用户阶段验收；未达语音指标保留为质量债，不阻塞 M1
 
 ## 一句话任务
 
@@ -48,7 +48,7 @@
 ## 非目标
 
 - 浏览器 DOM 级操控（现有 Stagehand 路径不动）。
-- 操作用户真实 Chrome 的专门优化。
+- 用户眼前浏览器的文件拖放走桌面动作；不接 Stagehand 或 agent 自有浏览器。
 - 多显示器以外屏的 OCR。
 - MCP 暴露（M3）。
 

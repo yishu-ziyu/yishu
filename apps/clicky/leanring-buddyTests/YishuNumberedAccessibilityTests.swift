@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import Testing
 import YishuContext
 @testable import Clicky
@@ -54,6 +55,21 @@ struct YishuNumberedAccessibilityTests {
         )
         #expect(YishuNumberedAccessibility.isStale(expected: expected, live: live))
         #expect(!YishuNumberedAccessibility.isStale(expected: expected, live: expected))
+    }
+
+    @Test func fingerprintMatchesTheRuntimeFrameEncoding() {
+        let target = NumberedAccessibilityTarget(
+            id: "1",
+            role: "AXGroup",
+            title: "上传文件",
+            description: "拖放到这里",
+            enabled: true,
+            frame: CGRect(x: 100, y: 200, width: 240, height: 80)
+        )
+        #expect(
+            YishuNumberedAccessibility.fingerprint(target)
+                == ["AXGroup", "上传文件", "拖放到这里", "200,400,480,160"].joined(separator: "\u{1e}")
+        )
     }
 
     @Test func numberedClickFailsHonestlyWhenSceneHasNoTargets() async {

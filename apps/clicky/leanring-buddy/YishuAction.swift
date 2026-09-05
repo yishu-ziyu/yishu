@@ -9,6 +9,8 @@ enum YishuActionStatus: String, Codable, Equatable, Sendable {
     case delivered
     case unverified
     case blocked
+    case stale
+    case cancelled
     case failed
 }
 
@@ -18,6 +20,7 @@ enum YishuActionMethod: String, Codable, Equatable, Sendable {
     case quartz
     case nativeCommand = "native_command"
     case shortcut
+    case appkitDrag = "appkit_drag"
     case unknown
 }
 
@@ -36,6 +39,13 @@ enum YishuActionCode: String, Codable, Equatable, Sendable {
     case axSetValueUnverified = "ax_set_value_unverified"
     case frontmostMismatch = "frontmost_mismatch"
     case targetStale = "target_stale"
+    case approvalRequired = "approval_required"
+    case fileNotFound = "file_not_found"
+    case fileAmbiguous = "file_ambiguous"
+    case fileUnreadable = "file_unreadable"
+    case fileOutsideDownloads = "file_outside_downloads"
+    case dragSessionFailed = "drag_session_failed"
+    case dropUnverified = "drop_unverified"
     case quartzEventCreationFailed = "quartz_event_creation_failed"
     case quartzUnverified = "quartz_unverified"
     case verifiedAccessibility = "verified_accessibility"
@@ -79,7 +89,9 @@ enum YishuActionPolicy {
              .axPressUnknown, .axPressUnverified,
              .focusedElementUnavailable, .secureTextBlocked,
              .axSetValueUnsupported, .axSetValueFailed, .axSetValueUnverified,
-             .frontmostMismatch, .targetStale, .quartzEventCreationFailed,
+             .frontmostMismatch, .targetStale, .approvalRequired,
+             .fileNotFound, .fileAmbiguous, .fileUnreadable, .fileOutsideDownloads,
+             .dragSessionFailed, .dropUnverified, .quartzEventCreationFailed,
              .quartzUnverified, .verifiedAccessibility, .verifiedScreen,
              .actionLimitReached, .runtimeError, .cancelled, .timeout,
              .notificationPermissionPending, .notificationPermissionDenied,
@@ -108,6 +120,7 @@ struct YishuComputerActionRequest: Equatable, Sendable {
     let label: String?
     let targetId: String?
     let text: String?
+    let fileName: String?
     let title: String?
     let content: String?
     let sourceBundleId: String?
@@ -121,6 +134,8 @@ struct YishuComputerActionRequest: Equatable, Sendable {
     let destinationId: String?
     let targetBundleId: String?
     let targetPid: pid_t?
+    let targetWindowNumber: Int?
+    let targetFingerprint: String?
     let intentId: String?
     let attemptId: String?
     let basisFrameId: String?
@@ -137,6 +152,7 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         label: String? = nil,
         targetId: String? = nil,
         text: String? = nil,
+        fileName: String? = nil,
         title: String? = nil,
         content: String? = nil,
         sourceBundleId: String? = nil,
@@ -150,6 +166,8 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         destinationId: String? = nil,
         targetBundleId: String? = nil,
         targetPid: pid_t? = nil,
+        targetWindowNumber: Int? = nil,
+        targetFingerprint: String? = nil,
         intentId: String? = nil,
         attemptId: String? = nil,
         basisFrameId: String? = nil,
@@ -165,6 +183,7 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         self.label = label
         self.targetId = targetId
         self.text = text
+        self.fileName = fileName
         self.title = title
         self.content = content
         self.sourceBundleId = sourceBundleId
@@ -178,6 +197,8 @@ struct YishuComputerActionRequest: Equatable, Sendable {
         self.destinationId = destinationId
         self.targetBundleId = targetBundleId
         self.targetPid = targetPid
+        self.targetWindowNumber = targetWindowNumber
+        self.targetFingerprint = targetFingerprint
         self.intentId = intentId
         self.attemptId = attemptId
         self.basisFrameId = basisFrameId

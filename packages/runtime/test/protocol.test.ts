@@ -56,6 +56,44 @@ test("turn command validates as the shared protocol", () => {
   assert.equal(clientCommandSchema.parse(command).type, "turn.start");
 });
 
+test("turn command preserves numbered target frames for target-bound approvals", () => {
+  const command = makeTurnStartCommand();
+  command.payload.contextFrame.numberedTargets = [{
+    id: "3",
+    role: "AXGroup",
+    title: "上传文件",
+    description: "拖放到这里",
+    enabled: true,
+    frame: { x: 100, y: 200, width: 240, height: 80 },
+  } as never];
+  const parsed = clientCommandSchema.parse(command);
+  assert.equal(parsed.type, "turn.start");
+  if (parsed.type !== "turn.start") return;
+  assert.deepEqual(
+    (parsed.payload.contextFrame.numberedTargets?.[0] as unknown as Record<string, unknown>).frame,
+    { x: 100, y: 200, width: 240, height: 80 },
+  );
+});
+
+test("Downloads evidence survives v1 wire and supplies semantic targets even without screenshots", () => {
+  const command = makeTurnStartCommand();
+  command.payload.utterance = "把下载里的会义记录上传";
+  command.payload.contextFrame.screenshots = [];
+  command.payload.contextFrame.downloadFiles = { status: "available", capturedAt: command.sentAt, candidates: ["会议记录.md"], truncated: false };
+  command.payload.contextFrame.numberedTargets = [{ id: "3", role: "AXGroup", title: "上传文件", description: "拖放到这里" }];
+  const parsed = clientCommandSchema.parse(command);
+  assert.equal(parsed.type, "turn.start");
+  if (parsed.type !== "turn.start") return;
+  assert.deepEqual(parsed.payload.contextFrame.downloadFiles, command.payload.contextFrame.downloadFiles);
+  const prompt = buildGroundedPrompt(parsed);
+  assert.match(prompt, /会议记录\.md/);
+  assert.match(prompt, /independent of folder workspace grants/);
+  assert.match(prompt, /上传文件/);
+  assert.match(prompt, /numbered_targets/);
+  command.payload.contextFrame.downloadFiles.candidates = [];
+  assert.match(buildGroundedPrompt(command), /zero means no match, NOT permission denied/);
+});
+
 test("models.probe is a client command", () => {
   const command = {
     schemaVersion: 1,
@@ -735,6 +773,25 @@ test("left_click accepts numbered target ids without pixels", () => {
   assert.equal(parsed.x, undefined);
   assert.throws(() => computerActionSchema.parse({ action: "left_click" }));
   assert.throws(() => computerActionSchema.parse({ action: "left_click", x: 10 }));
+});
+
+test("drop_download_file carries only runtime-bound target identity and an exact basename", () => {
+  const action = {
+    action: "drop_download_file",
+    fileName: "奕枢测试文件.txt",
+    targetId: "3",
+    targetBundleId: "com.apple.Safari",
+    targetPid: 321,
+    targetWindowNumber: 17,
+    targetFingerprint: ["AXGroup", "上传文件", "拖放到这里", "200,400,480,160"].join("\u001e"),
+  } as const;
+  assert.deepEqual(computerActionSchema.parse(action), action);
+
+  for (const fileName of ["../secret.txt", "folder/secret.txt", "folder\\secret.txt", ".", "..", "no-extension", "bad\u0000.txt"]) {
+    assert.throws(() => computerActionSchema.parse({ ...action, fileName }));
+  }
+  assert.throws(() => computerActionSchema.parse({ ...action, path: "/Users/me/Downloads/奕枢测试文件.txt" }));
+  assert.throws(() => computerActionSchema.parse({ ...action, targetId: "0" }));
 });
 
 test("open_destination accepts only the product-owned Gmail destination", () => {

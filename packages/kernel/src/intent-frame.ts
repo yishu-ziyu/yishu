@@ -180,7 +180,10 @@ export function deriveTurnIntentFrame(
     );
   }
 
+  const downloadFileDrop = speechAct === "command"
+    && isExplicitDownloadFileDropCommand(utterance);
   const external = options.currentPageNote === true
+    || downloadFileDrop
     || (speechAct === "command" && isExplicitExternalCommand(utterance));
   return resolveTurnIntentCandidate(
     {
@@ -190,7 +193,9 @@ export function deriveTurnIntentFrame(
       route: { kind: "model" },
       source: "deterministic",
     },
-    options.currentPageNote === true
+    downloadFileDrop
+      ? { authority: "explicit_approval", risk: "high" }
+      : options.currentPageNote === true
       ? { authority: "explicit_approval", risk: "medium" }
       : {},
   );
@@ -248,13 +253,19 @@ function classifySpeechAct(utterance: string): IntentSpeechAct {
     return "question";
   }
   if (HISTORICAL_STATEMENT.test(text)) return "statement";
-  if (isExplicitExternalCommand(text)) return "command";
+  if (isExplicitDownloadFileDropCommand(text) || isExplicitExternalCommand(text)) return "command";
   return "statement";
 }
 
 function isExplicitExternalCommand(utterance: string): boolean {
   const text = utterance.trim();
   return DIRECT_EXTERNAL_COMMAND.test(text) || OBJECT_EXTERNAL_COMMAND.test(text);
+}
+
+function isExplicitDownloadFileDropCommand(utterance: string): boolean {
+  const text = utterance.trim();
+  return /(?:下载(?:文件夹|目录|里|中的)?|downloads?)/iu.test(text)
+    && /(?:拖(?:到|进|入|放)|放到|上传)/u.test(text);
 }
 
 function normalizeObjective(value: string): string {

@@ -45,6 +45,7 @@ export function desktopRisk(action: DesktopAction): "low" | "medium" | "high" {
     case "paste":
       return "medium";
     case "select_menu_item":
+    case "drop_file":
       return "high";
   }
 }

@@ -351,6 +351,7 @@ final class YishuAgentRuntimeClient {
     private var activeTurnTraceIds: [UUID: UUID] = [:]
     private var turnProjectionReducers: [UUID: YishuTurnProjectionReducer] = [:]
     private var seenTurnEventIds: [UUID: Set<UUID>] = [:]
+    private var codexApprovalPresenters: [UUID: YishuCodexApprovalPresenter] = [:]
     private var turnWatchdogTasks: [UUID: Task<Void, Never>] = [:]
     /// Per-turn dead-air fence: any accepted runtime event proves progress and
     /// re-arms this. A silently broken provider stream (no terminal event, no
@@ -1986,6 +1987,11 @@ final class YishuAgentRuntimeClient {
         let traceId = (raw["traceId"] as? String).flatMap(UUID.init(uuidString:))
         let payload = raw["payload"] as? [String: Any] ?? [:]
         if Self.recordRuntimeTimingIfPresent(type: type, payload: payload) {
+            if type == "runtime.status", payload["status"] as? String == "codex_running",
+               let requestId, let traceId, activeTurnTraceIds[requestId] == traceId,
+               Self.turnGeneration(payload["generation"]) == turnProjectionReducers[requestId]?.currentGeneration {
+                armTurnStallWatchdog(requestId: requestId)
+            }
             return
         }
 
@@ -2321,6 +2327,21 @@ final class YishuAgentRuntimeClient {
                 isError: payload["isError"] as? Bool ?? false,
                 generation: generation
             ))
+        case "codex.approval.requested":
+            guard let traceId, let approval = YishuCodexApproval.decode(payload),
+                  codexApprovalPresenters[requestId] == nil else { return }
+            let presenter = YishuCodexApprovalPresenter()
+            codexApprovalPresenters[requestId] = presenter
+            Task { @MainActor [weak self] in
+                guard let self, self.activeTurnTraceIds[requestId] == traceId else { return }
+                let accept = presenter.present(approval)
+                self.codexApprovalPresenters.removeValue(forKey: requestId)
+                guard self.activeTurnTraceIds[requestId] == traceId else { return }
+                try? self.send(YishuCodexApprovalReply(
+                    schemaVersion: yishuRuntimeProtocolVersion, requestId: requestId, traceId: traceId,
+                    payload: .init(approvalId: approval.approvalId, accept: accept)
+                ))
+            }
         case "computer.action.requested":
             guard let traceId else { return }
             if let request = Self.decodeComputerActionRequest(
@@ -2907,6 +2928,7 @@ final class YishuAgentRuntimeClient {
 
     private func finishTurn(_ requestId: UUID, throwing error: Error? = nil) {
         guard let continuation = turnContinuations.removeValue(forKey: requestId) else { return }
+        codexApprovalPresenters.removeValue(forKey: requestId)?.cancel()
         turnWatchdogTasks.removeValue(forKey: requestId)?.cancel()
         turnStallWatchdogTasks.removeValue(forKey: requestId)?.cancel()
         failTurnInterrupt(requestId, error: error ?? YishuAgentRuntimeClientError.turnInterruptUnavailable)
@@ -3106,6 +3128,49 @@ final class YishuAgentRuntimeClient {
                 basisFrameId: basisFrameId,
                 effectClass: common.effectClass
             )
+        case "drop_download_file":
+            let allowedKeys: Set<String> = [
+                "actionId", "action", "fileName", "targetId", "targetBundleId",
+                "targetPid", "targetWindowNumber", "targetFingerprint", "intentId",
+                "attemptId", "basisFrameId", "effectClass",
+            ]
+            guard Set(payload.keys).isSubset(of: allowedKeys),
+                  let fileName = validDownloadFileName(payload["fileName"]),
+                  let targetId = normalizedTargetId(payload["targetId"]),
+                  let targetBundleId = boundedProtocolString(payload["targetBundleId"], maximum: 255),
+                  targetBundleId == payload["targetBundleId"] as? String,
+                  let targetPid = positiveProcessIdentifier(payload["targetPid"]),
+                  let targetWindowNumber = positiveInt(payload["targetWindowNumber"]),
+                  let targetFingerprint = payload["targetFingerprint"] as? String,
+                  !targetFingerprint.isEmpty,
+                  targetFingerprint.count <= 500,
+                  let intentId = common.intentId,
+                  UUID(uuidString: intentId) != nil,
+                  let attemptId = common.attemptId,
+                  UUID(uuidString: attemptId) != nil,
+                  let basisFrameId = common.basisFrameId,
+                  UUID(uuidString: basisFrameId) != nil,
+                  common.effectClass == "external_disclosure" else {
+                return nil
+            }
+            return YishuComputerActionRequest(
+                requestId: requestId,
+                traceId: traceId,
+                actionId: actionId,
+                action: action,
+                x: 0,
+                y: 0,
+                targetId: targetId,
+                fileName: fileName,
+                targetBundleId: targetBundleId,
+                targetPid: targetPid,
+                targetWindowNumber: targetWindowNumber,
+                targetFingerprint: targetFingerprint,
+                intentId: intentId,
+                attemptId: attemptId,
+                basisFrameId: basisFrameId,
+                effectClass: "external_disclosure"
+            )
         case "create_note":
             guard doubleValue(payload["x"]) == 0,
                   doubleValue(payload["y"]) == 0,
@@ -3262,6 +3327,26 @@ final class YishuAgentRuntimeClient {
             return nil
         }
         return trimmed
+    }
+
+    static func validDownloadFileName(_ value: Any?) -> String? {
+        guard let value = value as? String,
+              value == value.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty,
+              value.count <= 255,
+              value != ".",
+              value != "..",
+              !value.contains("/"),
+              !value.contains("\\"),
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            return nil
+        }
+        guard let dot = value.lastIndex(of: "."),
+              dot != value.startIndex,
+              value.index(after: dot) != value.endIndex else {
+            return nil
+        }
+        return value
     }
 
     static func isValidOptionalEffectClassPayloadValue(_ value: Any?) -> Bool {
@@ -3500,6 +3585,7 @@ final class YishuAgentRuntimeClient {
 
     private static let supportedModelsByProvider: [String: Set<String>] = [
         YishuAuthProvider.openAICodex.rawValue: Set([
+            "gpt-6-astra",
             "gpt-5.3-codex-spark",
             "gpt-5.4",
             "gpt-5.4-mini",

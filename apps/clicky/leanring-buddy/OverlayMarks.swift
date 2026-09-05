@@ -44,6 +44,14 @@ enum OverlayCoordinateSpace {
         )
     }
 
+    static func appKitCenter(
+        ofQuartzFrame quartz: CGRect,
+        primaryDisplayHeight: CGFloat
+    ) -> CGPoint {
+        let appKit = appKitRect(fromQuartzTopLeft: quartz, primaryDisplayHeight: primaryDisplayHeight)
+        return CGPoint(x: appKit.midX, y: appKit.midY)
+    }
+
     static func overlayPoint(fromAppKit screenPoint: CGPoint, screenFrame: CGRect) -> CGPoint {
         CGPoint(
             x: screenPoint.x - screenFrame.origin.x,

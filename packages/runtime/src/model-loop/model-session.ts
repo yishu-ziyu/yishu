@@ -474,7 +474,7 @@ export class YishuModelSession implements ModelSession {
 
     const runSlot = async (slot: Slot): Promise<void> => {
       const { call } = slot;
-      const tool = this.tools.get(call.name);
+      const tool = this.activeToolNames.includes(call.name) ? this.tools.get(call.name) : undefined;
       this.toolCallCount += 1;
       slot.ran = true;
       this.emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name });

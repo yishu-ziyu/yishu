@@ -2940,6 +2940,12 @@ final class CompanionManager: ObservableObject {
         turnToken: UUID
     ) async throws -> YishuRuntimeVoiceResponse {
         guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
+        var contextFrame = contextFrame
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        contextFrame.downloadFiles = await Task.detached(priority: .userInitiated) {
+            downloads.flatMap { DownloadsObservation.capture(utterance: transcript, directory: $0) }
+        }.value
+        guard ownsVoiceTurn(turnToken) else { throw CancellationError() }
         try contextFrame.validate()
         if !yishuAgentRuntimeClient.isRunning {
             runtimeVisualPhase = .connecting
@@ -3107,6 +3113,7 @@ final class CompanionManager: ObservableObject {
                         reason: "pi_runtime",
                         sourceDimensions: Self.telemetryDimensions(for: screenCaptures)
                     )
+                    showFileDropTargetRingIfFresh(request)
                     let result = await YishuComputerUseActuator.perform(
                         request,
                         screenCaptures: screenCaptures,
@@ -3726,6 +3733,30 @@ final class CompanionManager: ObservableObject {
         return captures.first(where: { $0.isCursorScreen }) ?? captures.first
     }
 
+    private func showFileDropTargetRingIfFresh(_ request: YishuComputerActionRequest) {
+        guard request.action == "drop_download_file",
+              let targetId = request.targetId,
+              let targetPID = request.targetPid,
+              let expectedFingerprint = request.targetFingerprint,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else {
+            return
+        }
+        let snapshot = YishuNumberedAccessibility.snapshot(processIdentifier: targetPID)
+        guard let target = snapshot.targets.first(where: { $0.id == targetId }),
+              YishuNumberedAccessibility.fingerprint(target) == expectedFingerprint,
+              let frame = target.frame else {
+            return
+        }
+        let appKitCenter = OverlayCoordinateSpace.appKitCenter(
+            ofQuartzFrame: frame,
+            primaryDisplayHeight: OverlayCoordinateSpace.primaryDisplayHeight()
+        )
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(appKitCenter) }) else {
+            return
+        }
+        overlayWindowManager.showMark(.ring(frame), on: screen)
+    }
+
     private static func telemetryDimensions(
         for captures: [CompanionScreenCapture]
     ) -> String {
@@ -3920,6 +3951,13 @@ final class CompanionManager: ObservableObject {
                 "备忘录结果不确定，我不会重复创建。",
                 "这次没有新建备忘录。"
             )
+        case "drop_download_file":
+            wording = (
+                "文件已放进上传框。",
+                "文件已拖过去，但我还没确认附件出现。",
+                "拖放结果不确定，我没有重复操作。",
+                "这次没有把文件放进去。"
+            )
         default:
             wording = (
                 "点好了。",
@@ -3936,6 +3974,10 @@ final class CompanionManager: ObservableObject {
         case .unverified:
             return wording.unverified
         case .blocked:
+            return wording.failed
+        case .stale:
+            return wording.failed
+        case .cancelled:
             return wording.failed
         case .failed:
             return wording.failed
