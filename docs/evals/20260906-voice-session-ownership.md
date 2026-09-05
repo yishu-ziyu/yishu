@@ -37,7 +37,8 @@
 | 6 | 现有 barge-in 与 held-scene 行为测试不回退 | 机器：同次 `xcodebuild test` 加 `-only-testing:leanring-buddyTests/YishuBargeInTests -only-testing:leanring-buddyTests/YishuHeldScenePolicyTests` | TEST SUCCEEDED |
 | 7 | 听写状态机既有覆盖仍绿（不重复造内部测试） | 机器：`… -only-testing:leanring-buddyTests/leanring_buddyTests` | TEST SUCCEEDED；transcription reducer / dictation submit 条绿 |
 | 8 | `CompanionManager` 不再直接拥有键盘 PTT/听写生命周期状态 | 机器：`rg -n "pendingVoiceTurnOrigin|pendingKeyboardShortcutStartTask|handleShortcutTransition|startPushToTalkFromKeyboardShortcut|consumeVoiceTurnOrigin" apps/clicky/leanring-buddy/CompanionManager.swift` 无命中 | 无命中 |
-| 9 | 产品能编译；CompanionManager 行数棘轮不升 | 机器：`pnpm product:build:clicky`；`node script/check-file-size-limit.cjs` | build 退出 0；CompanionManager 4453/4609（原 4507） |
+| 8b | `CompanionManager` 只观察会话控制器投影，不碰 `BuddyDictationManager` | 机器：`rg -n "BuddyDictationManager|dictationManager" apps/clicky/leanring-buddy/CompanionManager.swift` 无命中；`YishuVoiceSessionControllerTests` 的 capturePhase 条绿 | CompanionManager 无命中；`capturePhaseProjectionMatchesFormerDictationFlagPriority` / `capturePhaseTracksHeldRecordingFinalizingAndIdle` / `capturePhaseReturnsIdleOnQuickReleaseBeforeStartSettles` 绿 |
+| 9 | 产品能编译；CompanionManager 行数棘轮不升 | 机器：`node script/check-file-size-limit.cjs` | CompanionManager 4446/4609（审阅前 4453，原 4507）；棘轮未抬 |
 | 10 | 插话停声、按住采场景、没听清 仍由 CompanionManager 接线 | 人评：对照 PR「Intentionally unchanged」；本轮不装真机 | |
 
 ## 非目标

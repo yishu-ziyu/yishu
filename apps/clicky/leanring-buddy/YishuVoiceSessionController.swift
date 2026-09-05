@@ -13,6 +13,28 @@ enum YishuVoiceCaptureFailureReason: Equatable, Sendable {
     case emptyOrNearSilence
 }
 
+/// Read-only capture activity for product voiceState mapping.
+/// Priority matches the former dictation-flag observation:
+/// finalizing > recording > (preparing || key held) > idle.
+enum YishuVoiceCapturePhase: Equatable, Sendable {
+    case idle
+    case holding
+    case recording
+    case finalizing
+
+    static func projected(
+        isFinalizing: Bool,
+        isRecording: Bool,
+        isPreparing: Bool,
+        isKeyHeld: Bool
+    ) -> YishuVoiceCapturePhase {
+        if isFinalizing { return .finalizing }
+        if isRecording { return .recording }
+        if isPreparing || isKeyHeld { return .holding }
+        return .idle
+    }
+}
+
 /// Typed capture-boundary events. Product layers react; this type does not
 /// own runtime turns, TTS, overlays, or screen capture.
 enum YishuVoiceSessionEvent: Equatable {
@@ -27,6 +49,9 @@ enum YishuVoiceSessionEvent: Equatable {
 @MainActor
 protocol YishuKeyboardDictationControlling: AnyObject {
     var isDictationInProgress: Bool { get }
+    var isPreparingToRecord: Bool { get }
+    var isRecordingFromKeyboardShortcut: Bool { get }
+    var isFinalizingTranscript: Bool { get }
     func startPushToTalkFromKeyboardShortcut(
         currentDraftText: String,
         updateDraftText: @escaping (String) -> Void,
@@ -46,15 +71,18 @@ protocol YishuPushToTalkShortcutMonitoring: AnyObject {
 }
 
 extension BuddyDictationManager: YishuKeyboardDictationControlling {}
+
 extension GlobalPushToTalkShortcutMonitor: YishuPushToTalkShortcutMonitoring {}
 
 /// Owns keyboard PTT + dictation session lifecycle. CompanionManager consumes
-/// `YishuVoiceSessionEvent` and keeps runtime / presentation / barge-in.
+/// `YishuVoiceSessionEvent` and `capturePhase`; it does not see the dictation
+/// manager.
 @MainActor
 final class YishuVoiceSessionController: ObservableObject {
-    let dictationManager: BuddyDictationManager?
-
-    @Published private(set) var isKeyHeld = false
+    @Published private(set) var isKeyHeld = false {
+        didSet { refreshCapturePhase() }
+    }
+    @Published private(set) var capturePhase: YishuVoiceCapturePhase = .idle
 
     var shouldBegin: () -> Bool
     var onEvent: (YishuVoiceSessionEvent) -> Void
@@ -72,24 +100,11 @@ final class YishuVoiceSessionController: ObservableObject {
         onEvent: @escaping (YishuVoiceSessionEvent) -> Void = { _ in }
     ) {
         self.init(
-            dictationManager: BuddyDictationManager(),
+            dictation: BuddyDictationManager(),
             monitor: GlobalPushToTalkShortcutMonitor(),
             shouldBegin: shouldBegin,
             onEvent: onEvent
         )
-    }
-
-    init(
-        dictationManager: BuddyDictationManager,
-        monitor: GlobalPushToTalkShortcutMonitor,
-        shouldBegin: @escaping () -> Bool = { true },
-        onEvent: @escaping (YishuVoiceSessionEvent) -> Void = { _ in }
-    ) {
-        self.dictationManager = dictationManager
-        self.dictation = dictationManager
-        self.monitor = monitor
-        self.shouldBegin = shouldBegin
-        self.onEvent = onEvent
     }
 
     init(
@@ -98,11 +113,11 @@ final class YishuVoiceSessionController: ObservableObject {
         shouldBegin: @escaping () -> Bool = { true },
         onEvent: @escaping (YishuVoiceSessionEvent) -> Void = { _ in }
     ) {
-        self.dictationManager = dictation as? BuddyDictationManager
         self.dictation = dictation
         self.monitor = monitor
         self.shouldBegin = shouldBegin
         self.onEvent = onEvent
+        refreshCapturePhase()
     }
 
     func start() {
@@ -138,6 +153,7 @@ final class YishuVoiceSessionController: ObservableObject {
         sessionGeneration &+= 1
         let traceID = pendingOrigin?.traceID
         pendingOrigin = nil
+        refreshCapturePhase()
         if let traceID {
             onEvent(.cancelled(traceID: traceID))
         }
@@ -151,6 +167,18 @@ final class YishuVoiceSessionController: ObservableObject {
             releaseCapture()
         case .none:
             break
+        }
+    }
+
+    private func refreshCapturePhase() {
+        let next = YishuVoiceCapturePhase.projected(
+            isFinalizing: dictation.isFinalizingTranscript,
+            isRecording: dictation.isRecordingFromKeyboardShortcut,
+            isPreparing: dictation.isPreparingToRecord,
+            isKeyHeld: isKeyHeld
+        )
+        if capturePhase != next {
+            capturePhase = next
         }
     }
 
@@ -185,6 +213,7 @@ final class YishuVoiceSessionController: ObservableObject {
                     )
                 }
             )
+            self?.refreshCapturePhase()
         }
     }
 
@@ -201,6 +230,7 @@ final class YishuVoiceSessionController: ObservableObject {
         pendingStartTask = nil
         dictation.stopPushToTalkFromKeyboardShortcut()
         isKeyHeld = false
+        refreshCapturePhase()
         onEvent(
             .released(
                 origin: releasedOrigin
@@ -218,6 +248,7 @@ final class YishuVoiceSessionController: ObservableObject {
     private func handleFinal(generation: UInt64, traceID: String, text: String) {
         guard generation == sessionGeneration else { return }
         guard !didEmitTerminalForGeneration else { return }
+        refreshCapturePhase()
         didEmitTerminalForGeneration = true
         let origin = consumeOrigin(for: traceID)
             ?? VoiceTurnOrigin(traceID: traceID, releaseAt: nil)
