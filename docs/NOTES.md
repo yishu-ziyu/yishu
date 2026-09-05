@@ -2,12 +2,11 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，Issue #25 抽语音输入会话所有权，待 PR 审）
+## 当前状态（2026-09-06，PR #26 收口 dictation 观察泄漏，待再审）
 
-- 卡 `docs/evals/20260906-voice-session-ownership.md`。分支 `feat/issue-25-voice-session-ownership`（从 `origin/main` `a19b23a`）。未实现 #24 后续子 issue，未装真机。
-- 新所有者 `YishuVoiceSessionController`：monitor 生命周期与订阅、键盘听写 start/stop/cancel、pressed/released、origin 一次性消费、partial/final 转发、过期回调与 cancel 栅栏。CompanionManager 消费 `YishuVoiceSessionEvent`，仍接线 TTS 停声、插话、held-scene、prewarm、overlay、runtime。
-- 机器：会话 6 测 + barge-in + held-scene + `leanring_buddyTests` TEST SUCCEEDED；`pnpm product:build:clicky` 退出 0；CompanionManager 4453/4609。`rg` 确认 `CompanionManager.swift` 不再持有 `pendingVoiceTurnOrigin` / `handleShortcutTransition` / 键盘听写 start。
-- 预存红线仍是 `quality-observation-collector.mjs` 880/856。人评 #10 待用户裁 PR 边界描述。不开始下一 Phase 0 issue。
+- 卡仍是 `docs/evals/20260906-voice-session-ownership.md`。只修 #25/#26，不开始下一 Phase 0 issue。
+- 已删 `YishuVoiceSessionController.dictationManager`。`BuddyDictationManager` 只在控制器内部构造。`CompanionManager` 只订 `$capturePhase`（finalizing > recording > holding > idle），不再引用听写类。
+- 会话测（含三条投影）+ barge-in + held-scene + `leanring_buddyTests` TEST SUCCEEDED。CompanionManager 4446/4609。collector 880/856 预存红线未动。
 
 ## 上一状态（2026-09-05，Codex 语音启动卡顿修复，待用户复试）
 

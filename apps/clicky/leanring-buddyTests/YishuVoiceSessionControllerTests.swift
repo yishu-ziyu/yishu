@@ -5,11 +5,19 @@ import Testing
 
 @MainActor
 final class FakeKeyboardDictation: YishuKeyboardDictationControlling {
-    var isDictationInProgress = false
+    var isPreparingToRecord = false
+    var isRecordingFromKeyboardShortcut = false
+    var isFinalizingTranscript = false
+
+    var isDictationInProgress: Bool {
+        isPreparingToRecord || isRecordingFromKeyboardShortcut || isFinalizingTranscript
+    }
+
     var startCallCount = 0
     var stopCallCount = 0
     var cancelCallCount = 0
     var waitForStart = false
+    private var hasSettledStart = false
 
     private var startGate: CheckedContinuation<Void, Never>?
     private(set) var updateDraftText: ((String) -> Void)?
@@ -21,7 +29,10 @@ final class FakeKeyboardDictation: YishuKeyboardDictationControlling {
         submitDraftText: @escaping (String) -> Void
     ) async {
         startCallCount += 1
-        isDictationInProgress = true
+        hasSettledStart = false
+        isFinalizingTranscript = false
+        isRecordingFromKeyboardShortcut = false
+        isPreparingToRecord = true
         self.updateDraftText = nil
         self.submitDraftText = nil
         if waitForStart {
@@ -30,20 +41,31 @@ final class FakeKeyboardDictation: YishuKeyboardDictationControlling {
             }
         }
         guard !Task.isCancelled else {
-            isDictationInProgress = false
+            isPreparingToRecord = false
             return
         }
+        isPreparingToRecord = false
+        isRecordingFromKeyboardShortcut = true
+        hasSettledStart = true
         self.updateDraftText = updateDraftText
         self.submitDraftText = submitDraftText
     }
 
     func stopPushToTalkFromKeyboardShortcut() {
         stopCallCount += 1
+        if hasSettledStart {
+            isFinalizingTranscript = true
+            isRecordingFromKeyboardShortcut = false
+            isPreparingToRecord = false
+        } else {
+            isPreparingToRecord = false
+            isRecordingFromKeyboardShortcut = false
+        }
     }
 
     func cancelCurrentDictation(preserveDraftText: Bool) {
         cancelCallCount += 1
-        isDictationInProgress = false
+        resetCaptureFlags()
         settleStart()
     }
 
@@ -57,8 +79,15 @@ final class FakeKeyboardDictation: YishuKeyboardDictationControlling {
     }
 
     func emitFinal(_ text: String) {
-        isDictationInProgress = false
+        resetCaptureFlags()
         submitDraftText?(text)
+    }
+
+    private func resetCaptureFlags() {
+        isPreparingToRecord = false
+        isRecordingFromKeyboardShortcut = false
+        isFinalizingTranscript = false
+        hasSettledStart = false
     }
 }
 
@@ -81,6 +110,80 @@ final class FakePushToTalkMonitor: YishuPushToTalkShortcutMonitoring {
 
 @MainActor
 struct YishuVoiceSessionControllerTests {
+    @Test func capturePhaseProjectionMatchesFormerDictationFlagPriority() {
+        #expect(
+            YishuVoiceCapturePhase.projected(
+                isFinalizing: true,
+                isRecording: true,
+                isPreparing: true,
+                isKeyHeld: true
+            ) == .finalizing
+        )
+        #expect(
+            YishuVoiceCapturePhase.projected(
+                isFinalizing: false,
+                isRecording: true,
+                isPreparing: true,
+                isKeyHeld: true
+            ) == .recording
+        )
+        #expect(
+            YishuVoiceCapturePhase.projected(
+                isFinalizing: false,
+                isRecording: false,
+                isPreparing: true,
+                isKeyHeld: false
+            ) == .holding
+        )
+        #expect(
+            YishuVoiceCapturePhase.projected(
+                isFinalizing: false,
+                isRecording: false,
+                isPreparing: false,
+                isKeyHeld: true
+            ) == .holding
+        )
+        #expect(
+            YishuVoiceCapturePhase.projected(
+                isFinalizing: false,
+                isRecording: false,
+                isPreparing: false,
+                isKeyHeld: false
+            ) == .idle
+        )
+    }
+
+    @Test func capturePhaseTracksHeldRecordingFinalizingAndIdle() async {
+        let (controller, dictation, _) = makeController()
+        #expect(controller.capturePhase == .idle)
+
+        controller.handleShortcutTransition(.pressed)
+        #expect(controller.capturePhase == .holding)
+        await waitUntilReady(dictation, startCount: 1)
+        #expect(controller.capturePhase == .recording)
+
+        controller.handleShortcutTransition(.released)
+        #expect(controller.capturePhase == .finalizing)
+
+        dictation.emitFinal("终稿")
+        #expect(controller.capturePhase == .idle)
+    }
+
+    @Test func capturePhaseReturnsIdleOnQuickReleaseBeforeStartSettles() async {
+        let (controller, dictation, _) = makeController()
+        dictation.waitForStart = true
+
+        controller.handleShortcutTransition(.pressed)
+        await waitUntilStarted(dictation)
+        #expect(controller.capturePhase == .holding)
+
+        controller.handleShortcutTransition(.released)
+        dictation.settleStart()
+        await Task.yield()
+        #expect(controller.capturePhase == .idle)
+        #expect(!controller.isKeyHeld)
+    }
+
     @Test func pressedPartialsReleasedFinalEmitsOneSubmission() async {
         let (controller, dictation, events) = makeController()
 
@@ -170,6 +273,7 @@ struct YishuVoiceSessionControllerTests {
         ])
         #expect(dictation.cancelCallCount == 1)
         #expect(!controller.isKeyHeld)
+        #expect(controller.capturePhase == .idle)
     }
 
     @Test func emptyFinalIsUnsuccessfulCaptureNotFinalTranscript() async {

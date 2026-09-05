@@ -1619,29 +1619,22 @@ final class CompanionManager: ObservableObject {
     }
 
     private func bindVoiceStateObservation() {
-        guard let dictationManager = voiceSession.dictationManager else { return }
-        voiceStateCancellable = dictationManager.$isRecordingFromKeyboardShortcut
-            .combineLatest(
-                dictationManager.$isFinalizingTranscript,
-                dictationManager.$isPreparingToRecord,
-                voiceSession.$isKeyHeld
-            )
+        voiceStateCancellable = voiceSession.$capturePhase
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] isRecording, isFinalizing, isPreparing, isKeyHeld in
+            .sink { [weak self] phase in
                 guard let self else { return }
                 // Don't override .responding — the AI response pipeline
                 // manages that state directly until streaming finishes.
                 guard self.voiceState != .responding else { return }
 
-                if isFinalizing {
+                switch phase {
+                case .finalizing:
                     self.turnVisualPhase = .finalizingSpeech
                     self.voiceState = .processing
-                } else if isRecording {
-                    self.voiceState = .listening
-                } else if isPreparing || isKeyHeld {
+                case .recording, .holding:
                     // Keep waveform from key-down through session start / hold.
                     self.voiceState = .listening
-                } else {
+                case .idle:
                     self.turnVisualPhase = .idle
                     self.voiceState = .idle
                     // If the user pressed and released the hotkey without
