@@ -2,7 +2,14 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-05，Codex 语音启动卡顿修复，待用户复试）
+## 当前状态（2026-09-06，Issue #25 抽语音输入会话所有权，待 PR 审）
+
+- 卡 `docs/evals/20260906-voice-session-ownership.md`。分支 `feat/issue-25-voice-session-ownership`（从 `origin/main` `a19b23a`）。未实现 #24 后续子 issue，未装真机。
+- 新所有者 `YishuVoiceSessionController`：monitor 生命周期与订阅、键盘听写 start/stop/cancel、pressed/released、origin 一次性消费、partial/final 转发、过期回调与 cancel 栅栏。CompanionManager 消费 `YishuVoiceSessionEvent`，仍接线 TTS 停声、插话、held-scene、prewarm、overlay、runtime。
+- 机器：会话 6 测 + barge-in + held-scene + `leanring_buddyTests` TEST SUCCEEDED；`pnpm product:build:clicky` 退出 0；CompanionManager 4453/4609。`rg` 确认 `CompanionManager.swift` 不再持有 `pendingVoiceTurnOrigin` / `handleShortcutTransition` / 键盘听写 start。
+- 预存红线仍是 `quality-observation-collector.mjs` 880/856。人评 #10 待用户裁 PR 边界描述。不开始下一 Phase 0 issue。
+
+## 上一状态（2026-09-05，Codex 语音启动卡顿修复，待用户复试）
 
 - 本轮卡顿：ASR 627 ms，首字 118.681 s；Codex WebSocket 超时重试约 96 s 后才回退 HTTP。现仅为奕枢子进程配置订阅 HTTP，未改全局配置。清空计算器至 0 的 GUI 最小环境复测：首字 6.240 s、首工具 7.983 s、18.615 s 完成，独立 AX 确认 527。卡 `docs/evals/20260905-codex-startup-stall.md`；聚焦 6/6、check、签名 build 通过，product:check 仍为原 collector 红线。
 - 用户看完 Spark HTML 后要求回到真实项目；当前推进卡 `docs/evals/20260905-codex-voice-computer-use.md`，由主代理独立执行，不再调用 Grok。下面 M1「暂停」是此前现场，不能覆盖本次新授权。
