@@ -2,7 +2,13 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-05，Codex 语音启动卡顿修复，待用户复试）
+## 当前状态（2026-09-06，PR #26 收口 dictation 观察泄漏，待再审）
+
+- 卡仍是 `docs/evals/20260906-voice-session-ownership.md`。只修 #25/#26，不开始下一 Phase 0 issue。
+- 已删 `YishuVoiceSessionController.dictationManager`。`BuddyDictationManager` 只在控制器内部构造。`CompanionManager` 只订 `$capturePhase`（finalizing > recording > holding > idle），不再引用听写类。
+- 会话测（含三条投影）+ barge-in + held-scene + `leanring_buddyTests` TEST SUCCEEDED。CompanionManager 4446/4609。collector 880/856 预存红线未动。
+
+## 上一状态（2026-09-05，Codex 语音启动卡顿修复，待用户复试）
 
 - 本轮卡顿：ASR 627 ms，首字 118.681 s；Codex WebSocket 超时重试约 96 s 后才回退 HTTP。现仅为奕枢子进程配置订阅 HTTP，未改全局配置。清空计算器至 0 的 GUI 最小环境复测：首字 6.240 s、首工具 7.983 s、18.615 s 完成，独立 AX 确认 527。卡 `docs/evals/20260905-codex-startup-stall.md`；聚焦 6/6、check、签名 build 通过，product:check 仍为原 collector 红线。
 - 用户看完 Spark HTML 后要求回到真实项目；当前推进卡 `docs/evals/20260905-codex-voice-computer-use.md`，由主代理独立执行，不再调用 Grok。下面 M1「暂停」是此前现场，不能覆盖本次新授权。
