@@ -365,6 +365,7 @@ final class EventSink {
 
     enum Kind: Equatable {
         case pressed
+        case speechOnset
         case partial(String)
         case released
         case finalized(String)
@@ -375,6 +376,8 @@ final class EventSink {
             switch event {
             case .pressed:
                 self = .pressed
+            case .speechOnset:
+                self = .speechOnset
             case let .partial(_, text):
                 self = .partial(text)
             case .released:

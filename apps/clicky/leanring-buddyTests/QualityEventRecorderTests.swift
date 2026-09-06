@@ -231,6 +231,8 @@ final class QualityEventRecorderTests: XCTestCase {
             "ptt.key_down", "ptt.key_up", "asr.first_partial", "asr.final",
             "turn.start", "model.first_byte", "tts.first_audio",
             "tts.stopped", "presence.cue",
+            "handsfree.enabled", "handsfree.disabled",
+            "duplex.speech_onset", "duplex.end_of_speech", "duplex.final_accepted",
             "model.completed", "context.resolved",
             "runtime.turn_received", "recall.done", "model.request_sent", "prompt.built",
         ]

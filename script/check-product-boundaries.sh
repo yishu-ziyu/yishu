@@ -163,3 +163,7 @@ node "$ROOT_DIR/script/check-main-executor-context-parity.mjs"
 # boundary. False-positive success and non-convergent retry zeros, and a
 # single mutation path, are the permanent ceilings; see Issue #33.
 node "$ROOT_DIR/script/check-memory-forget-correctness.mjs"
+
+# Continuous VoiceSession / duplex audio-floor contract. Scenario zeros
+# and a single microphone owner are the permanent ceilings; see Issue #35.
+node "$ROOT_DIR/script/check-hands-free-voice-contract.cjs"
