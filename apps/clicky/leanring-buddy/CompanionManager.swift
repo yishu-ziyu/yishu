@@ -1696,13 +1696,14 @@ final class CompanionManager: ObservableObject {
         case let .partial(traceID, text):
             handleVoiceSessionPartial(traceID: traceID, text: text)
         case let .released(origin):
-            if voiceSession.continuousListeningState.isArmed {
-                ClickyAnalytics.trackVoiceEvent("duplex.end_of_speech", once: false)
-            }
             handleVoiceSessionReleased(origin: origin)
         case let .finalized(origin, transcript):
             if voiceSession.continuousListeningState.isArmed {
-                ClickyAnalytics.trackVoiceEvent("duplex.final_accepted", once: false)
+                ClickyAnalytics.trackVoiceEvent(
+                    "duplex.final_accepted",
+                    once: false,
+                    attributes: ["turnId": origin.traceID]
+                )
                 _ = beginBargeInIfEligible(voiceTraceID: origin.traceID)
             }
             handleVoiceSessionFinalized(origin: origin, transcript: transcript)
@@ -1802,7 +1803,6 @@ final class CompanionManager: ObservableObject {
     }
 
     private func handleVoiceSessionReleased(origin: VoiceTurnOrigin) {
-        ClickyAnalytics.trackPushToTalkReleased()
         turnVisualPhase = .finalizingSpeech
         voiceState = .processing
         ensureOverlayVisibleForVoiceFeedback()
@@ -1839,6 +1839,8 @@ final class CompanionManager: ObservableObject {
         switch reason {
         case .emptyOrNearSilence:
             presentUnclearHearingFailure(traceID: traceID)
+        case .asrTerminal:
+            break
         }
     }
 

@@ -13,12 +13,12 @@ final class FakeContinuousDictation: YishuContinuousDictationControlling {
     var requestFinalCount = 0
     var stopCount = 0
     private(set) var onPartial: ((String) -> Void)?
-    private(set) var onFinal: ((String) -> Void)?
+    private(set) var onFinal: ((String, YishuAsrTerminalKind) -> Void)?
     private(set) var onPower: ((CGFloat) -> Void)?
 
     func startContinuousCapture(
         onPartial: @escaping (String) -> Void,
-        onFinal: @escaping (String) -> Void,
+        onFinal: @escaping (String, YishuAsrTerminalKind) -> Void,
         onPower: @escaping (CGFloat) -> Void
     ) async -> Bool {
         self.onPartial = onPartial
@@ -60,8 +60,8 @@ final class FakeContinuousDictation: YishuContinuousDictationControlling {
         onPartial?(text)
     }
 
-    func emitFinal(_ text: String) {
-        onFinal?(text)
+    func emitFinal(_ text: String, kind: YishuAsrTerminalKind = .success) {
+        onFinal?(text, kind)
     }
 }
 

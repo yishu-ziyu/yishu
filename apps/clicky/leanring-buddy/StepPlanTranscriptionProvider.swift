@@ -236,9 +236,15 @@ final class StepPlanAudioTranscriptionSession: BuddyStreamingTranscriptionSessio
             let generation = interimGeneration
             lastInterimTask = Task { [weak self] in
                 guard let self else { return "" }
-                let text = (try? await self.transcribePCM(pcm, notifyPartials: true)) ?? ""
-                self.publishInterimIfCurrent(text, generation: generation)
-                return text
+                do {
+                    let text = try await self.transcribePCM(pcm, notifyPartials: true)
+                    self.publishInterimIfCurrent(text, generation: generation)
+                    return text
+                } catch is CancellationError {
+                    return ""
+                } catch {
+                    return ""
+                }
             }
             if let lastInterimTask {
                 interimTasks = [lastInterimTask]
@@ -268,78 +274,26 @@ final class StepPlanAudioTranscriptionSession: BuddyStreamingTranscriptionSessio
     }
 
     private func raceFinal(pcm: Data, lastInterim: Task<String, Error>?) async {
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            deliverTerminal(.failure(YishuAsrSessionError(kind: .cancelled)))
+            return
+        }
         if pcm.isEmpty {
-            deliverFinalTranscript("")
+            deliverTerminal(.success(""))
             return
         }
 
-        let finalTask = Task { try await transcribePCM(pcm, notifyPartials: true, useFinalSession: true) }
-        let interimTask = lastInterim ?? Task { "" }
-
-        let first = await firstNonEmpty(final: finalTask, interim: interimTask)
-        if first.source == .final {
-            deliverFinalTranscript(first.text)
-            return
+        do {
+            let text = try await transcribePCM(pcm, notifyPartials: true, useFinalSession: true)
+            deliverTerminal(.success(text))
+        } catch is CancellationError {
+            deliverTerminal(.failure(YishuAsrSessionError(kind: .cancelled)))
+        } catch let error as YishuAsrSessionError {
+            deliverTerminal(.failure(error))
+        } catch {
+            deliverTerminal(.failure(YishuAsrSessionError(kind: .transport)))
         }
-
-        let finalWithinWindow = await valueWithin(
-            finalTask,
-            seconds: YishuAsrInterimPolicy.preferFinalWithinSeconds
-        )
-        let chosen = YishuAsrKeyUpRace.winner(
-            first: first,
-            second: finalWithinWindow.map { YishuAsrKeyUpRaceResult(source: .final, text: $0) },
-            secondDelaySeconds: YishuAsrInterimPolicy.preferFinalWithinSeconds
-        )
-        deliverFinalTranscript(chosen)
-    }
-
-    private func firstNonEmpty(
-        final: Task<String, Error>,
-        interim: Task<String, Error>
-    ) async -> YishuAsrKeyUpRaceResult {
-        // Do not cancel the loser: key-up may still prefer a final that lands
-        // within 150 ms of an earlier interim.
-        await withCheckedContinuation { continuation in
-            let state = FirstNonEmptyGate(continuation: continuation)
-            Task {
-                let text = ((try? await final.value) ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                state.complete(.final, text)
-            }
-            Task {
-                let text = ((try? await interim.value) ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                state.complete(.interim, text)
-            }
-        }
-    }
-
-    private func valueWithin(_ task: Task<String, Error>, seconds: TimeInterval) async -> String? {
-        await withTaskGroup(of: String?.self) { group in
-            group.addTask {
-                ((try? await task.value) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            group.addTask {
-                let nanos = UInt64(max(0, seconds) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: nanos)
-                return nil
-            }
-            var result: String?
-            for await item in group {
-                if let item, !item.isEmpty {
-                    result = item
-                    group.cancelAll()
-                    break
-                }
-                if item == nil {
-                    group.cancelAll()
-                    break
-                }
-            }
-            return result
-        }
+        _ = lastInterim
     }
 
     private func transcribePCM(
@@ -357,6 +311,7 @@ final class StepPlanAudioTranscriptionSession: BuddyStreamingTranscriptionSessio
             forHTTPHeaderField: "x-yishu-asr-kind"
         )
         YishuVoiceProxySupervisor.authorize(&request)
+        request.setValue(ClickyAnalytics.currentVoiceTurnId(), forHTTPHeaderField: "x-yishu-utterance-id")
         request.timeoutInterval = 60
 
         let normalizedHotwords = StepFunTranscriptionRequest.normalizedHotwords(from: keyterms)
@@ -377,17 +332,21 @@ final class StepPlanAudioTranscriptionSession: BuddyStreamingTranscriptionSessio
         )
 
         let session = useFinalSession ? finalSession : interimSession
-        let (bytes, response) = try await session.bytes(for: request)
+        let (bytes, response): (URLSession.AsyncBytes, URLResponse)
+        do {
+            (bytes, response) = try await session.bytes(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let urlError as URLError where urlError.code == .timedOut {
+            throw YishuAsrSessionError(kind: .timeout)
+        } catch {
+            throw YishuAsrSessionError(kind: .transport)
+        }
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw StepFunTranscriptionProviderError(message: "无效的转写响应")
+            throw YishuAsrSessionError(kind: .transport)
         }
         guard (200...299).contains(httpResponse.statusCode) else {
-            throw StepFunTranscriptionProviderError(
-                message: StepFunTranscriptionProviderError.redactedUpstreamMessage(
-                    statusCode: httpResponse.statusCode,
-                    bodyByteCount: 0
-                )
-            )
+            throw YishuAsrSessionError(kind: .httpFailure)
         }
 
         let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
@@ -396,98 +355,70 @@ final class StepPlanAudioTranscriptionSession: BuddyStreamingTranscriptionSessio
             for try await byte in bytes {
                 data.append(byte)
             }
+            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               object["error"] != nil {
+                throw YishuAsrSessionError(kind: .httpFailure)
+            }
             let decoded = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
             return decoded.text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        var text = ""
+        var accumulator = YishuStepPlanSSEAccumulator()
         var sawFirstSSE = false
-        for try await line in bytes.lines {
-            if Task.isCancelled { throw CancellationError() }
-            guard line.hasPrefix("data:") else { continue }
-            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespacesAndNewlines)
-            if payload.isEmpty || payload == "[DONE]" { continue }
-            guard let parsed = Self.parseSSEPayload(payload) else { continue }
-            if !sawFirstSSE {
-                sawFirstSSE = true
-                ClickyAnalytics.trackAsrFirstSSE()
-            }
-            if let done = parsed.done, !done.isEmpty {
-                text = done
-                if notifyPartials {
-                    onTranscriptUpdate(text)
+        do {
+            for try await line in bytes.lines {
+                if Task.isCancelled { throw CancellationError() }
+                let before = accumulator.counts
+                accumulator.consumeDataLine(line)
+                let recognized = accumulator.counts.delta > before.delta
+                    || accumulator.counts.done > before.done
+                    || accumulator.counts.error > before.error
+                if recognized, !sawFirstSSE {
+                    sawFirstSSE = true
+                    ClickyAnalytics.trackAsrFirstSSE()
                 }
-                break
-            } else if let delta = parsed.delta, !delta.isEmpty {
-                text += delta
+                if accumulator.sawError {
+                    throw YishuAsrSessionError(kind: .sseError)
+                }
+                let trimmed = accumulator.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if notifyPartials, !trimmed.isEmpty {
+                    onTranscriptUpdate(trimmed)
+                }
+                if accumulator.sawDone {
+                    break
+                }
             }
-            if notifyPartials, !text.isEmpty {
-                onTranscriptUpdate(text)
-            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as YishuAsrSessionError {
+            throw error
+        } catch {
+            throw YishuAsrSessionError(kind: .transport)
         }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch accumulator.result() {
+        case let .success(text):
+            return text
+        case let .failure(error):
+            throw error
+        }
     }
 
-    private struct SSEPiece {
-        var delta: String?
-        var done: String?
-    }
-
-    private static func parseSSEPayload(_ payload: String) -> SSEPiece? {
-        guard let data = payload.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-        let type = object["type"] as? String
-        if type == "transcript.text.done" {
-            return SSEPiece(done: object["text"] as? String)
-        }
-        if type == "transcript.text.delta" {
-            return SSEPiece(delta: object["delta"] as? String)
-        }
-        if let text = object["text"] as? String, !text.isEmpty {
-            return SSEPiece(done: text)
-        }
-        return nil
-    }
-
-    private func deliverFinalTranscript(_ transcriptText: String) {
+    private func deliverTerminal(_ result: Result<String, YishuAsrSessionError>) {
         let shouldDeliver = stateQueue.sync { () -> Bool in
             guard !hasDeliveredFinalTranscript, !isCancelled else { return false }
             hasDeliveredFinalTranscript = true
             return true
         }
         guard shouldDeliver else { return }
-        let trimmed = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            onTranscriptUpdate(trimmed)
-        }
-        onFinalTranscriptReady(trimmed)
-    }
-}
-
-private final class FirstNonEmptyGate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<YishuAsrKeyUpRaceResult, Never>?
-    private var emptyCount = 0
-
-    init(continuation: CheckedContinuation<YishuAsrKeyUpRaceResult, Never>) {
-        self.continuation = continuation
-    }
-
-    func complete(_ source: YishuAsrKeyUpRace.Source, _ text: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let continuation else { return }
-        if !text.isEmpty {
-            self.continuation = nil
-            continuation.resume(returning: YishuAsrKeyUpRaceResult(source: source, text: text))
-            return
-        }
-        emptyCount += 1
-        if emptyCount == 2 {
-            self.continuation = nil
-            continuation.resume(returning: YishuAsrKeyUpRaceResult(source: .final, text: ""))
+        switch result {
+        case let .success(transcriptText):
+            let trimmed = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                onTranscriptUpdate(trimmed)
+            }
+            onFinalTranscriptReady(trimmed)
+        case let .failure(error):
+            onError(error)
         }
     }
 }
@@ -513,6 +444,7 @@ private final class YishuLoopbackSessionDelegate: NSObject, URLSessionTaskDelega
                 "reused": transaction.isReusedConnection,
                 "proxyUsed": transaction.isProxyConnection,
                 "connectMs": connectMs,
+                "turnId": ClickyAnalytics.currentVoiceTurnId(),
             ]
         )
     }

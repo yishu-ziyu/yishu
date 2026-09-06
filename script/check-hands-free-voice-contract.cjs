@@ -83,6 +83,14 @@ function metricsFromBehavior(report) {
   ) {
     scenarioFailures.push("B: ten-utterance re-arm contract did not execute");
   }
+  const releasedCount = Number(b.releasedCount ?? b.finalCount);
+  const terminalCount = Number(b.terminalCount ?? b.finalCount);
+  const missingTerminal = Math.max(0, releasedCount - terminalCount);
+  const pttKeyDown = Number(b.pttKeyDown ?? 0);
+  const pttKeyUp = Number(b.pttKeyUp ?? 0);
+  if (pttKeyDown !== 0 || pttKeyUp !== 0) {
+    scenarioFailures.push("I: hands-free fixture emitted PTT key events");
+  }
   const c = report.C || {};
   if (
     c.speechOnset !== true
@@ -151,6 +159,7 @@ function metricsFromBehavior(report) {
         ? 1
         : 0,
       ptt_regressions: pttRegressions,
+      continuous_utterances_without_terminal_asr_outcome: missingTerminal,
     },
   };
 }
@@ -174,6 +183,10 @@ function passingBehavior(patchC = {}, patchD = {}) {
       keyboardStarts: 0,
       stopCount: 0,
       armed: true,
+      releasedCount: 10,
+      terminalCount: 10,
+      pttKeyDown: 0,
+      pttKeyUp: 0,
     },
     C: {
       speechOnset: true,
@@ -247,6 +260,35 @@ function proveAudioFloorMutationsFail() {
     }
   }
   console.error("hands-free anti-gaming: audio-floor mutations did not zero fitness");
+}
+
+function proveMissingTerminalAndPttMutationsFail() {
+  const missing = passingBehavior();
+  missing.B.terminalCount = 9;
+  missing.B.releasedCount = 10;
+  const missingResult = metricsFromBehavior(missing);
+  if (missingResult.measured.continuous_utterances_without_terminal_asr_outcome !== 1) {
+    console.error(
+      "hands-free voice contract FAILED: missing ASR terminal mutation did not raise continuous_utterances_without_terminal_asr_outcome",
+    );
+    process.exit(1);
+  }
+  if (behavioralAllZero(missingResult.measured) && missingResult.scenarioFailures.length === 0) {
+    console.error(
+      "hands-free voice contract FAILED: missing ASR terminal mutation still produced all-zero fitness",
+    );
+    process.exit(1);
+  }
+  const pttUp = passingBehavior();
+  pttUp.B.pttKeyUp = 10;
+  const pttResult = metricsFromBehavior(pttUp);
+  if (!pttResult.scenarioFailures.some((row) => row.startsWith("I:"))) {
+    console.error(
+      "hands-free voice contract FAILED: hands-free ptt.key_up mutation was not caught",
+    );
+    process.exit(1);
+  }
+  console.error("hands-free anti-gaming: missing ASR terminal and PTT mutations did not zero fitness");
 }
 
 function extractBalanced(source, startIdx) {
@@ -378,6 +420,7 @@ function behavioralAllZero(measured) {
     "assistant_self_triggered_user_turns",
     "duplicate_auto_submissions",
     "silence_false_turns",
+    "continuous_utterances_without_terminal_asr_outcome",
   ].every((key) => measured[key] === 0);
 }
 
@@ -446,6 +489,20 @@ function architectureGuards() {
     || !session.includes("continuousListeningArmed")
     || !session.includes("continuousListeningFailed")) {
     failures.push("VoiceSession does not own starting/armed/failed listening state");
+  }
+  const stepPlan = stripComments(read("apps/clicky/leanring-buddy/StepPlanTranscriptionProvider.swift"));
+  if (/\(try\?\s*await\s+final\.value\)\s*\?\?\s*""/.test(stepPlan)) {
+    failures.push("Step Plan final race still swallows errors into an empty transcript");
+  }
+  const terminal = stripComments(read("apps/clicky/leanring-buddy/YishuAsrTerminal.swift"));
+  if (!terminal.includes("transcript.text.done") || !terminal.includes('case "error"')) {
+    failures.push("Step Plan SSE parser does not handle provider error events");
+  }
+  if (!stepPlan.includes("sseError") || !stepPlan.includes("deliverTerminal")) {
+    failures.push("Step Plan final path does not deliver explicit ASR terminal outcomes");
+  }
+  if (!terminal.includes("recordCaptureRelease") || !terminal.includes("markUtteranceReleased")) {
+    failures.push("continuous release telemetry is not separated from PTT key_up");
   }
 
   const swiftFiles = collectSwift(SWIFT);
@@ -518,6 +575,8 @@ function runFitnessHarness() {
     "-only-testing:leanring-buddyTests/YishuAudiblePlaybackPolicyTests",
     "-only-testing:leanring-buddyTests/YishuDuplexAudioFloorTests",
     "-only-testing:leanring-buddyTests/YishuPanelHierarchyTests",
+    "-only-testing:leanring-buddyTests/YishuStepPlanASRTerminalTests",
+    "-only-testing:leanring-buddyTests/YishuAsrTerminalTelemetryTests",
   ];
   const result = spawnSync("xcodebuild", args, {
     cwd: ROOT,
@@ -543,6 +602,7 @@ function runFitnessHarness() {
 
 proveAntiGaming();
 proveAudioFloorMutationsFail();
+proveMissingTerminalAndPttMutationsFail();
 
 const behavior = runFitnessHarness();
 const fromBehavior = metricsFromBehavior(behavior);
@@ -556,6 +616,7 @@ const target = {
   duplicate_auto_submissions: 0,
   silence_false_turns: 0,
   ptt_regressions: 0,
+  continuous_utterances_without_terminal_asr_outcome: 0,
   realtime_semantic_authority_bypasses: 0,
   parallel_microphone_capture_owners: 1,
 };

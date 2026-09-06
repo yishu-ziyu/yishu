@@ -40,6 +40,7 @@ extension CompanionManager {
     }
 
     func handleDuplexSpeechOnset(traceID: String) {
+        ClickyAnalytics.bindVoiceTurn(traceID)
         ClickyAnalytics.trackVoiceEvent(
             "duplex.speech_onset",
             once: false,

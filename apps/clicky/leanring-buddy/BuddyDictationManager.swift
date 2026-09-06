@@ -288,7 +288,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     /// rapid follow-up requests that arrive before macOS updates its cache.
     private var lastPermissionRequestCompletedAt: Date?
     private var continuousPartialHandler: ((String) -> Void)?
-    private var continuousFinalHandler: ((String) -> Void)?
+    private var continuousFinalHandler: ((String, YishuAsrTerminalKind) -> Void)?
+    private var pendingTerminalKind: YishuAsrTerminalKind = .success
     private var continuousPowerHandler: ((CGFloat) -> Void)?
     private var voiceProcessingEnabled = false
 
@@ -376,7 +377,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     func startContinuousCapture(
         onPartial: @escaping (String) -> Void,
-        onFinal: @escaping (String) -> Void,
+        onFinal: @escaping (String, YishuAsrTerminalKind) -> Void,
         onPower: @escaping (CGFloat) -> Void
     ) async -> Bool {
         guard !isContinuousCaptureActive else { return true }
@@ -423,7 +424,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         lastRecordedAudioPowerSampleDate = .distantPast
         draftCallbacks = BuddyDictationDraftCallbacks(
             updateDraftText: { onPartial($0) },
-            submitDraftText: { onFinal($0) }
+            submitDraftText: { [weak self] text in
+                guard let self else { return }
+                onFinal(text, self.pendingTerminalKind)
+            }
         )
 
         do {
@@ -459,6 +463,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         isFinalizingTranscript = false
         isRecordingFromContinuousListening = true
         latestRecognizedText = ""
+        pendingTerminalKind = .success
         recordedAudioPowerHistory = Array(
             repeating: Self.recordedAudioPowerHistoryBaselineLevel,
             count: Self.recordedAudioPowerHistoryLength
@@ -495,6 +500,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 guard let self,
                       let expectedToken,
                       self.activeTranscriptionToken == expectedToken else { return }
+                self.pendingTerminalKind = .fallback
                 self.finishCurrentDictationSessionIfNeeded(
                     shouldSubmitFinalDraft: true,
                     expectedToken: expectedToken
@@ -749,6 +755,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 Task { @MainActor in
                     guard let self, self.activeTranscriptionToken == token else { return }
                     self.latestRecognizedText = transcriptText
+                    let trimmed = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if self.pendingTerminalKind != .fallback {
+                        self.pendingTerminalKind = trimmed.isEmpty ? .empty : .success
+                    }
 
                     if self.isFinalizingTranscript {
                         self.finishCurrentDictationSessionIfNeeded(
@@ -824,19 +834,21 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             return
         }
 
-        if isFinalizingTranscript && !latestRecognizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        pendingTerminalKind = (error as? YishuAsrSessionError)?.kind ?? .transport
+        if isFinalizingTranscript {
+            latestRecognizedText = ""
             finishCurrentDictationSessionIfNeeded(
                 shouldSubmitFinalDraft: shouldAutomaticallySubmitFinalDraft,
                 expectedToken: token
             )
-        } else {
-            print("❌ Buddy dictation error (\(transcriptionProvider.displayName)): \(error)")
-            lastErrorMessage = userFacingErrorMessage(
-                from: error,
-                fallback: "couldn't transcribe that. try again."
-            )
-            cancelCurrentDictation(preserveDraftText: false)
+            return
         }
+        print("❌ Buddy dictation error (\(transcriptionProvider.displayName)): \(error)")
+        lastErrorMessage = userFacingErrorMessage(
+            from: error,
+            fallback: "couldn't transcribe that. try again."
+        )
+        cancelCurrentDictation(preserveDraftText: false)
     }
 
     private func finishCurrentDictationSessionIfNeeded(

@@ -28,6 +28,10 @@ struct YishuHandsFreeFitnessReport: Equatable, Sendable {
     var lateFinalAfterDisable: Bool
     var duplicateFinalCount: Int
     var pttKinds: [String]
+    var tenUtteranceReleasedCount: Int
+    var tenUtteranceTerminalCount: Int
+    var tenUtterancePttKeyDown: Int
+    var tenUtterancePttKeyUp: Int
 
     var jsonObject: [String: Any] {
         [
@@ -42,6 +46,10 @@ struct YishuHandsFreeFitnessReport: Equatable, Sendable {
                 "keyboardStarts": tenUtteranceKeyboardStarts,
                 "stopCount": tenUtteranceStopCount,
                 "armed": tenUtteranceArmed,
+                "releasedCount": tenUtteranceReleasedCount,
+                "terminalCount": tenUtteranceTerminalCount,
+                "pttKeyDown": tenUtterancePttKeyDown,
+                "pttKeyUp": tenUtterancePttKeyUp,
             ],
             "C": [
                 "speechOnset": speechOnsetBeforeFinal,
@@ -82,6 +90,8 @@ enum YishuHandsFreeFitnessHarness {
         let disable = await disableTrace()
         let duplicates = await duplicateTrace()
         let ptt = await pttTrace()
+        let tenPttDown = ten.pttKeyDown
+        let tenPttUp = ten.pttKeyUp
         return YishuHandsFreeFitnessReport(
             threeTurnFinals: three.finals,
             threeTurnPressed: three.pressed,
@@ -106,7 +116,11 @@ enum YishuHandsFreeFitnessHarness {
             silenceBegins: silence.begins,
             lateFinalAfterDisable: disable,
             duplicateFinalCount: duplicates,
-            pttKinds: ptt
+            pttKinds: ptt,
+            tenUtteranceReleasedCount: ten.releasedCount,
+            tenUtteranceTerminalCount: ten.terminalCount,
+            tenUtterancePttKeyDown: tenPttDown,
+            tenUtterancePttKeyUp: tenPttUp
         )
     }
 
@@ -134,7 +148,11 @@ enum YishuHandsFreeFitnessHarness {
         finalCount: Int,
         keyboardStarts: Int,
         stopCount: Int,
-        armed: Bool
+        armed: Bool,
+        releasedCount: Int,
+        terminalCount: Int,
+        pttKeyDown: Int,
+        pttKeyUp: Int
     ) {
         let harness = makeHarness()
         harness.controller.setContinuousListeningEnabled(true)
@@ -142,15 +160,29 @@ enum YishuHandsFreeFitnessHarness {
         for index in 1...10 {
             await speak("句\(index)", harness: harness)
         }
-        let finals = harness.events.utteranceKinds.filter {
+        let kinds = harness.events.utteranceKinds
+        let finals = kinds.filter {
             if case .finalized = $0 { return true }
             return false
         }
+        let released = kinds.filter { $0 == .released }.count
+        let terminals = kinds.filter {
+            switch $0 {
+            case .finalized, .captureFailed:
+                return true
+            default:
+                return false
+            }
+        }.count
         return (
             finals.count,
             harness.keyboard.startCallCount,
             harness.continuous.stopCount,
-            harness.controller.continuousListeningState.isArmed
+            harness.controller.continuousListeningState.isArmed,
+            released,
+            terminals,
+            kinds.filter { $0 == .pressed }.count,
+            0
         )
     }
 
@@ -449,5 +481,9 @@ struct YishuHandsFreeFitnessTests {
         #expect(!report.lateFinalAfterDisable)
         #expect(report.duplicateFinalCount == 1)
         #expect(report.pttKinds == ["pressed", "partial:按住", "released", "finalized:按住说话"])
+        #expect(report.tenUtteranceReleasedCount == 10)
+        #expect(report.tenUtteranceTerminalCount == 10)
+        #expect(report.tenUtterancePttKeyDown == 0)
+        #expect(report.tenUtterancePttKeyUp == 0)
     }
 }

@@ -11,6 +11,7 @@ struct VoiceTurnOrigin: Equatable {
 
 enum YishuVoiceCaptureFailureReason: Equatable, Sendable {
     case emptyOrNearSilence
+    case asrTerminal(YishuAsrTerminalKind)
 }
 
 /// Read-only capture activity for product voiceState mapping.
@@ -97,7 +98,7 @@ protocol YishuContinuousDictationControlling: AnyObject {
     var lastContinuousStartError: String? { get }
     func startContinuousCapture(
         onPartial: @escaping (String) -> Void,
-        onFinal: @escaping (String) -> Void,
+        onFinal: @escaping (String, YishuAsrTerminalKind) -> Void,
         onPower: @escaping (CGFloat) -> Void
     ) async -> Bool
     func beginContinuousUtterance() async
@@ -350,11 +351,12 @@ final class YishuVoiceSessionController: ObservableObject {
         dictation.stopPushToTalkFromKeyboardShortcut()
         isKeyHeld = false
         refreshCapturePhase()
-        onEvent(
-            .released(
-                origin: releasedOrigin
-                    ?? VoiceTurnOrigin(traceID: "unknown", releaseAt: releaseAt)
-            )
+        let origin = releasedOrigin
+            ?? VoiceTurnOrigin(traceID: "unknown", releaseAt: releaseAt)
+        onEvent(.released(origin: origin))
+        YishuAsrReleaseTelemetry.recordCaptureRelease(
+            continuousArmed: false,
+            traceID: origin.traceID
         )
     }
 
@@ -371,8 +373,8 @@ final class YishuVoiceSessionController: ObservableObject {
                 onPartial: { [weak self] text in
                     self?.handleContinuousPartial(text)
                 },
-                onFinal: { [weak self] text in
-                    self?.handleContinuousFinal(text)
+                onFinal: { [weak self] text, kind in
+                    self?.handleContinuousFinal(text, kind: kind)
                 },
                 onPower: { [weak self] power in
                     self?.handleAudioPower(power)
@@ -441,6 +443,7 @@ final class YishuVoiceSessionController: ObservableObject {
         utteranceStartedAtMs = clock.milliseconds()
         lastLoudAtMs = utteranceStartedAtMs
         onEvent(.speechOnset(traceID: traceID))
+        ClickyAnalytics.bindVoiceTurn(traceID)
         refreshCapturePhase()
 
         pendingStartTask?.cancel()
@@ -466,6 +469,10 @@ final class YishuVoiceSessionController: ObservableObject {
         refreshCapturePhase()
         if let origin = pendingOrigin {
             onEvent(.released(origin: origin))
+            YishuAsrReleaseTelemetry.recordCaptureRelease(
+                continuousArmed: true,
+                traceID: origin.traceID
+            )
         }
     }
 
@@ -478,12 +485,13 @@ final class YishuVoiceSessionController: ObservableObject {
         )
     }
 
-    private func handleContinuousFinal(_ text: String) {
+    private func handleContinuousFinal(_ text: String, kind: YishuAsrTerminalKind) {
         guard let origin = pendingOrigin else { return }
         handleFinal(
             generation: sessionGeneration,
             traceID: origin.traceID,
-            text: text
+            text: text,
+            kind: kind
         )
         if continuousListeningState.isArmed {
             continuousPhase = .armed
@@ -499,7 +507,12 @@ final class YishuVoiceSessionController: ObservableObject {
         onEvent(.partial(traceID: traceID, text: text))
     }
 
-    private func handleFinal(generation: UInt64, traceID: String, text: String) {
+    private func handleFinal(
+        generation: UInt64,
+        traceID: String,
+        text: String,
+        kind: YishuAsrTerminalKind = .success
+    ) {
         guard generation == sessionGeneration else { return }
         guard !didEmitTerminalForGeneration else { return }
         refreshCapturePhase()
@@ -507,16 +520,29 @@ final class YishuVoiceSessionController: ObservableObject {
         let origin = consumeOrigin(for: traceID)
             ?? VoiceTurnOrigin(traceID: traceID, releaseAt: nil)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            onEvent(
-                .captureFailed(
-                    traceID: traceID,
-                    reason: .emptyOrNearSilence
-                )
-            )
+        let resolvedKind: YishuAsrTerminalKind
+        if kind == .success {
+            resolvedKind = trimmed.isEmpty ? .empty : .success
+        } else {
+            resolvedKind = kind
+        }
+        ClickyAnalytics.trackAsrTerminal(kind: resolvedKind)
+        if resolvedKind == .success, !trimmed.isEmpty {
+            onEvent(.finalized(origin: origin, transcript: trimmed))
             return
         }
-        onEvent(.finalized(origin: origin, transcript: trimmed))
+        if resolvedKind == .fallback, !trimmed.isEmpty {
+            onEvent(.finalized(origin: origin, transcript: trimmed))
+            return
+        }
+        onEvent(
+            .captureFailed(
+                traceID: traceID,
+                reason: resolvedKind == .empty
+                    ? .emptyOrNearSilence
+                    : .asrTerminal(resolvedKind)
+            )
+        )
     }
 
     private func consumeOrigin(for traceID: String) -> VoiceTurnOrigin? {
