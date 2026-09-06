@@ -19,7 +19,14 @@ enum YishuPanelFirstScreenCopy {
     static let releaseToSend = "松开就发送"
     static let continuousListeningTitle = "连续聆听"
     static let listeningNow = "正在听，直接说"
-    static let pttStillWorks = "也可以按住 Control+Option"
+    static let startingContinuous = "正在打开麦克风"
+    static let continuousStartFailed = "没能打开连续聆听"
+
+    static func isListeningNowCopyAllowed(
+        continuousState: YishuContinuousListeningState
+    ) -> Bool {
+        continuousState.isArmed
+    }
     static let scopeCaption = "范围"
     static let scopePersonal = "我的"
     static let scopeProject = "项目"

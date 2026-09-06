@@ -19,6 +19,7 @@ enum YishuVoiceCaptureFailureReason: Equatable, Sendable {
 enum YishuVoiceCapturePhase: Equatable, Sendable {
     case idle
     case holding
+    case starting
     case armed
     case recording
     case finalizing
@@ -28,11 +29,13 @@ enum YishuVoiceCapturePhase: Equatable, Sendable {
         isRecording: Bool,
         isPreparing: Bool,
         isKeyHeld: Bool,
+        isContinuousStarting: Bool = false,
         isContinuousArmed: Bool = false
     ) -> YishuVoiceCapturePhase {
         if isFinalizing { return .finalizing }
         if isRecording { return .recording }
         if isPreparing || isKeyHeld { return .holding }
+        if isContinuousStarting { return .starting }
         if isContinuousArmed { return .armed }
         return .idle
     }
@@ -48,6 +51,8 @@ enum YishuVoiceSessionEvent: Equatable {
     case finalized(origin: VoiceTurnOrigin, transcript: String)
     case captureFailed(traceID: String, reason: YishuVoiceCaptureFailureReason)
     case cancelled(traceID: String)
+    case continuousListeningArmed
+    case continuousListeningFailed(message: String)
 }
 
 @MainActor
@@ -65,14 +70,36 @@ protocol YishuKeyboardDictationControlling: AnyObject {
     func cancelCurrentDictation(preserveDraftText: Bool)
 }
 
+enum YishuContinuousListeningState: Equatable, Sendable {
+    case off
+    case starting
+    case armed
+    case failed(String)
+
+    var isRequested: Bool {
+        switch self {
+        case .starting, .armed:
+            return true
+        case .off, .failed:
+            return false
+        }
+    }
+
+    var isArmed: Bool {
+        if case .armed = self { return true }
+        return false
+    }
+}
+
 @MainActor
 protocol YishuContinuousDictationControlling: AnyObject {
     var isContinuousCaptureActive: Bool { get }
+    var lastContinuousStartError: String? { get }
     func startContinuousCapture(
         onPartial: @escaping (String) -> Void,
         onFinal: @escaping (String) -> Void,
         onPower: @escaping (CGFloat) -> Void
-    ) async
+    ) async -> Bool
     func beginContinuousUtterance() async
     func requestContinuousUtteranceFinal()
     func stopContinuousCapture()
@@ -102,6 +129,7 @@ final class YishuVoiceSessionController: ObservableObject {
     }
     @Published private(set) var capturePhase: YishuVoiceCapturePhase = .idle
     @Published private(set) var isContinuousListeningEnabled = false
+    @Published private(set) var continuousListeningState: YishuContinuousListeningState = .off
 
     var shouldBegin: () -> Bool
     var onEvent: (YishuVoiceSessionEvent) -> Void
@@ -180,12 +208,15 @@ final class YishuVoiceSessionController: ObservableObject {
     }
 
     func setContinuousListeningEnabled(_ enabled: Bool) {
-        guard enabled != isContinuousListeningEnabled else { return }
-        isContinuousListeningEnabled = enabled
         if enabled {
+            guard !continuousListeningState.isRequested else { return }
+            isContinuousListeningEnabled = true
+            continuousListeningState = .starting
             armContinuousListening()
-        } else {
+        } else if continuousListeningState != .off {
+            isContinuousListeningEnabled = false
             disarmContinuousListening()
+            continuousListeningState = .off
         }
         refreshCapturePhase()
     }
@@ -195,7 +226,7 @@ final class YishuVoiceSessionController: ObservableObject {
     }
 
     func handleAudioPower(_ power: CGFloat) {
-        guard isContinuousListeningEnabled else { return }
+        guard continuousListeningState.isArmed else { return }
         guard continuousDictation != nil else { return }
         let now = clock.milliseconds()
         if YishuHandsFreeListeningPolicy.isHoldSpeech(power: power)
@@ -251,7 +282,7 @@ final class YishuVoiceSessionController: ObservableObject {
     }
 
     private func refreshCapturePhase() {
-        let continuousArmed = isContinuousListeningEnabled
+        let continuousArmed = continuousListeningState.isArmed
             && continuousPhase == .armed
             && !isKeyHeld
         let next = YishuVoiceCapturePhase.projected(
@@ -260,6 +291,7 @@ final class YishuVoiceSessionController: ObservableObject {
                 || continuousPhase == .inUtterance,
             isPreparing: dictation.isPreparingToRecord,
             isKeyHeld: isKeyHeld,
+            isContinuousStarting: continuousListeningState == .starting && !isKeyHeld,
             isContinuousArmed: continuousArmed
         )
         if capturePhase != next {
@@ -335,7 +367,7 @@ final class YishuVoiceSessionController: ObservableObject {
         pendingOrigin = nil
         continuousStartTask?.cancel()
         continuousStartTask = Task { [weak self] in
-            await continuousDictation.startContinuousCapture(
+            let started = await continuousDictation.startContinuousCapture(
                 onPartial: { [weak self] text in
                     self?.handleContinuousPartial(text)
                 },
@@ -346,9 +378,37 @@ final class YishuVoiceSessionController: ObservableObject {
                     self?.handleAudioPower(power)
                 }
             )
-            self?.refreshCapturePhase()
+            guard let self else { return }
+            self.finishContinuousStart(
+                started: started,
+                captureActive: continuousDictation.isContinuousCaptureActive,
+                error: continuousDictation.lastContinuousStartError
+            )
         }
         refreshCapturePhase()
+    }
+
+    private func finishContinuousStart(
+        started: Bool,
+        captureActive: Bool,
+        error: String?
+    ) {
+        guard continuousListeningState == .starting else { return }
+        if started, captureActive {
+            continuousListeningState = .armed
+            isContinuousListeningEnabled = true
+            refreshCapturePhase()
+            onEvent(.continuousListeningArmed)
+            return
+        }
+        let message = (error?.trimmingCharacters(in: .whitespacesAndNewlines))
+            .flatMap { $0.isEmpty ? nil : $0 }
+            ?? "couldn't start voice input. try again."
+        isContinuousListeningEnabled = false
+        disarmContinuousListening()
+        continuousListeningState = .failed(message)
+        refreshCapturePhase()
+        onEvent(.continuousListeningFailed(message: message))
     }
 
     private func disarmContinuousListening() {
@@ -368,7 +428,7 @@ final class YishuVoiceSessionController: ObservableObject {
     }
 
     private func beginContinuousUtterance() {
-        guard isContinuousListeningEnabled else { return }
+        guard continuousListeningState.isArmed else { return }
         guard continuousPhase == .armed else { return }
         guard let continuousDictation else { return }
 
@@ -392,7 +452,7 @@ final class YishuVoiceSessionController: ObservableObject {
     }
 
     private func endContinuousUtterance() {
-        guard isContinuousListeningEnabled else { return }
+        guard continuousListeningState.isArmed else { return }
         guard continuousPhase == .inUtterance else { return }
         continuousPhase = .finalizing
         let releaseAt = DispatchTime.now().uptimeNanoseconds
@@ -425,7 +485,7 @@ final class YishuVoiceSessionController: ObservableObject {
             traceID: origin.traceID,
             text: text
         )
-        if isContinuousListeningEnabled {
+        if continuousListeningState.isArmed {
             continuousPhase = .armed
             utteranceStartedAtMs = nil
             lastLoudAtMs = clock.milliseconds()

@@ -204,13 +204,23 @@ struct CompanionPanelView: View {
     private var permissionsCopySection: some View {
         if companionManager.hasSeenIntro && companionManager.allPermissionsGranted {
             VStack(alignment: .leading, spacing: 8) {
-                if companionManager.isContinuousListeningEnabled {
+                if companionManager.voiceSession.continuousListeningState.isArmed {
                     Text(YishuPanelFirstScreenCopy.listeningNow)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(DS.Colors.textSecondary)
-                    Text(YishuPanelFirstScreenCopy.pttStillWorks)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(DS.Colors.textTertiary)
+                } else if companionManager.voiceSession.continuousListeningState == .starting {
+                    Text(YishuPanelFirstScreenCopy.startingContinuous)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                } else if case let .failed(message) = companionManager.voiceSession.continuousListeningState {
+                    Text(YishuPanelFirstScreenCopy.continuousStartFailed)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    if !message.isEmpty {
+                        Text(message)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(DS.Colors.textTertiary)
+                    }
                 } else {
                     HStack(spacing: 8) {
                         Text(YishuPanelFirstScreenCopy.holdToTalkPrefix)
@@ -1377,7 +1387,7 @@ struct CompanionPanelView: View {
         if !companionManager.hasSeenIntro || !companionManager.allPermissionsGranted {
             return "设置中"
         }
-        if companionManager.isContinuousListeningEnabled,
+        if companionManager.voiceSession.continuousListeningState.isArmed,
            companionManager.voiceState == .listening
             || companionManager.voiceSession.capturePhase == .armed {
             return "在听"

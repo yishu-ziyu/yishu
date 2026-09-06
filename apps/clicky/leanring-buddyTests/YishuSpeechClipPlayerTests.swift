@@ -117,3 +117,14 @@ struct YishuSpeechClipGateTests {
         #expect(gate.isComplete)
     }
 }
+
+struct YishuAudiblePlaybackHookTests {
+    @Test func stopWithoutPlayDoesNotClaimAudiblePlayback() {
+        let player = YishuSpeechClipPlayer()
+        var changes: [Bool] = []
+        player.hooks.onAudiblePlaybackChange = { changes.append($0) }
+        player.stop()
+        #expect(changes.isEmpty)
+        #expect(!player.isPlaying)
+    }
+}

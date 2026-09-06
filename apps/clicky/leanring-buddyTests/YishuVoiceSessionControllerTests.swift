@@ -151,6 +151,26 @@ struct YishuVoiceSessionControllerTests {
                 isKeyHeld: false
             ) == .idle
         )
+        #expect(
+            YishuVoiceCapturePhase.projected(
+                isFinalizing: false,
+                isRecording: false,
+                isPreparing: false,
+                isKeyHeld: false,
+                isContinuousStarting: true,
+                isContinuousArmed: true
+            ) == .starting
+        )
+        #expect(
+            YishuVoiceCapturePhase.projected(
+                isFinalizing: false,
+                isRecording: false,
+                isPreparing: false,
+                isKeyHeld: false,
+                isContinuousStarting: false,
+                isContinuousArmed: true
+            ) == .armed
+        )
     }
 
     @Test func capturePhaseTracksHeldRecordingFinalizingAndIdle() async {
@@ -363,6 +383,17 @@ final class EventSink {
         events.map(Kind.init)
     }
 
+    var utteranceKinds: [Kind] {
+        kinds.filter {
+            switch $0 {
+            case .continuousListeningArmed, .continuousListeningFailed:
+                return false
+            default:
+                return true
+            }
+        }
+    }
+
     enum Kind: Equatable {
         case pressed
         case speechOnset
@@ -371,6 +402,8 @@ final class EventSink {
         case finalized(String)
         case captureFailed
         case cancelled
+        case continuousListeningArmed
+        case continuousListeningFailed(String)
 
         init(_ event: YishuVoiceSessionEvent) {
             switch event {
@@ -388,6 +421,10 @@ final class EventSink {
                 self = .captureFailed
             case .cancelled:
                 self = .cancelled
+            case .continuousListeningArmed:
+                self = .continuousListeningArmed
+            case let .continuousListeningFailed(message):
+                self = .continuousListeningFailed(message)
             }
         }
     }
