@@ -2,7 +2,14 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #30 审阅修订：呈现不得拥有 Runtime 事件流寿命，待再审）
+## 当前状态（2026-09-06，PR #30 审阅修订：start 时已有执行必须拒绝，待终审）
+
+- 卡仍是 `docs/evals/20260906-issue-29-foreground-execution-ownership.md`。只修 #29 / PR #30，不开始下一 Phase 0 issue。未装真机。
+- 审阅点：`start` 在已有执行时先 `startTurn` 再丢掉旧事件消费并覆盖 identity，上一轮 Runtime 变成无主孤儿。
+- 改动：已有执行时 `start` 抛 `YishuForegroundRuntimeExecutionError.alreadyActive`，不隐式 cancel，也不开第二轮。显式 cancel 或 Runtime 终结后新 `start` 仍成功。
+- 两个健身函数保持 0。`startWhileActiveRejectsWithoutOrphaningFirstExecution` 与既有表征测、YishuBargeInTests TEST SUCCEEDED。协议无 diff。
+
+## 上一状态（2026-09-06，PR #30 审阅修订：呈现不得拥有 Runtime 事件流寿命，待再审）
 
 - 卡仍是 `docs/evals/20260906-issue-29-foreground-execution-ownership.md`。只修 #29 / PR #30，不开始下一 Phase 0 issue。未装真机。
 - 审阅点：`CompanionManager` 仍 `for try await event in turn.events`，呈现 `defer` 里 `settle`。呈现消费结束会结算执行身份，即使 Runtime 轮次没被取消。

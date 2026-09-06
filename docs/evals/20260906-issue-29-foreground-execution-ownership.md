@@ -52,6 +52,7 @@
 | 17 | 替换可见呈现消费不杀死执行 | 同上 | `replacingPresentationConsumerLeavesExecutionAlive` 绿 |
 | 18 | 显式产品策略取消与呈现停止可分开 | 同上 | `explicitProductCancelSettlesOnceWhilePresentationStopsIndependently` 绿 |
 | 19 | 插话 steer 不把执行寿命交回 CompanionManager | 同上 + 既有 barge-in | `eligibleConversationalBargeInSteersSameTurn` 仍绿，CompanionManager 无 `turn.events` / `settle` |
+| 20 | 已有执行时 start 必须拒绝，不得孤儿化上一轮 | 机器：同 #2 | `startWhileActiveRejectsWithoutOrphaningFirstExecution`：第二次 start 失败；start=1 cancel=0；第一轮仍被拥有且事件流仍活；显式 cancel 恰好一次后新 start 成功 |
 
 ## 非目标
 
@@ -81,6 +82,7 @@
   - `YishuForegroundRuntimeExecutionTests`（含 A–F）TEST SUCCEEDED
   - YishuBargeInTests + computer-action/file-drop + held-scene + leanring_buddyTests TEST SUCCEEDED
   - `pnpm product:build:clicky` 退出 0；协议无 diff；collector 880/856 预存红线未动
+- 交付（PR #30 单活执行不变量）：`startWhileActiveRejectsWithoutOrphaningFirstExecution` 绿；`foreground_execution_ownership_violations: 0`；`presentation_owned_runtime_event_lifetimes: 0`；既有表征测仍绿。协议无 diff。
 
 ## 人评清单（交付时填）
 
