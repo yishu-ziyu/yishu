@@ -3445,6 +3445,70 @@ test("memory.list returns personal only; memory.forget hard-deletes and rejects 
   );
 });
 
+test("memory.forget does not emit memory.forgotten when visible deletion fails", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "yishu-pkr-forget-visible-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const kernel = createYishuKernel({ storeBackend: "memory", memoryDir: dir });
+  const remembered = await kernel.registry.invoke("remember", {
+    caller: "ui",
+    input: { claim: "周四把钥匙放在抽屉第二格", scope: "personal" },
+  });
+  assert.equal(remembered.status, "verified");
+  const memoryId = (remembered.output as { id: string }).id;
+  kernel.memory!.visible.removeFactsMatching = async () => {
+    throw new Error("injected visible remove failure");
+  };
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const events: RuntimeEvent[] = [];
+  await runtime.forgetMemory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "memory.forget",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { memoryId, sessionScope: { kind: "personal" } },
+  }, (event) => events.push(event));
+  assert.ok(events.some((event) => event.type === "memory.failed"));
+  assert.equal(events.some((event) => event.type === "memory.forgotten"), false);
+  assert.ok(
+    (await kernel.store.searchMemory("", { scope: "personal", minConfidence: 0 }))
+      .some((row) => row.id === memoryId),
+  );
+});
+
+test("memory.forget does not emit memory.forgotten for legacy store-gone visible residue", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "yishu-pkr-forget-legacy-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const kernel = createYishuKernel({ storeBackend: "memory", memoryDir: dir });
+  const remembered = await kernel.registry.invoke("remember", {
+    caller: "ui",
+    input: { claim: "周四把钥匙放在抽屉第二格", scope: "personal" },
+  });
+  const other = await kernel.registry.invoke("remember", {
+    caller: "ui",
+    input: { claim: "周四把钥匙放在门口挂钩", scope: "personal" },
+  });
+  assert.equal(remembered.status, "verified");
+  assert.equal(other.status, "verified");
+  const memoryId = (remembered.output as { id: string }).id;
+  await kernel.store.forgetMemory(memoryId, { expectedScope: "personal" });
+  const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);
+  const events: RuntimeEvent[] = [];
+  await runtime.forgetMemory({
+    schemaVersion: PROTOCOL_VERSION,
+    type: "memory.forget",
+    requestId: randomUUID(),
+    traceId: randomUUID(),
+    sentAt: new Date().toISOString(),
+    payload: { memoryId, sessionScope: { kind: "personal" } },
+  }, (event) => events.push(event));
+  assert.ok(events.some((event) => event.type === "memory.failed"));
+  assert.equal(events.some((event) => event.type === "memory.forgotten"), false);
+  const text = await kernel.memory!.visible.readText();
+  assert.match(text, /抽屉第二格/u);
+  assert.match(text, /门口挂钩/u);
+});
+
 test("memory.remember writes personal notes through the same store; empty and unverified stay honest", async () => {
   const kernel = createYishuKernel({ storeBackend: "memory" });
   const runtime = new ProductKernelRuntime(new MockAgentRuntime(), kernel);

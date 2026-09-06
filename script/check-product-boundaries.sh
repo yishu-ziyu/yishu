@@ -158,3 +158,8 @@ node "$ROOT_DIR/script/check-clicky-foreground-lifecycle-boundary.cjs"
 # and Codex. Parity failures' zero and a single assembly path are the
 # permanent ceilings; see Issue #31.
 node "$ROOT_DIR/script/check-main-executor-context-parity.mjs"
+
+# User-confirmed memory forget is one fail-closed, retryable semantic
+# boundary. False-positive success and non-convergent retry zeros, and a
+# single mutation path, are the permanent ceilings; see Issue #33.
+node "$ROOT_DIR/script/check-memory-forget-correctness.mjs"

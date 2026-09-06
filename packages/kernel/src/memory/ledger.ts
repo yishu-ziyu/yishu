@@ -15,6 +15,7 @@ import {
   type VisibleMemoryFile,
 } from "./visible-file.js";
 import type { MemoryTruthLayer } from "./truth-layer.js";
+import { forgetMemoryClaim } from "./forget.js";
 
 /**
  * Product-facing memory interface. Runtime callers see bounded product rows
@@ -62,36 +63,14 @@ export function createMemoryLedger(
     },
 
     async forget(input) {
-      const forgotten = (await store.searchMemory("", {
-        scope: input.expectedScope,
-        minConfidence: 0,
-      })).find((memory) => memory.id === input.id);
-
-      // Remove the markdown truth first. If this fails, leave the index row
-      // intact so the caller can report the failure and retry; deleting the
-      // index first could let an index rebuild resurrect the fact from Truth.
-      if (
-        truth !== undefined
-        && forgotten !== undefined
-        && forgotten.scope === input.expectedScope
-      ) {
-        const match = /#mem:([^\s]+)$/.exec(forgotten.truthRef ?? "");
-        const factId = match ? match[1]! : forgotten.id;
-        await truth.removeFact(input.expectedScope, factId);
-      }
-
-      const result = await store.forgetMemory(input.id, {
-        expectedScope: input.expectedScope,
-      });
-      if (
-        result !== null
-        && !result.alreadyGone
-        && forgotten !== undefined
-        && forgotten.scope === "personal"
-      ) {
-        await visible?.removeFactsMatching(forgotten.claim);
-      }
-      return result;
+      return forgetMemoryClaim(
+        {
+          store,
+          ...(visible !== undefined ? { visible } : {}),
+          ...(truth !== undefined ? { truth } : {}),
+        },
+        { id: input.id, expectedScope: input.expectedScope },
+      );
     },
 
     async recall(query, options) {

@@ -2,7 +2,22 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #32 再审：每维独立证明信任/权威）
+## 当前状态（2026-09-06，PR #34 再审：回执必须在删 store 前写）
+
+- 卡仍是 `docs/evals/20260906-issue-33-memory-forget-correctness.md`。只修 #33 / PR #34，不开始全双工。
+- 审阅点：完成回执写在 `store.forgetMemory` 之后。写入失败时 store 已删、无回执，重试 `missing_provenance`，无法收敛。
+- 改动：visible → Truth → 窄回执 → 删 store → inspect。预写回执不覆盖仍在的 store 行。注入回执写入失败计入 `non_convergent_memory_forget_retries`。
+- 机器：checker 0/0/1；kernel 236/236；runtime 526/526；dep 0；#29 0/0；#31 0/1；协议无 diff。`product:check` 越过 forget checker，停在预存 collector 880/856。待推 PR #34，不合并。
+
+## 上一状态（2026-09-06，PR #34 再审：缺 store 行不得假成功）
+
+- 卡仍是 `docs/evals/20260906-issue-33-memory-forget-correctness.md`。只修 #33 / PR #34，不开始全双工。
+- 审阅点：`createForgetAction` 在 store 行不存在时自己返回 `alreadyGone`；统一主人也把缺行当成已完成。旧 ledger 硬删 store 后可见层残留会被报 verified。
+- 改动：缺目标 / `alreadyGone` / 能否验证成功只由 `forgetMemoryClaim` 决定。可见权威可能适用且没有完成回执 → fail-closed。真正完成后写窄回执（id/scope/指纹，无明文）供幂等重开。
+- 路径计数改为所有权：入口若独立决定 `forgotten` / `alreadyGone` / verified 也算额外路径。legacy store-gone + visible residue 计入 `false_positive_memory_forget_successes`。
+- 机器：checker 0/0/1；kernel 233/233；runtime 526/526；dep 0；#29 0/0；#31 0/1；协议无 diff。`product:check` 越过 forget checker，停在预存 collector 880/856。待推 PR #34，不合并。
+
+## 上一状态（2026-09-06，PR #32 再审：每维独立证明信任/权威）
 
 - 卡仍是 `docs/evals/20260906-issue-31-main-executor-context-parity.md`。只修 #31 / PR #32，不开始下一 Phase 0 issue。
 - 审阅点：`TRUST.memory` 没查行内 `authority=user`；`sectionAround()` 向前取 700 字，规则维会借到记忆段的 `cannot authorize`。
