@@ -33,7 +33,9 @@
 
 | # | 标准 | evaluator | 证据 |
 |---|---|---|---|
-| 1 | 主健身函数到 0 | 机器：`node script/check-main-executor-context-parity.mjs` | 打印 `main_executor_context_parity_failures: 0`；>0 退出非 0 |
+| 1 | 主健身函数到 0 | 机器：`node script/check-main-executor-context-parity.mjs` | 打印 `main_executor_context_parity_failures: 0`；任一执行器缺维、信任不对、sentinel 0 次或 >1 次都计入失败 |
+| 1b | 检查器在无预存 kernel dist 的干净树上能跑到指标 | 机器：删 `packages/kernel/dist` 后跑同一命令 | 打印指标，而不是 `@yishu/kernel` 模块解析失败 |
+| 1c | 对称缺失 / 单侧缺失 / 对称弱信任 / 重复段会让检查器失败 | 机器：`pnpm --filter @yishu/runtime exec node --import tsx --test test/main-executor-context-parity-evaluator.test.ts` | 各变异 `failureCount > 0` 或 duplicates 护栏红 |
 | 2 | 次健身函数到 1 | 同上 | 打印 `turn_scoped_context_assembly_paths: 1` |
 | 3 | 8 维夹具语义对等 | 机器：`pnpm --filter @yishu/runtime exec node --import tsx --test test/main-executor-context-parity.test.ts` | 每维 sentinel 在 Pi 与 Codex 各出现一次，信任/权威标记正确 |
 | 4 | 记忆到两边且不重复 | 同上 + 既有 `memory-assembly-integration` | 同一份产品上下文；每侧恰好一次；无私密泄漏 |
@@ -70,6 +72,7 @@
   - 护栏当时：private=0、authorization_expansions=0、duplicates=0、executor_kernel_reads=0。
 - 目标：`main_executor_context_parity_failures: 0`；`turn_scoped_context_assembly_paths: 1`。
 - 交付：`main_executor_context_parity_failures: 6 → 0`；`turn_scoped_context_assembly_paths: 2 → 1`；护栏保持 0；#29 两个零保持。意图帧在有历史时也能到达两边。
+- PR #32 审阅修订：检查器 wrapper 先 build `@yishu/kernel`（干净树删 dist 后能打印指标）；主健身函数改为 `!piValid || !codexValid`。`pnpm product:check` 越过 parity checker，停在预存 collector 880/856。
 
 ## 人评清单（交付时填）
 
