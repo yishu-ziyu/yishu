@@ -31,34 +31,28 @@
 
 ## Primary Fitness Function
 
-`lifecycle_integrity_failures`
+分解后的主指标：
 
-一条有明确 start/terminal 语义的操作，出现任一条即计 1（按操作计，不按事件重复加）：
+- `semantic_lifecycle_failures`：证据证明操作做错（有 start 无终端、冲突终端、同一 canonical 终端重复）
+- `observability_integrity_failures`：无法知道（缺关联 id、家族没有 start 埋点、低保真无 id 别名、观测-only 家族）
+- `lifecycle_integrity_failures` = 两者之和（操作不双计）
 
-1. 有 start 无 terminal
-2. 多于一个 terminal
-3. 有 terminal 无对应 start（且该 family 的 start 事件在这份日志的契约里是应有的；纯观测缺失另见 `observability_gaps`）
-4. terminal 无法关联到操作
-5. terminal 无法分成 success / failure / cancelled / unknown 之外的已知类，落入 unknown
+`--expect-zero` 只看 **语义** 失败。
 
-确定性「好」夹具目标：`lifecycle_integrity_failures = 0`。
+确定性好夹具：语义 = 0。不宣称现网已经是 0。没报错 ≠ 成功。
 
-不宣称现网 `quality.jsonl` 已经是 0。
+## 纳入的生命周期家族
 
-产品违约与观测不足分开：后者进 `observability_gaps`，不把「历史上没埋 start」说成操作本身失败。
+只收 `main` 上已经有成对语义的。PR #36 新事件不当契约。
 
-## 纳入的生命周期家族（4）
-
-只收 `main` 上已经有成对语义的。PR #36 新事件只作对照，不当契约。
-
-| family | start | success | failure | cancel | 关联 | 所有者 |
+| family | 模式 | start | 观测（不是 start） | 成功（等价别名） | failure / cancel | 关联 |
 |---|---|---|---|---|---|---|
-| `voice_capture` | `ptt.key_down` | `ptt.key_up` | （无） | （无） | `turnId` | VoiceSession / ClickyAnalytics PTT |
-| `asr` | `asr.request_sent` | `asr.final` 或 `asr.completed` | （无；main 没有失败类） | （无） | `turnId` | 听写提供者 / ClickyAnalytics |
-| `runtime_turn` | `turn.start`（别名 `turn.started`） | `model.completed`（status≠failed）；runtime-timing `model.done` | `turn.failed`；`model.completed` status=failed | `turn.failed` 且 `errorCode=cancelled` | `turnId` | `YishuForegroundRuntimeExecution` |
-| `computer_result` | `computer.result.sending` | `computer.result.sent` | （无） | （无） | `requestId` / `traceId` / `receiptHash` | `YishuAgentRuntimeClient.completeComputerAction` |
+| `voice_capture` | 语义 | `ptt.key_down` | — | `ptt.key_up` | — | `turnId` |
+| `asr` | 语义，但 **无 utterance start** | （无；`asr.request_sent` 是 per-request 观测） | `asr.request_sent` / `asr.first_partial` / `asr.first_sse` | canonical `asr.final`；低保真别名 `asr.completed` | 无 | `turnId`（不是 request id） |
+| `runtime_turn` | 语义 | `turn.start` | — | `model.done` 与带 id 的 `model.completed` 等价 | `turn.failed`；`errorCode=cancelled` → cancelled | `turnId` |
+| `computer_result` | **仅观测** | 生产 sending/sent **无** requestId/traceId/receiptHash，不能当主家族 | | | | |
 
-没有关联 id 的事件不得靠全局「上一次 start」配对。
+仪器是否存在按 **source file** 计。跨文件只在 **同一显式 id** 时配对（quality `turn.start` + timing `model.done`）。
 
 ## 排除的家族（缺什么）
 
@@ -72,6 +66,7 @@
 | 记忆 remember/forget | 点事件，不是 start→terminal |
 | ASR proxy `proxy-asr.jsonl` | 无 turnId / request id，无法并入 asr |
 | 运行时阶段 `recall.done` 等 | 阶段点，不是轮次终端 |
+| 把 `asr.request_sent` 当 start | 一句多次 interim+final，共用 `turnId`，会造假语义失败 |
 
 ## 验收标准
 
@@ -118,8 +113,8 @@ Experience Recorder 实现；给现网打补丁；把 `product:check` 改成以�
 ## 基线与结果
 
 - 动手前：没有评估器。
-- 确定性夹具：`node --test evals/observability/check-lifecycle-integrity.test.mjs` 22/22。
-- 入库夹具 `evals/voice/fixtures/quality.sample.jsonl`：`lifecycle_integrity_failures=40`，reconstructed 30 / unreconstructable 70，rate 0.30。详见 `docs/evals/20260906-lifecycle-integrity-baseline.md`。
+- 确定性夹具：`node --test evals/observability/check-lifecycle-integrity.test.mjs`（含生产形与反作弊）。
+- 入库夹具 `evals/voice/fixtures/quality.sample.jsonl`：语义 40 / 观测 30 / 并集 70；reconstructed 30；rate 0.30。详见 `docs/evals/20260906-lifecycle-integrity-baseline.md`。
 - 产品代码相对 `origin/main` 无 diff。
 
 ## 人评清单（交付时填）

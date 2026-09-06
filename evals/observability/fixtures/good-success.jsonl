@@ -1,8 +1,4 @@
 {"schemaVersion":1,"eventId":"v-start","occurredAt":"2026-09-06T10:00:00.000Z","sessionId":"voice","name":"ptt.key_down","attributes":{"turnId":"v1"}}
 {"schemaVersion":1,"eventId":"v-end","occurredAt":"2026-09-06T10:00:02.000Z","sessionId":"voice","name":"ptt.key_up","attributes":{"turnId":"v1"}}
-{"schemaVersion":1,"eventId":"a-start","occurredAt":"2026-09-06T10:00:02.050Z","sessionId":"voice","name":"asr.request_sent","attributes":{"turnId":"v1","actionKind":"final"}}
-{"schemaVersion":1,"eventId":"a-end","occurredAt":"2026-09-06T10:00:02.400Z","sessionId":"voice","name":"asr.final","attributes":{"turnId":"v1"}}
 {"schemaVersion":1,"eventId":"r-start","occurredAt":"2026-09-06T10:00:02.450Z","sessionId":"voice","name":"turn.start","attributes":{"turnId":"v1"}}
 {"schemaVersion":1,"eventId":"r-end","occurredAt":"2026-09-06T10:00:04.000Z","sessionId":"voice","name":"model.completed","attributes":{"turnId":"v1","taskTerminal":"unverified"}}
-{"schemaVersion":1,"eventId":"c-start","occurredAt":"2026-09-06T10:00:03.000Z","sessionId":"desktop","name":"computer.result.sending","attributes":{"requestId":"req-1","receiptStatus":"ok"}}
-{"schemaVersion":1,"eventId":"c-end","occurredAt":"2026-09-06T10:00:03.020Z","sessionId":"desktop","name":"computer.result.sent","attributes":{"requestId":"req-1","receiptStatus":"ok"}}

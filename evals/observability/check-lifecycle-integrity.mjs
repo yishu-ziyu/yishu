@@ -3,68 +3,90 @@
  * Lifecycle Integrity evaluator.
  *
  * Read-only. Metadata only. Does not infer success from the absence of errors.
+ * Distinguishes semantic lifecycle failures from observability debt.
  *
  *   node evals/observability/check-lifecycle-integrity.mjs <files...>
  *   node evals/observability/check-lifecycle-integrity.mjs --json <files...>
  *   node evals/observability/check-lifecycle-integrity.mjs --expect-zero <files...>
+ *
+ * --expect-zero fails only on semantic_lifecycle_failures.
  */
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 
 const CONTENT_KEY = /transcript|prompt|screenshot|windowtitle|filepath|url|cookie|authorization|apikey|token|password|email|username|label|audio|body|text|memory/i;
 
+/**
+ * Family catalog for current main (`9f84fff` telemetry).
+ *
+ * ASR is utterance-shaped at the terminal (`asr.final`) but has no
+ * utterance-level start. `asr.request_sent` is a per-request observation
+ * sharing `turnId`; it is not a request id and not a lifecycle start.
+ *
+ * computer_result is observability-only: production sending/sent rows
+ * do not carry requestId / traceId / receiptHash.
+ */
 export const FAMILIES = {
   voice_capture: {
+    mode: "semantic",
     owner: "YishuVoiceSessionController / ClickyAnalytics PTT",
     start: ["ptt.key_down"],
+    observations: [],
     success: ["ptt.key_up"],
+    successAliases: [],
     failure: [],
     cancel: [],
     idFields: ["turnId", "turn_id"],
   },
   asr: {
+    mode: "semantic",
     owner: "transcription provider / ClickyAnalytics",
-    start: ["asr.request_sent"],
-    success: ["asr.final", "asr.completed"],
+    start: [],
+    observations: ["asr.request_sent", "asr.first_sse", "asr.first_partial"],
+    success: ["asr.final"],
+    successAliases: ["asr.completed"],
     failure: [],
     cancel: [],
     idFields: ["turnId", "turn_id"],
+    missingStart: "utterance-level ASR start (asr.request_sent is per-request, not a start)",
   },
   runtime_turn: {
+    mode: "semantic",
     owner: "YishuForegroundRuntimeExecution",
     start: ["turn.start", "turn.started"],
+    observations: [],
     success: ["model.completed", "model.done"],
+    successAliases: ["model.completed", "model.done"],
     failure: ["turn.failed"],
     cancel: [],
     idFields: ["turnId", "turn_id"],
   },
   computer_result: {
+    mode: "observability_only",
     owner: "YishuAgentRuntimeClient.completeComputerAction",
     start: ["computer.result.sending"],
+    observations: [],
     success: ["computer.result.sent"],
+    successAliases: [],
     failure: [],
     cancel: [],
     idFields: ["requestId", "traceId", "receiptHash"],
+    missingStart: "correlation id on computer.result.sending/sent",
   },
 };
 
-const START_INDEX = indexByName("start");
-const SUCCESS_INDEX = indexByName("success");
-const FAILURE_INDEX = indexByName("failure");
-const CANCEL_INDEX = indexByName("cancel");
 const NAME_TO_FAMILY = new Map();
 for (const [family, spec] of Object.entries(FAMILIES)) {
-  for (const name of [...spec.start, ...spec.success, ...spec.failure, ...spec.cancel]) {
+  for (const name of [
+    ...spec.start,
+    ...spec.observations,
+    ...spec.success,
+    ...spec.successAliases,
+    ...spec.failure,
+    ...spec.cancel,
+  ]) {
     NAME_TO_FAMILY.set(name, family);
   }
-}
-
-function indexByName(kind) {
-  const map = new Map();
-  for (const [family, spec] of Object.entries(FAMILIES)) {
-    for (const name of spec[kind]) map.set(name, family);
-  }
-  return map;
 }
 
 function emptyMetrics() {
@@ -74,6 +96,7 @@ function emptyMetrics() {
     terminal_without_start: 0,
     uncorrelated_terminal_events: 0,
     ambiguous_terminal_outcomes: 0,
+    equivalent_terminal_aliases: 0,
   };
 }
 
@@ -82,6 +105,8 @@ function emptyFamilyBucket() {
     operations_reconstructed: 0,
     operations_unreconstructable: 0,
     lifecycle_integrity_failures: 0,
+    semantic_lifecycle_failures: 0,
+    observability_integrity_failures: 0,
     ...emptyMetrics(),
     observability_gaps: [],
   };
@@ -134,7 +159,9 @@ export function normalizeEvent(row, sourceFile, line) {
   const top = metadataObject(row);
   const name = typeof row.name === "string" ? row.name : "";
   const family = NAME_TO_FAMILY.get(name) ?? null;
-  const idFields = family ? FAMILIES[family].idFields : ["turnId", "turn_id", "requestId", "traceId", "receiptHash"];
+  const idFields = family
+    ? FAMILIES[family].idFields
+    : ["turnId", "turn_id", "requestId", "traceId", "receiptHash"];
   const id = firstId(idFields.map((field) => top[field] ?? attrs[field]));
   const occurredAt =
     typeof row.occurredAt === "string"
@@ -162,6 +189,7 @@ export function normalizeEvent(row, sourceFile, line) {
         : typeof row.errorCode === "string"
           ? row.errorCode
           : null,
+    actionKind: attrs.actionKind ?? top.actionKind ?? null,
     providerId: attrs.providerId ?? top.providerId ?? null,
     modelId: attrs.modelId ?? top.modelId ?? null,
     sessionId: typeof row.sessionId === "string" ? row.sessionId : null,
@@ -173,10 +201,17 @@ export function normalizeEvent(row, sourceFile, line) {
   };
 }
 
-function roleOf(event) {
-  if (!event.name) return null;
-  if (START_INDEX.has(event.name)) return "start";
-  if (SUCCESS_INDEX.has(event.name) || FAILURE_INDEX.has(event.name) || CANCEL_INDEX.has(event.name)) {
+export function roleOf(event) {
+  if (!event?.name || !event.family) return null;
+  const spec = FAMILIES[event.family];
+  if (spec.start.includes(event.name)) return "start";
+  if (spec.observations.includes(event.name)) return "observation";
+  if (
+    spec.success.includes(event.name) ||
+    spec.successAliases.includes(event.name) ||
+    spec.failure.includes(event.name) ||
+    spec.cancel.includes(event.name)
+  ) {
     return "terminal";
   }
   return null;
@@ -189,22 +224,32 @@ export function classifyTerminal(event) {
   if (outcome === "success" || outcome === "failure" || outcome === "cancelled") return outcome;
   if (event.name === "model.completed" && event.status === "failed") return "failure";
   if (event.name === "turn.failed" && event.errorCode === "cancelled") return "cancelled";
-  if (FAILURE_INDEX.has(event.name)) return "failure";
-  if (CANCEL_INDEX.has(event.name)) return "cancelled";
-  if (SUCCESS_INDEX.has(event.name)) return "success";
+  const spec = FAMILIES[event.family];
+  if (spec.failure.includes(event.name)) return "failure";
+  if (spec.cancel.includes(event.name)) return "cancelled";
+  if (spec.success.includes(event.name) || spec.successAliases.includes(event.name)) return "success";
   return "unknown";
 }
 
-function gapKey(family, missing) {
-  return `${family}::${missing}`;
+function relationToExistingTerminal(operation, event, kind) {
+  if (!operation.terminal_kind) return "first";
+  if (kind === "unknown" || operation.terminal_kind === "unknown") return "ambiguous";
+  if (kind !== operation.terminal_kind) return "conflict";
+  if (operation.terminal_names.includes(event.name)) return "duplicate";
+  return "alias";
 }
 
-function addGap(report, family, missing) {
-  const key = gapKey(family, missing);
+function gapKey(family, missing, domain) {
+  return `${family}::${domain}::${missing}`;
+}
+
+function addGap(report, family, missing, domain) {
+  const key = gapKey(family, missing, domain);
   if (report._gapKeys.has(key)) return;
   report._gapKeys.add(key);
-  report.observability_gaps.push({ family, missing });
-  report.by_family[family].observability_gaps.push({ family, missing });
+  const gap = { family, missing, domain };
+  report.observability_gaps.push(gap);
+  report.by_family[family].observability_gaps.push(gap);
 }
 
 function bump(report, family, field, n = 1) {
@@ -212,16 +257,66 @@ function bump(report, family, field, n = 1) {
   report.by_family[family][field] += n;
 }
 
-function markFailure(report, family) {
+function markSemantic(report, family, operation) {
+  if (operation.failure_class === "semantic") return;
+  if (operation.failure_class === "observability") {
+    bump(report, family, "observability_integrity_failures", -1);
+    bump(report, family, "semantic_lifecycle_failures");
+    operation.failure_class = "semantic";
+    operation.counted_as = "unreconstructable";
+    operation.correlation_quality = "semantic_failure";
+    return;
+  }
+  if (operation.counted_as === "reconstructed") {
+    bump(report, family, "operations_reconstructed", -1);
+    bump(report, family, "operations_unreconstructable");
+  } else if (operation.counted_as !== "unreconstructable") {
+    bump(report, family, "operations_unreconstructable");
+  }
+  bump(report, family, "semantic_lifecycle_failures");
   bump(report, family, "lifecycle_integrity_failures");
-  bump(report, family, "operations_unreconstructable");
+  operation.failure_class = "semantic";
+  operation.counted_as = "unreconstructable";
+  operation.correlation_quality = "semantic_failure";
 }
 
-function closeReconstructed(report, family, operation) {
-  operation.terminal_at = operation.events.at(-1)?.occurredAt ?? null;
+function markObservability(report, family, operation) {
+  if (operation.failure_class === "semantic" || operation.failure_class === "observability") return;
+  if (operation.counted_as === "reconstructed") {
+    bump(report, family, "operations_reconstructed", -1);
+    bump(report, family, "operations_unreconstructable");
+  } else if (operation.counted_as !== "unreconstructable") {
+    bump(report, family, "operations_unreconstructable");
+  }
+  bump(report, family, "observability_integrity_failures");
+  bump(report, family, "lifecycle_integrity_failures");
+  operation.failure_class = "observability";
+  operation.counted_as = "unreconstructable";
+  operation.correlation_quality = "observability";
+}
+
+function markReconstructed(report, family, operation) {
+  operation.counted_as = "reconstructed";
+  operation.failure_class = null;
   operation.correlation_quality = "id";
-  report.operations.push(operation);
   bump(report, family, "operations_reconstructed");
+}
+
+function assertNonNegative(report) {
+  const fields = [
+    "operations_reconstructed",
+    "operations_unreconstructable",
+    "lifecycle_integrity_failures",
+    "semantic_lifecycle_failures",
+    "observability_integrity_failures",
+    ...Object.keys(emptyMetrics()),
+  ];
+  for (const field of fields) {
+    if (report[field] < 0) report[field] = 0;
+    for (const bucket of Object.values(report.by_family)) {
+      if (bucket[field] < 0) bucket[field] = 0;
+    }
+  }
 }
 
 export function evaluate(events, options = {}) {
@@ -230,6 +325,8 @@ export function evaluate(events, options = {}) {
     operations_reconstructed: 0,
     operations_unreconstructable: 0,
     lifecycle_integrity_failures: 0,
+    semantic_lifecycle_failures: 0,
+    observability_integrity_failures: 0,
     ...emptyMetrics(),
     reconstructability_rate: null,
     empty_input: events.length === 0,
@@ -250,62 +347,132 @@ export function evaluate(events, options = {}) {
     return a.order - b.order;
   });
 
-  const familyHasStart = Object.fromEntries(Object.keys(FAMILIES).map((name) => [name, false]));
+  const startsByDomain = new Set();
   for (const event of indexed) {
-    if (event.family && roleOf(event) === "start") familyHasStart[event.family] = true;
+    if (event.family && roleOf(event) === "start") {
+      startsByDomain.add(`${event.family}::${event.sourceFile}`);
+    }
   }
 
   const open = new Map();
   const closed = new Map();
+  const observations = new Map();
+  const observabilityOnlyDomains = new Set();
   const keyFor = (family, id) => `${family}::${id}`;
 
-  const failOpen = (operation, field) => {
-    bump(report, operation.family, field);
-    markFailure(report, operation.family);
-    operation.correlation_quality = "failed";
-    report.operations.push(operation);
-    if (operation.operation_id) closed.set(keyFor(operation.family, operation.operation_id), operation);
+  const pushOp = (operation) => {
+    if (!operation._pushed) {
+      report.operations.push(operation);
+      operation._pushed = true;
+    }
   };
+
+  const attach = (operation, event) => {
+    operation.events.push(summarize(event));
+    if (!operation.source_files.includes(event.sourceFile)) {
+      operation.source_files.push(event.sourceFile);
+    }
+  };
+
+  const rememberTerminalName = (operation, event) => {
+    if (event.name && !operation.terminal_names.includes(event.name)) {
+      operation.terminal_names.push(event.name);
+    }
+  };
+
+  const takeObservations = (family, id) => observations.get(keyFor(family, id)) ?? [];
 
   for (const event of indexed) {
     if (!event.family) continue;
     const family = event.family;
+    const spec = FAMILIES[family];
     const role = roleOf(event);
     if (!role) continue;
 
+    if (spec.mode === "observability_only") {
+      const domain = event.sourceFile;
+      addGap(report, family, spec.missingStart || "correlation_id", domain);
+      if (!observabilityOnlyDomains.has(`${family}::${domain}`)) {
+        observabilityOnlyDomains.add(`${family}::${domain}`);
+        const operation = {
+          family,
+          operation_id: event.operationId,
+          started_at: null,
+          terminal_at: event.occurredAt,
+          terminal_kind: null,
+          terminal_names: [],
+          events: [summarize(event)],
+          correlation_quality: "observability",
+          source_files: [domain],
+          counted_as: null,
+          failure_class: null,
+        };
+        markObservability(report, family, operation);
+        pushOp(operation);
+      } else {
+        const existing = report.operations.find(
+          (op) => op.family === family && op.source_files.includes(domain),
+        );
+        if (existing) attach(existing, event);
+      }
+      continue;
+    }
+
+    if (role === "observation") {
+      if (!event.operationId) {
+        addGap(report, family, "correlation_id", event.sourceFile);
+        continue;
+      }
+      const ok = keyFor(family, event.operationId);
+      const list = observations.get(ok) ?? [];
+      list.push(event);
+      observations.set(ok, list);
+      const current = open.get(ok) || closed.get(ok);
+      if (current) attach(current, event);
+      continue;
+    }
+
     if (role === "start") {
       if (!event.operationId) {
-        addGap(report, family, "correlation_id");
-        bump(report, family, "started_without_terminal_outcome");
-        markFailure(report, family);
-        report.operations.push({
+        addGap(report, family, "correlation_id", event.sourceFile);
+        const operation = {
           family,
           operation_id: null,
           started_at: event.occurredAt,
           terminal_at: null,
           terminal_kind: null,
+          terminal_names: [],
           events: [summarize(event)],
-          correlation_quality: "missing_id",
           source_files: [event.sourceFile],
-        });
+          counted_as: null,
+          failure_class: null,
+        };
+        bump(report, family, "started_without_terminal_outcome");
+        markSemantic(report, family, operation);
+        pushOp(operation);
         continue;
       }
       const key = keyFor(family, event.operationId);
       const existing = open.get(key);
       if (existing) {
-        failOpen(existing, "started_without_terminal_outcome");
+        bump(report, family, "started_without_terminal_outcome");
+        markSemantic(report, family, existing);
         open.delete(key);
+        closed.set(key, existing);
       }
-      open.set(key, {
+      const operation = {
         family,
         operation_id: event.operationId,
         started_at: event.occurredAt,
         terminal_at: null,
         terminal_kind: null,
-        events: [summarize(event)],
-        correlation_quality: "open",
+        terminal_names: [],
+        events: [summarize(event), ...takeObservations(family, event.operationId).map(summarize)],
         source_files: [event.sourceFile],
-      });
+        counted_as: null,
+        failure_class: null,
+      };
+      open.set(key, operation);
       continue;
     }
 
@@ -313,90 +480,114 @@ export function evaluate(events, options = {}) {
     if (kind === "unknown") bump(report, family, "ambiguous_terminal_outcomes");
 
     if (!event.operationId) {
-      addGap(report, family, "correlation_id");
+      addGap(report, family, "correlation_id", event.sourceFile);
       bump(report, family, "uncorrelated_terminal_events");
-      markFailure(report, family);
-      report.operations.push({
-        family,
-        operation_id: null,
-        started_at: null,
-        terminal_at: event.occurredAt,
-        terminal_kind: kind,
-        events: [summarize(event)],
-        correlation_quality: "uncorrelated",
-        source_files: [event.sourceFile],
-      });
+      addGap(report, family, `low-fidelity alias ${event.name}`, event.sourceFile);
+      bump(report, family, "observability_integrity_failures");
+      bump(report, family, "lifecycle_integrity_failures");
       continue;
     }
 
     const key = keyFor(family, event.operationId);
-    const current = open.get(key);
-    if (!current) {
-      const previous = closed.get(key);
-      if (previous) {
-        previous.events.push(summarize(event));
-        if (previous.terminal_kind) {
-          bump(report, family, "duplicate_terminal_outcomes");
-          if (previous.correlation_quality !== "failed") {
-            bump(report, family, "operations_reconstructed", -1);
-            markFailure(report, family);
-            previous.correlation_quality = "failed";
-          }
+    let current = open.get(key);
+    if (current) {
+      attach(current, event);
+      const relation = relationToExistingTerminal(current, event, kind);
+      rememberTerminalName(current, event);
+      if (relation === "first") {
+        current.terminal_kind = kind;
+        current.terminal_at = event.occurredAt;
+        if (kind === "unknown") {
+          open.delete(key);
+          closed.set(key, current);
+          pushOp(current);
+          markSemantic(report, family, current);
+        } else {
+          open.delete(key);
+          closed.set(key, current);
+          pushOp(current);
+          markReconstructed(report, family, current);
         }
-        continue;
-      }
-      addGap(report, family, `start:${FAMILIES[family].start.join("|")}`);
-      bump(report, family, "terminal_without_start");
-      const orphan = {
-        family,
-        operation_id: event.operationId,
-        started_at: null,
-        terminal_at: event.occurredAt,
-        terminal_kind: kind,
-        events: [summarize(event)],
-        correlation_quality: "orphan",
-        source_files: [event.sourceFile],
-      };
-      closed.set(key, orphan);
-      report.operations.push(orphan);
-      if (familyHasStart[family]) {
-        markFailure(report, family);
-      } else {
-        bump(report, family, "operations_unreconstructable");
+      } else if (relation === "alias") {
+        bump(report, family, "equivalent_terminal_aliases");
+      } else if (relation === "duplicate") {
+        bump(report, family, "duplicate_terminal_outcomes");
+        open.delete(key);
+        closed.set(key, current);
+        pushOp(current);
+        markSemantic(report, family, current);
+      } else if (relation === "conflict" || relation === "ambiguous") {
+        if (relation === "conflict") bump(report, family, "duplicate_terminal_outcomes");
+        open.delete(key);
+        closed.set(key, current);
+        pushOp(current);
+        markSemantic(report, family, current);
       }
       continue;
     }
 
-    current.events.push(summarize(event));
-    if (!current.source_files.includes(event.sourceFile)) {
-      current.source_files.push(event.sourceFile);
+    current = closed.get(key);
+    if (current) {
+      attach(current, event);
+      const relation = relationToExistingTerminal(current, event, kind);
+      rememberTerminalName(current, event);
+      if (relation === "alias") {
+        bump(report, family, "equivalent_terminal_aliases");
+        continue;
+      }
+      if (relation === "duplicate") {
+        bump(report, family, "duplicate_terminal_outcomes");
+        markSemantic(report, family, current);
+        continue;
+      }
+      if (relation === "conflict" || relation === "ambiguous") {
+        if (relation === "conflict") bump(report, family, "duplicate_terminal_outcomes");
+        markSemantic(report, family, current);
+        continue;
+      }
     }
-    if (current.terminal_kind) {
-      bump(report, family, "duplicate_terminal_outcomes");
-      continue;
+
+    const domainHasStart = startsByDomain.has(`${family}::${event.sourceFile}`);
+    addGap(report, family, spec.missingStart || `start:${spec.start.join("|") || "(none)"}`, event.sourceFile);
+    bump(report, family, "terminal_without_start");
+    const orphan = {
+      family,
+      operation_id: event.operationId,
+      started_at: null,
+      terminal_at: event.occurredAt,
+      terminal_kind: kind,
+      terminal_names: [event.name],
+      events: [...takeObservations(family, event.operationId).map(summarize), summarize(event)],
+      source_files: [event.sourceFile],
+      counted_as: null,
+      failure_class: null,
+    };
+    closed.set(key, orphan);
+    pushOp(orphan);
+    if (domainHasStart && spec.start.length > 0) {
+      markSemantic(report, family, orphan);
+    } else {
+      markObservability(report, family, orphan);
     }
-    if (kind === "unknown") {
-      current.terminal_kind = "unknown";
-      open.delete(key);
-      current.correlation_quality = "failed";
-      report.operations.push(current);
-      closed.set(key, current);
-      markFailure(report, family);
-      continue;
-    }
-    current.terminal_kind = kind;
-    open.delete(key);
-    closed.set(key, current);
-    closeReconstructed(report, family, current);
   }
 
   for (const operation of open.values()) {
-    failOpen(operation, "started_without_terminal_outcome");
+    bump(report, operation.family, "started_without_terminal_outcome");
+    pushOp(operation);
+    markSemantic(report, operation.family, operation);
   }
 
+  assertNonNegative(report);
   const denom = report.operations_reconstructed + report.operations_unreconstructable;
   report.reconstructability_rate = denom === 0 ? null : report.operations_reconstructed / denom;
+  if (report.reconstructability_rate != null) {
+    if (report.reconstructability_rate < 0) report.reconstructability_rate = 0;
+    if (report.reconstructability_rate > 1) report.reconstructability_rate = 1;
+  }
   delete report._gapKeys;
+  for (const operation of report.operations) {
+    delete operation._pushed;
+  }
   return report;
 }
 
@@ -407,6 +598,7 @@ function summarize(event) {
     status: event.status,
     outcome: event.outcome,
     errorCode: event.errorCode,
+    actionKind: event.actionKind ?? null,
     sourceFile: event.sourceFile,
     line: event.line,
   };
@@ -419,34 +611,31 @@ export function formatText(report) {
     `operations_reconstructed: ${report.operations_reconstructed}`,
     `operations_unreconstructable: ${report.operations_unreconstructable}`,
     `lifecycle_integrity_failures: ${report.lifecycle_integrity_failures}`,
+    `semantic_lifecycle_failures: ${report.semantic_lifecycle_failures}`,
+    `observability_integrity_failures: ${report.observability_integrity_failures}`,
     "",
     `started_without_terminal_outcome: ${report.started_without_terminal_outcome}`,
     `duplicate_terminal_outcomes: ${report.duplicate_terminal_outcomes}`,
     `terminal_without_start: ${report.terminal_without_start}`,
     `uncorrelated_terminal_events: ${report.uncorrelated_terminal_events}`,
     `ambiguous_terminal_outcomes: ${report.ambiguous_terminal_outcomes}`,
+    `equivalent_terminal_aliases: ${report.equivalent_terminal_aliases}`,
     "",
     `reconstructability_rate: ${formatRate(report)}`,
   ];
-  if (report.empty_input) {
-    lines.push("empty_input: true");
-  }
+  if (report.empty_input) lines.push("empty_input: true");
   lines.push("", "by_family:");
   for (const [family, bucket] of Object.entries(report.by_family)) {
     lines.push(`  ${family}:`);
     lines.push(`    reconstructed: ${bucket.operations_reconstructed}`);
     lines.push(`    unreconstructable: ${bucket.operations_unreconstructable}`);
-    lines.push(`    failures: ${bucket.lifecycle_integrity_failures}`);
-    lines.push(`    started_without_terminal: ${bucket.started_without_terminal_outcome}`);
-    lines.push(`    duplicate_terminals: ${bucket.duplicate_terminal_outcomes}`);
-    lines.push(`    terminal_without_start: ${bucket.terminal_without_start}`);
-    lines.push(`    uncorrelated: ${bucket.uncorrelated_terminal_events}`);
-    lines.push(`    ambiguous: ${bucket.ambiguous_terminal_outcomes}`);
+    lines.push(`    semantic_failures: ${bucket.semantic_lifecycle_failures}`);
+    lines.push(`    observability_failures: ${bucket.observability_integrity_failures}`);
   }
   if (report.observability_gaps.length) {
     lines.push("", "observability_gaps:");
     for (const gap of report.observability_gaps) {
-      lines.push(`  - ${gap.family}: missing ${gap.missing}`);
+      lines.push(`  - ${gap.family} [${gap.domain}]: missing ${gap.missing}`);
     }
   }
   return lines.join("\n") + "\n";
@@ -470,6 +659,7 @@ export function publicReport(report) {
       terminal_at: op.terminal_at,
       terminal_kind: op.terminal_kind,
       correlation_quality: op.correlation_quality,
+      failure_class: op.failure_class,
       source_files: op.source_files,
       event_names: op.events.map((event) => event.name),
     })),
@@ -494,9 +684,8 @@ export function parseArgs(argv) {
     if (a === "--json") args.json = true;
     else if (a === "--expect-zero") args.expectZero = true;
     else if (a === "--help" || a === "-h") args.help = true;
-    else if (a.startsWith("-")) {
-      args.unknown = a;
-    } else args.files.push(a);
+    else if (a.startsWith("-")) args.unknown = a;
+    else args.files.push(a);
   }
   return args;
 }
@@ -516,12 +705,8 @@ function main(argv) {
   } else {
     process.stdout.write(formatText(report));
   }
-  if (args.expectZero && report.lifecycle_integrity_failures !== 0) {
-    process.exit(1);
-  }
+  if (args.expectZero && report.semantic_lifecycle_failures !== 0) process.exit(1);
 }
 
 const invoked = process.argv[1] && basename(process.argv[1]) === "check-lifecycle-integrity.mjs";
-if (invoked) {
-  main(process.argv.slice(2));
-}
+if (invoked) main(process.argv.slice(2));

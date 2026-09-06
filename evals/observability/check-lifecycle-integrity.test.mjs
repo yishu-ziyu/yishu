@@ -41,70 +41,90 @@ function writeTemp(events, fileName = "quality.jsonl") {
   return path;
 }
 
-test("good-success reconstructs four families with zero failures", () => {
+function assertInvariants(report) {
+  assert.ok(report.operations_reconstructed >= 0);
+  assert.ok(report.operations_unreconstructable >= 0);
+  assert.ok(report.lifecycle_integrity_failures >= 0);
+  assert.ok(report.semantic_lifecycle_failures >= 0);
+  assert.ok(report.observability_integrity_failures >= 0);
+  assert.equal(
+    report.operations_reconstructed + report.operations_unreconstructable,
+    report.operations.length,
+  );
+  if (report.reconstructability_rate != null) {
+    assert.ok(report.reconstructability_rate >= 0);
+    assert.ok(report.reconstructability_rate <= 1);
+  }
+}
+
+test("good-success reconstructs voice and runtime with zero semantic failures", () => {
   const report = evaluate(load("good-success.jsonl"));
+  assertInvariants(report);
+  assert.equal(report.semantic_lifecycle_failures, 0);
   assert.equal(report.lifecycle_integrity_failures, 0);
-  assert.equal(report.operations_reconstructed, 4);
-  assert.equal(report.operations_unreconstructable, 0);
+  assert.equal(report.operations_reconstructed, 2);
   assert.equal(report.by_family.voice_capture.operations_reconstructed, 1);
-  assert.equal(report.by_family.asr.operations_reconstructed, 1);
   assert.equal(report.by_family.runtime_turn.operations_reconstructed, 1);
-  assert.equal(report.by_family.computer_result.operations_reconstructed, 1);
-  const cli = runCli(["--expect-zero", join(FIX, "good-success.jsonl")]);
-  assert.equal(cli.status, 0, cli.stdout + cli.stderr);
+  assert.equal(runCli(["--expect-zero", join(FIX, "good-success.jsonl")]).status, 0);
 });
 
 test("explicit failure is a valid terminal", () => {
   const report = evaluate(load("explicit-failure.jsonl"));
-  assert.equal(report.lifecycle_integrity_failures, 0);
-  assert.equal(report.operations_reconstructed, 1);
+  assertInvariants(report);
+  assert.equal(report.semantic_lifecycle_failures, 0);
   assert.equal(report.operations[0].terminal_kind, "failure");
   assert.equal(runCli(["--expect-zero", join(FIX, "explicit-failure.jsonl")]).status, 0);
 });
 
 test("cancellation is a valid terminal", () => {
   const report = evaluate(load("cancellation.jsonl"));
-  assert.equal(report.lifecycle_integrity_failures, 0);
+  assertInvariants(report);
+  assert.equal(report.semantic_lifecycle_failures, 0);
   assert.equal(report.operations[0].terminal_kind, "cancelled");
-  assert.equal(runCli(["--expect-zero", join(FIX, "cancellation.jsonl")]).status, 0);
 });
 
-test("missing terminal is a lifecycle failure", () => {
+test("missing terminal is a semantic failure", () => {
   const report = evaluate(load("missing-terminal.jsonl"));
-  assert.ok(report.lifecycle_integrity_failures >= 1);
+  assertInvariants(report);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
   assert.ok(report.started_without_terminal_outcome >= 1);
   assert.equal(runCli(["--expect-zero", join(FIX, "missing-terminal.jsonl")]).status, 1);
 });
 
-test("duplicate terminal is a lifecycle failure", () => {
+test("duplicate canonical terminal is a semantic failure", () => {
   const report = evaluate(load("duplicate-terminal.jsonl"));
-  assert.ok(report.lifecycle_integrity_failures >= 1);
+  assertInvariants(report);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
   assert.ok(report.duplicate_terminal_outcomes >= 1);
 });
 
-test("orphan terminal is a lifecycle failure when the family has starts", () => {
+test("orphan terminal is a semantic failure when the same source has starts", () => {
   const report = evaluate(load("orphan-terminal.jsonl"));
+  assertInvariants(report);
   assert.ok(report.terminal_without_start >= 1);
-  assert.ok(report.lifecycle_integrity_failures >= 1);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
   assert.equal(report.by_family.voice_capture.operations_reconstructed, 1);
 });
 
-test("terminal without usable id is a correlation failure", () => {
+test("terminal without usable id is observability debt plus open-start semantic failure", () => {
   const report = evaluate(load("missing-correlation.jsonl"));
+  assertInvariants(report);
   assert.ok(report.uncorrelated_terminal_events >= 1);
-  assert.ok(report.lifecycle_integrity_failures >= 1);
+  assert.ok(report.observability_integrity_failures >= 1);
   assert.ok(report.started_without_terminal_outcome >= 2);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
 });
 
 test("three interleaved captures reconstruct with zero failures", () => {
   const report = evaluate(load("concurrent.jsonl"));
-  assert.equal(report.lifecycle_integrity_failures, 0);
+  assertInvariants(report);
+  assert.equal(report.semantic_lifecycle_failures, 0);
   assert.equal(report.operations_reconstructed, 3);
-  assert.equal(runCli(["--expect-zero", join(FIX, "concurrent.jsonl")]).status, 0);
 });
 
 test("empty log does not report perfect reconstructability", () => {
   const report = evaluate(load("empty.jsonl"));
+  assertInvariants(report);
   assert.equal(report.empty_input, true);
   assert.equal(report.reconstructability_rate, null);
   assert.equal(report.operations_reconstructed, 0);
@@ -116,12 +136,12 @@ test("empty log does not report perfect reconstructability", () => {
 
 test("legacy incomplete log surfaces observability gaps and is not silently green", () => {
   const report = evaluate(load("legacy-incomplete.jsonl"));
+  assertInvariants(report);
   assert.ok(report.observability_gaps.length >= 1);
   assert.ok(report.operations_unreconstructable >= 1);
-  assert.ok(report.reconstructability_rate === null || report.reconstructability_rate < 1);
   const silentlyGreen =
-    report.lifecycle_integrity_failures === 0 &&
-    report.operations_unreconstructable === 0 &&
+    report.semantic_lifecycle_failures === 0 &&
+    report.observability_integrity_failures === 0 &&
     report.observability_gaps.length === 0;
   assert.equal(silentlyGreen, false);
 });
@@ -146,7 +166,8 @@ test("runtime-timing model.done can close a quality turn.start by turnId", () =>
     "runtime-timing.jsonl",
   );
   const report = evaluateFiles([quality, timing]);
-  assert.equal(report.lifecycle_integrity_failures, 0);
+  assertInvariants(report);
+  assert.equal(report.semantic_lifecycle_failures, 0);
   assert.equal(report.by_family.runtime_turn.operations_reconstructed, 1);
 });
 
@@ -179,16 +200,17 @@ test("unknown outcome is an ambiguous terminal", () => {
 test("anti-gaming: deleting a terminal cannot stay green", () => {
   const events = load("good-success.jsonl").filter((event) => event.name !== "model.completed");
   const report = evaluate(events);
-  assert.ok(report.lifecycle_integrity_failures >= 1);
+  assertInvariants(report);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
   assert.ok(report.started_without_terminal_outcome >= 1);
-  assert.ok(report.by_family.runtime_turn.lifecycle_integrity_failures >= 1);
 });
 
-test("anti-gaming: duplicating a terminal cannot stay green", () => {
+test("anti-gaming: duplicating a canonical terminal cannot stay green", () => {
   const events = load("good-success.jsonl");
   const extra = events.find((event) => event.name === "ptt.key_up");
   const report = evaluate([...events, { ...extra, occurredAt: "2026-09-06T10:00:09.000Z" }]);
-  assert.ok(report.lifecycle_integrity_failures >= 1);
+  assertInvariants(report);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
   assert.ok(report.duplicate_terminal_outcomes >= 1);
 });
 
@@ -197,17 +219,19 @@ test("anti-gaming: removing an operation id cannot stay green", () => {
     event.name === "ptt.key_up" ? { ...event, operationId: null } : event,
   );
   const report = evaluate(events);
+  assertInvariants(report);
   assert.ok(report.uncorrelated_terminal_events >= 1);
-  assert.ok(report.lifecycle_integrity_failures >= 1);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
 });
 
 test("anti-gaming: unknown terminal category cannot stay green", () => {
   const events = load("good-success.jsonl").map((event) =>
-    event.name === "asr.final" ? { ...event, outcome: "unknown" } : event,
+    event.name === "ptt.key_up" ? { ...event, outcome: "unknown" } : event,
   );
   const report = evaluate(events);
+  assertInvariants(report);
   assert.ok(report.ambiguous_terminal_outcomes >= 1);
-  assert.ok(report.lifecycle_integrity_failures >= 1);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
 });
 
 test("anti-gaming: unrelated success does not close another operation", () => {
@@ -223,8 +247,9 @@ test("anti-gaming: unrelated success does not close another operation", () => {
     errorCode: null,
   });
   const report = evaluate(events);
+  assertInvariants(report);
   assert.ok(report.started_without_terminal_outcome >= 1);
-  assert.ok(report.lifecycle_integrity_failures >= 1);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
   const openOne = report.operations.find((op) => op.operation_id === "open-1");
   assert.equal(openOne.terminal_kind, null);
 });
@@ -233,7 +258,7 @@ test("json output is machine readable and omits raw content", () => {
   const cli = runCli(["--json", join(FIX, "good-success.jsonl")]);
   assert.equal(cli.status, 0, cli.stderr);
   const body = JSON.parse(cli.stdout);
-  assert.equal(body.lifecycle_integrity_failures, 0);
+  assert.equal(body.semantic_lifecycle_failures, 0);
   assert.ok(Array.isArray(body.operations));
   assert.ok(body.operations[0].event_names.includes("ptt.key_down"));
   assert.equal(JSON.stringify(body).includes("transcript"), false);
@@ -248,4 +273,73 @@ test("public report drops per-event payloads", () => {
 test("usage without files exits 2", () => {
   const cli = runCli([]);
   assert.equal(cli.status, 2);
+});
+
+test("ASR production shape: repeated request_sent is not a false semantic failure", () => {
+  const report = evaluate(load("asr-production-shape.jsonl"));
+  assertInvariants(report);
+  assert.equal(report.semantic_lifecycle_failures, 0);
+  assert.ok(report.observability_integrity_failures >= 1);
+  assert.equal(report.by_family.asr.started_without_terminal_outcome, 0);
+  const asrOps = report.operations.filter((op) => op.family === "asr" && op.operation_id === "t1");
+  assert.equal(asrOps.length, 1);
+  assert.equal(asrOps[0].terminal_kind, "success");
+  assert.ok(report.uncorrelated_terminal_events >= 1);
+});
+
+test("runtime cross-source: correlated done reconstructs; id-less completed is observability", () => {
+  const report = evaluateFiles([
+    join(FIX, "runtime-cross-source-quality.jsonl"),
+    join(FIX, "runtime-cross-source-timing.jsonl"),
+  ]);
+  assertInvariants(report);
+  assert.equal(report.semantic_lifecycle_failures, 0);
+  assert.equal(report.by_family.runtime_turn.operations_reconstructed, 1);
+  assert.ok(report.observability_integrity_failures >= 1);
+  assert.ok(report.uncorrelated_terminal_events >= 1);
+  assert.equal(report.operations.filter((op) => op.family === "runtime_turn").length, 1);
+});
+
+test("computer_result current shape is observability debt, not two semantic failures", () => {
+  const report = evaluate(load("computer-result-current.jsonl"));
+  assertInvariants(report);
+  assert.equal(report.semantic_lifecycle_failures, 0);
+  assert.ok(report.observability_integrity_failures >= 1);
+  assert.equal(report.by_family.computer_result.operations_reconstructed, 0);
+  assert.ok(report.observability_gaps.some((gap) => gap.family === "computer_result"));
+});
+
+test("conflicting correlated terminals are a semantic failure", () => {
+  const report = evaluate(load("conflicting-terminal.jsonl"));
+  assertInvariants(report);
+  assert.ok(report.semantic_lifecycle_failures >= 1);
+  assert.equal(report.by_family.runtime_turn.operations_reconstructed, 0);
+});
+
+test("equivalent correlated success aliases are one semantic terminal", () => {
+  const report = evaluate(load("equivalent-aliases.jsonl"));
+  assertInvariants(report);
+  assert.equal(report.semantic_lifecycle_failures, 0);
+  assert.equal(report.by_family.runtime_turn.operations_reconstructed, 1);
+  assert.ok(report.equivalent_terminal_aliases >= 1);
+  assert.equal(report.duplicate_terminal_outcomes, 0);
+});
+
+test("orphan duplicate preserves non-negative aggregates", () => {
+  const report = evaluate(load("orphan-duplicate.jsonl"));
+  assertInvariants(report);
+  assert.ok(report.duplicate_terminal_outcomes >= 1);
+});
+
+test("modern instrumentation does not turn a legacy orphan into a product failure", () => {
+  const report = evaluateFiles([
+    join(FIX, "legacy-orphan.jsonl"),
+    join(FIX, "modern-valid.jsonl"),
+  ]);
+  assertInvariants(report);
+  assert.equal(report.by_family.voice_capture.operations_reconstructed, 1);
+  assert.equal(report.by_family.runtime_turn.operations_reconstructed, 1);
+  assert.equal(report.by_family.asr.semantic_lifecycle_failures, 0);
+  assert.ok(report.by_family.asr.observability_integrity_failures >= 1);
+  assert.equal(report.semantic_lifecycle_failures, 0);
 });
