@@ -3,9 +3,10 @@
 //  leanring-buddy
 //
 //  Central state manager for the companion voice mode. Keyboard PTT/dictation
-//  session lifecycle is owned by YishuVoiceSessionController; this type
-//  consumes those events and keeps runtime, presentation, barge-in, and
-//  held-scene/prewarm behavior.
+//  session lifecycle is owned by YishuVoiceSessionController. Foreground
+//  Runtime execution lifecycle is owned by YishuForegroundRuntimeExecution.
+//  This type consumes those events and keeps presentation, barge-in policy,
+//  and held-scene/prewarm behavior.
 //
 
 import AVFoundation
@@ -287,6 +288,9 @@ final class CompanionManager: ObservableObject {
     /// Internal so the history-window extension (CompanionManager+History.swift)
     /// can drive the runtime client without a second client instance.
     let yishuAgentRuntimeClient = YishuAgentRuntimeClient()
+    private lazy var foregroundRuntimeExecution = YishuForegroundRuntimeExecution(
+        runtime: yishuAgentRuntimeClient
+    )
     private let voiceProxySupervisor = YishuVoiceProxySupervisor.shared
     private var voiceProxyAvailabilityCancellable: AnyCancellable?
     lazy var providerAccountsViewModel = ProviderAccountsViewModel(
@@ -330,7 +334,6 @@ final class CompanionManager: ObservableObject {
     /// speaks again so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
     private var activeVoiceTurnToken: UUID?
-    private var activeRuntimeRequestId: UUID?
     private var activeRuntimePresentationTranscript: String?
     private var activeTurnEffectInFlight = false
     private var activeBargeInAttempt: YishuBargeInAttempt?
@@ -384,7 +387,7 @@ final class CompanionManager: ObservableObject {
     }
 
     var canSwitchSessionScope: Bool {
-        activeRuntimeRequestId == nil && voiceState == .idle && !yishuAgentRuntimeClient.hasActiveTurn
+        !foregroundRuntimeExecution.isActive && voiceState == .idle && !yishuAgentRuntimeClient.hasActiveTurn
     }
 
     var canChangeConversation: Bool {
@@ -1128,7 +1131,7 @@ final class CompanionManager: ObservableObject {
         while !Task.isCancelled {
             let foregroundBusy = voiceState != .idle
                 || currentResponseTask != nil
-                || activeRuntimeRequestId != nil
+                || foregroundRuntimeExecution.isActive
                 || yishuAgentRuntimeClient.hasActiveTurn
                 || voiceSession.isKeyHeld
                 || elevenLabsTTSClient.isPlaying
@@ -1228,7 +1231,7 @@ final class CompanionManager: ObservableObject {
             }
             let foregroundBusy = voiceState != .idle
                 || currentResponseTask != nil
-                || activeRuntimeRequestId != nil
+                || foregroundRuntimeExecution.isActive
                 || yishuAgentRuntimeClient.hasActiveTurn
                 || voiceSession.isKeyHeld
                 || elevenLabsTTSClient.isPlaying
@@ -1838,15 +1841,15 @@ final class CompanionManager: ObservableObject {
     // MARK: - AI Response Pipeline
 
     private func beginBargeInIfEligible(voiceTraceID: String) -> Bool {
-        guard let requestId = activeRuntimeRequestId,
+        guard let requestId = foregroundRuntimeExecution.activeRequestId,
               currentResponseTask != nil,
               activeVoiceTurnToken != nil,
               !activeTurnConsumedComputerAction,
               !activeTurnEffectInFlight,
               let currentTranscript = activeRuntimePresentationTranscript,
               YishuBargeInPolicy.allowsSameSessionConversation(currentTranscript),
-              let generation = yishuAgentRuntimeClient.activeGeneration(requestId: requestId),
-              yishuAgentRuntimeClient.suppressTurnForInterruption(
+              let generation = foregroundRuntimeExecution.activeGeneration(requestId: requestId),
+              foregroundRuntimeExecution.suppressForInterruption(
                 requestId: requestId,
                 expectedGeneration: generation
               ) else {
@@ -1866,7 +1869,7 @@ final class CompanionManager: ObservableObject {
             guard let self else { return }
             let status: YishuBargeInStatus
             do {
-                let decision = try await self.yishuAgentRuntimeClient.interruptTurn(
+                let decision = try await self.foregroundRuntimeExecution.interrupt(
                     requestId: requestId,
                     expectedGeneration: generation
                 )
@@ -1925,11 +1928,11 @@ final class CompanionManager: ObservableObject {
             guard let current = self.activeBargeInAttempt,
                   current.id == attempt.id else { return }
             guard case let .accepted(nextGeneration) = current.status,
-                  self.activeRuntimeRequestId == current.requestId,
+                  self.foregroundRuntimeExecution.owns(current.requestId),
                   self.currentResponseTask != nil,
                   self.activeVoiceTurnToken != nil,
                   !self.activeTurnEffectInFlight,
-                  self.yishuAgentRuntimeClient.hasActiveTurn(requestId: current.requestId) else {
+                  self.foregroundRuntimeExecution.hasActiveTurn(requestId: current.requestId) else {
                 self.fallbackFromBargeIn(
                     attemptID: attempt.id,
                     transcript: transcript,
@@ -1940,7 +1943,7 @@ final class CompanionManager: ObservableObject {
             }
 
             do {
-                try self.yishuAgentRuntimeClient.steerTurn(
+                try self.foregroundRuntimeExecution.steer(
                     requestId: current.requestId,
                     message: transcript,
                     nextGeneration: nextGeneration
@@ -2000,12 +2003,11 @@ final class CompanionManager: ObservableObject {
         invalidateActiveVoiceTurn()
         currentResponseTask?.cancel()
         currentResponseTask = nil
-        guard activeRuntimeRequestId == requestId else { return }
-        activeRuntimeRequestId = nil
+        guard foregroundRuntimeExecution.owns(requestId) else { return }
         activeRuntimePresentationTranscript = nil
         activeTurnEffectInFlight = false
         turnVisualPhase = .idle
-        try? yishuAgentRuntimeClient.cancelTurn(requestId: requestId, reason: reason)
+        foregroundRuntimeExecution.cancel(requestId: requestId, reason: reason)
     }
 
     private func armBargeInTranscriptWatchdogIfNeeded() {
@@ -2901,7 +2903,7 @@ final class CompanionManager: ObservableObject {
             }
             startContextTrailSampling()
         }
-        let turn = try yishuAgentRuntimeClient.startTurn(
+        let turn = try foregroundRuntimeExecution.start(
             utterance: transcript,
             contextFrame: contextFrame,
             modelProvider: selectedModelProvider,
@@ -2909,12 +2911,11 @@ final class CompanionManager: ObservableObject {
             modelRouting: runtimeModelRouting
         )
         ClickyAnalytics.trackVoiceEvent("turn.start")
-        activeRuntimeRequestId = turn.requestId
         activeRuntimePresentationTranscript = transcript
         responseOverlayManager.showOverlayAndBeginStreaming()
         defer {
-            if activeRuntimeRequestId == turn.requestId {
-                activeRuntimeRequestId = nil
+            if foregroundRuntimeExecution.owns(turn.requestId) {
+                foregroundRuntimeExecution.settle(turn.requestId)
                 activeRuntimePresentationTranscript = nil
                 activeTurnEffectInFlight = false
             }
@@ -2973,7 +2974,7 @@ final class CompanionManager: ObservableObject {
         do {
         try await withTaskCancellationHandler {
             for try await event in turn.events {
-                guard activeRuntimeRequestId == turn.requestId,
+                guard foregroundRuntimeExecution.owns(turn.requestId),
                       ownsVoiceTurn(turnToken) else {
                     continue
                 }
@@ -3025,7 +3026,7 @@ final class CompanionManager: ObservableObject {
                     usedMemories = items
                     applyMemorySourceNotice(Self.formatMemorySourceNotice(items))
                 case let .computerActionRequested(request, _):
-                    guard activeRuntimeRequestId == turn.requestId,
+                    guard foregroundRuntimeExecution.owns(turn.requestId),
                           ownsVoiceTurn(turnToken) else {
                         continue
                     }
@@ -3060,11 +3061,11 @@ final class CompanionManager: ObservableObject {
                             fallback: contextFrame.numberedTargets
                         ),
                         authorizationFence: { [weak self] in
-                            self?.activeRuntimeRequestId == turn.requestId
+                            self?.foregroundRuntimeExecution.owns(turn.requestId) == true
                                 && self?.ownsVoiceTurn(turnToken) == true
                         }
                     )
-                    let stillOwned = activeRuntimeRequestId == turn.requestId
+                    let stillOwned = foregroundRuntimeExecution.owns(turn.requestId)
                         && ownsVoiceTurn(turnToken)
                     if stillOwned {
                         activeTurnEffectInFlight = false
@@ -3132,13 +3133,9 @@ final class CompanionManager: ObservableObject {
             }
         } onCancel: { [weak self] in
             Task { @MainActor in
-                guard let self else { return }
-                self.cancelActiveSentenceSpeechPipeline()
-                guard self.activeRuntimeRequestId == turn.requestId else { return }
-                try? self.yishuAgentRuntimeClient.cancelTurn(
-                    requestId: turn.requestId,
-                    reason: "task-cancelled"
-                )
+                // Stopping the consumer or speech is not Runtime cancellation.
+                // Product policy must call foregroundRuntimeExecution.cancel.
+                self?.cancelActiveSentenceSpeechPipeline()
             }
         }
         } catch is CancellationError {
@@ -3927,12 +3924,11 @@ final class CompanionManager: ObservableObject {
         stopCoverSpeech()
         cancelActiveSentenceSpeechPipeline()
         clearBargeInAttempt()
-        guard let requestId = activeRuntimeRequestId else { return }
-        activeRuntimeRequestId = nil
+        guard foregroundRuntimeExecution.isActive else { return }
         activeRuntimePresentationTranscript = nil
         activeTurnEffectInFlight = false
         turnVisualPhase = .idle
-        try? yishuAgentRuntimeClient.cancelTurn(requestId: requestId, reason: reason)
+        foregroundRuntimeExecution.cancel(reason: reason)
     }
 
     private func cancelActiveSentenceSpeechPipeline() {
