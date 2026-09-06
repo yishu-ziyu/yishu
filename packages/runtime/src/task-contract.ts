@@ -34,7 +34,7 @@ export function attachTaskExecutionContract(
 ): TurnStartCommand {
   Object.defineProperty(command, TASK_EXECUTION_CONTRACT, {
     value: contract,
-    enumerable: false,
+    enumerable: true,
     configurable: false,
     writable: false,
   });

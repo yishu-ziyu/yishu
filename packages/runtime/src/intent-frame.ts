@@ -13,7 +13,7 @@ export function attachTurnIntentFrame(
 ): TurnStartCommand {
   Object.defineProperty(command, TURN_INTENT_FRAME, {
     value: frame,
-    enumerable: false,
+    enumerable: true,
     configurable: false,
     writable: false,
   });

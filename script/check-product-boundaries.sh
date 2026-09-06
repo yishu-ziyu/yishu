@@ -153,3 +153,8 @@ echo "Product boundary check passed: runtime kernel.store cap PKR<=34 src<=36 fi
 # owned by CompanionManager. Both metrics' zero is the permanent ceiling;
 # see Issue #29.
 node "$ROOT_DIR/script/check-clicky-foreground-lifecycle-boundary.cjs"
+
+# Ordinary Main turns share one product-owned execution context across Pi
+# and Codex. Parity failures' zero and a single assembly path are the
+# permanent ceilings; see Issue #31.
+node "$ROOT_DIR/script/check-main-executor-context-parity.mjs"
