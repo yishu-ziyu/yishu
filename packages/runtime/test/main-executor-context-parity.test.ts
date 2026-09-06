@@ -12,20 +12,10 @@ import {
   createTurnExecutionContext,
   turnExecutionContextFromCommand,
 } from "../src/turn-execution-context.js";
+import { MAIN_EXECUTOR_CONTEXT_SENTINELS as SENTINELS } from "../src/main-executor-context-parity.js";
 import { makeTurnStartCommand } from "./fixtures.js";
 import type { TurnIntentFrame } from "@yishu/kernel";
 import type { TurnStartCommand } from "../src/protocol.js";
-
-const SENTINELS = {
-  history: "PARITY_HISTORY_7f3c9e2a",
-  memory: "PARITY_MEMORY_b41d80c6",
-  rules: "PARITY_RULE_e9a12f04",
-  mind: "PARITY_MIND_55c0ab17",
-  delegated: "PARITY_DELEGATED_c8d3e201",
-  trail: "PARITY_TRAIL_APP_9b7e4d22",
-  intent: "PARITY_INTENT_OBJ_3a91f6d8",
-  taskContract: "PARITY_CONTRACT_OBJ_d2c47b0e",
-} as const;
 
 function intentFrame(): TurnIntentFrame {
   return {
