@@ -8,7 +8,7 @@
 - 卡 `docs/evals/20260906-lifecycle-integrity.md`。命令 `node evals/observability/check-lifecycle-integrity.mjs`。
 - 四家族：voice_capture / asr / runtime_turn / computer_result。TTS、委派、提醒、记忆、duplex/handsfree（未进 main）排除。
 - 机器：夹具+反作弊 22/22。入库 `quality.sample.jsonl`：failures **40**（全是 runtime_turn 缺终端），ASR 30 条终稿无 start（观测缺口），PTT 30/30 可还原。空日志 rate=n/a。
-- Experience Recorder 候选只来自缺口，见 `docs/evals/20260906-experience-recorder-candidates.md`。未实现 Recorder。待开独立 PR 到 main，不合并。
+- Experience Recorder 候选只来自缺口，见 `docs/evals/20260906-experience-recorder-candidates.md`。未实现 Recorder。独立 PR **#37** → main，不合并。未碰 PR #36。
 
 ## 当前状态（2026-09-06，PR #34 再审：回执必须在删 store 前写）
 
