@@ -1,0 +1,4 @@
+{"schemaVersion":1,"eventId":"v-start","occurredAt":"2026-09-06T10:00:00.000Z","sessionId":"voice","name":"ptt.key_down","attributes":{"turnId":"v1"}}
+{"schemaVersion":1,"eventId":"v-end","occurredAt":"2026-09-06T10:00:02.000Z","sessionId":"voice","name":"ptt.key_up","attributes":{"turnId":"v1"}}
+{"schemaVersion":1,"eventId":"r-start","occurredAt":"2026-09-06T10:00:02.450Z","sessionId":"voice","name":"turn.start","attributes":{"turnId":"v1"}}
+{"schemaVersion":1,"eventId":"r-end","occurredAt":"2026-09-06T10:00:04.000Z","sessionId":"voice","name":"model.completed","attributes":{"turnId":"v1","taskTerminal":"unverified"}}

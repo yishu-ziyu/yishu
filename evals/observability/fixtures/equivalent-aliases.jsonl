@@ -1,0 +1,3 @@
+{"schemaVersion":1,"eventId":"r-start","occurredAt":"2026-09-06T10:14:00.000Z","sessionId":"voice","name":"turn.start","attributes":{"turnId":"eq-1"}}
+{"schemaVersion":1,"eventId":"r-done","occurredAt":"2026-09-06T10:14:02.000Z","sessionId":"voice","name":"model.done","attributes":{"turnId":"eq-1"}}
+{"schemaVersion":1,"eventId":"r-completed","occurredAt":"2026-09-06T10:14:02.050Z","sessionId":"voice","name":"model.completed","attributes":{"turnId":"eq-1"}}

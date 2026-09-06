@@ -14,6 +14,11 @@ case "$MODE" in
 esac
 
 ./script/check-product-boundaries.sh
+
+# Lifecycle Integrity evaluator implementation only. Does not gate the
+# production quality.sample baseline at zero.
+node --test evals/observability/check-lifecycle-integrity.test.mjs
+
 pnpm dep:check
 pnpm size:check
 pnpm generated:check
