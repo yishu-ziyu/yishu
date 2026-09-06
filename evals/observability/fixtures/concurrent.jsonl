@@ -1,0 +1,6 @@
+{"schemaVersion":1,"eventId":"a-start","occurredAt":"2026-09-06T10:07:00.000Z","sessionId":"voice","name":"ptt.key_down","attributes":{"turnId":"c1"}}
+{"schemaVersion":1,"eventId":"b-start","occurredAt":"2026-09-06T10:07:00.050Z","sessionId":"voice","name":"ptt.key_down","attributes":{"turnId":"c2"}}
+{"schemaVersion":1,"eventId":"c-start","occurredAt":"2026-09-06T10:07:00.080Z","sessionId":"voice","name":"ptt.key_down","attributes":{"turnId":"c3"}}
+{"schemaVersion":1,"eventId":"b-end","occurredAt":"2026-09-06T10:07:00.400Z","sessionId":"voice","name":"ptt.key_up","attributes":{"turnId":"c2"}}
+{"schemaVersion":1,"eventId":"a-end","occurredAt":"2026-09-06T10:07:00.800Z","sessionId":"voice","name":"ptt.key_up","attributes":{"turnId":"c1"}}
+{"schemaVersion":1,"eventId":"c-end","occurredAt":"2026-09-06T10:07:01.200Z","sessionId":"voice","name":"ptt.key_up","attributes":{"turnId":"c3"}}
