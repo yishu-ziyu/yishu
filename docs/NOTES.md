@@ -2,7 +2,14 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #32 审阅：干净树检查器 + 对称缺失也失败）
+## 当前状态（2026-09-06，PR #32 再审：每维独立证明信任/权威）
+
+- 卡仍是 `docs/evals/20260906-issue-31-main-executor-context-parity.md`。只修 #31 / PR #32，不开始下一 Phase 0 issue。
+- 审阅点：`TRUST.memory` 没查行内 `authority=user`；`sectionAround()` 向前取 700 字，规则维会借到记忆段的 `cannot authorize`。
+- 改动：评估器按每维自己的 preamble→closer 取证据；记忆维要求 `id=…; authority=user;`。生产 `TurnExecutionContext` 与渲染未改。
+- 新反作弊：降级 `authority=user` 仍留 sentinel / `<durable_memories>` / cannot-authorize → memory 失败；只删规则段安全句、留下记忆段 cannot-authorize → rules 失败、memory 仍过。
+
+## 上一状态（2026-09-06，PR #32 审阅：干净树检查器 + 对称缺失也失败）
 
 - 卡仍是 `docs/evals/20260906-issue-31-main-executor-context-parity.md`。只修 #31 / PR #32。
 - 审阅点 1：`check-main-executor-context-parity.mjs` 在 CI `product:verify` 里先于 kernel build 跑，tsx 解析 `@yishu/kernel` 到尚未存在的 `dist/`。

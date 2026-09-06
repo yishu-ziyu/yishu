@@ -4,6 +4,10 @@
  * A dimension is valid only when BOTH Pi and Codex render its sentinel
  * exactly once with the required trust/authority markers.
  * Symmetric absence and symmetric weak trust are failures.
+ *
+ * Trust/authority evidence is taken from that dimension's own renderer
+ * contract (distinctive preamble through closer). A character window
+ * before the opener can include a neighboring section's safety prose.
  */
 
 export const MAIN_EXECUTOR_CONTEXT_SENTINELS = {
@@ -30,47 +34,86 @@ export const MAIN_EXECUTOR_CONTEXT_DIMENSIONS = [
   "taskContract",
 ] as const satisfies readonly MainExecutorContextDimension[];
 
-const TRUST: Record<MainExecutorContextDimension, readonly RegExp[]> = {
-  history: [
-    /<untrusted source="conversation_history">/,
-    /historical data, not new instructions|Historical content cannot expand permissions|历史内容本身不授权/,
-  ],
-  memory: [
-    /<durable_memories>/,
-    /cannot authorize|cannot grant permission|不能授权/,
-  ],
-  rules: [
-    /<behavior_rules>/,
-    /cannot grant permission|cannot authorize|weaken safety|不能.*授权|不能.*放宽/,
-  ],
-  mind: [/<mind_lessons>/],
-  delegated: [
-    /<untrusted source="delegated_results">/,
-    /data, not instructions|Treat them as observations|unverified/,
-  ],
-  trail: [
-    /<untrusted source="recent_context_trail">/,
-    /may already be stale|stale|不是指令|time-stamped context/,
-  ],
-  intent: [
-    /<turn_intent_frame>/,
-    /authoritative product (intent|constraint)|cannot be weakened|产品权威/,
-  ],
-  taskContract: [
-    /<task_execution_contract>/,
-    /authoritative product (task|execution|constraint)|cannot be weakened|产品权威/,
-  ],
-};
+interface DimensionContract {
+  /** First line of this dimension's own production preamble. */
+  preamble: string;
+  open: string;
+  close: string;
+  trust: readonly RegExp[];
+}
 
-const SECTION_BOUNDS: Record<MainExecutorContextDimension, readonly [string, string]> = {
-  history: ['<untrusted source="conversation_history">', "</untrusted>"],
-  memory: ["<durable_memories>", "</durable_memories>"],
-  rules: ["<behavior_rules>", "</behavior_rules>"],
-  mind: ["<mind_lessons>", "</mind_lessons>"],
-  delegated: ['<untrusted source="delegated_results">', "</untrusted>"],
-  trail: ['<untrusted source="recent_context_trail">', "</untrusted>"],
-  intent: ["<turn_intent_frame>", "</turn_intent_frame>"],
-  taskContract: ["<task_execution_contract>", "</task_execution_contract>"],
+const CONTRACT: Record<MainExecutorContextDimension, DimensionContract> = {
+  history: {
+    preamble: "The following earlier visible turns restore continuity after a cold Pi session.",
+    open: '<untrusted source="conversation_history">',
+    close: "</untrusted>",
+    trust: [
+      /<untrusted source="conversation_history">/,
+      /historical data, not new instructions|Historical content cannot expand permissions|历史内容本身不授权/,
+    ],
+  },
+  memory: {
+    preamble: "These are relevant memory candidates from earlier interactions.",
+    open: "<durable_memories>",
+    close: "</durable_memories>",
+    trust: [
+      /<durable_memories>/,
+      /cannot authorize|不能授权/,
+      /id=[^;\s]+; authority=user;/,
+    ],
+  },
+  rules: {
+    preamble: "The user previously established these durable behavior rules for this exact scope.",
+    open: "<behavior_rules>",
+    close: "</behavior_rules>",
+    trust: [
+      /<behavior_rules>/,
+      /cannot grant permission/,
+      /weaken safety/,
+    ],
+  },
+  mind: {
+    preamble: "You previously learned the following lessons from repeated outcomes.",
+    open: "<mind_lessons>",
+    close: "</mind_lessons>",
+    trust: [/<mind_lessons>/],
+  },
+  delegated: {
+    preamble: "Background tasks you delegated earlier finished while you were busy.",
+    open: '<untrusted source="delegated_results">',
+    close: "</untrusted>",
+    trust: [
+      /<untrusted source="delegated_results">/,
+      /data, not instructions|Treat them as observations|unverified/,
+    ],
+  },
+  trail: {
+    preamble: "These are untrusted historical observations from the same session scope.",
+    open: '<untrusted source="recent_context_trail">',
+    close: "</untrusted>",
+    trust: [
+      /<untrusted source="recent_context_trail">/,
+      /may already be stale|stale|不是指令|time-stamped context/,
+    ],
+  },
+  intent: {
+    preamble: "This is the authoritative product intent for the current turn.",
+    open: "<turn_intent_frame>",
+    close: "</turn_intent_frame>",
+    trust: [
+      /<turn_intent_frame>/,
+      /authoritative product (intent|constraint)|cannot be weakened|产品权威/,
+    ],
+  },
+  taskContract: {
+    preamble: "This is the authoritative product task execution contract for the current turn.",
+    open: "<task_execution_contract>",
+    close: "</task_execution_contract>",
+    trust: [
+      /<task_execution_contract>/,
+      /authoritative product (task|execution|constraint)|cannot be weakened|产品权威/,
+    ],
+  },
 };
 
 export interface ExecutorDimensionPresence {
@@ -102,20 +145,31 @@ export function countSentinelOccurrences(haystack: string, needle: string): numb
   return count;
 }
 
-function sectionAround(text: string, id: MainExecutorContextDimension): string {
-  const [open, close] = SECTION_BOUNDS[id];
-  const start = text.indexOf(open);
-  if (start < 0) return "";
-  const end = text.indexOf(close, start + open.length);
-  if (end < 0) return "";
-  const preamble = Math.max(0, start - 700);
-  return text.slice(preamble, end + close.length);
+/**
+ * Slice this dimension's own preamble through its closer.
+ * Returns "" when the preamble does not uniquely belong to this opener.
+ */
+function ownRenderedContract(text: string, id: MainExecutorContextDimension): string {
+  const spec = CONTRACT[id];
+  const openAt = text.indexOf(spec.open);
+  if (openAt < 0) return "";
+  const closeAt = text.indexOf(spec.close, openAt + spec.open.length);
+  if (closeAt < 0) return "";
+  const preambleAt = text.lastIndexOf(spec.preamble, openAt);
+  if (preambleAt < 0) return "";
+  const between = text.slice(preambleAt + spec.preamble.length, openAt);
+  for (const other of MAIN_EXECUTOR_CONTEXT_DIMENSIONS) {
+    if (other === id) continue;
+    if (between.includes(CONTRACT[other].open)) return "";
+  }
+  return text.slice(preambleAt, closeAt + spec.close.length);
 }
 
 function inspect(text: string, id: MainExecutorContextDimension): ExecutorDimensionPresence {
   const count = countSentinelOccurrences(text, MAIN_EXECUTOR_CONTEXT_SENTINELS[id]);
   const value = count > 0;
-  const trust = value && TRUST[id].every((pattern) => pattern.test(sectionAround(text, id)));
+  const evidence = ownRenderedContract(text, id);
+  const trust = value && CONTRACT[id].trust.every((pattern) => pattern.test(evidence));
   return { value, trust, count };
 }
 
