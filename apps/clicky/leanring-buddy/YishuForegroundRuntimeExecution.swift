@@ -29,6 +29,12 @@ protocol YishuForegroundRuntimeControlling: AnyObject {
 
 extension YishuAgentRuntimeClient: YishuForegroundRuntimeControlling {}
 
+/// Rejected `start` while another foreground execution is still owned.
+/// Distinct from cancel: callers must cancel first.
+enum YishuForegroundRuntimeExecutionError: Error, Equatable {
+    case alreadyActive
+}
+
 /// Presentation-facing view of one foreground execution. Cancelling
 /// iteration of `events` does not cancel or settle the Runtime turn.
 struct YishuForegroundRuntimeSession {
@@ -83,6 +89,9 @@ final class YishuForegroundRuntimeExecution {
         modelRouting: YishuModelRouting,
         capabilityProfile: String = "conversation"
     ) throws -> YishuForegroundRuntimeSession {
+        guard !isActive else {
+            throw YishuForegroundRuntimeExecutionError.alreadyActive
+        }
         let turn = try runtime.startTurn(
             utterance: utterance,
             contextFrame: contextFrame,

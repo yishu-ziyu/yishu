@@ -334,6 +334,77 @@ struct YishuForegroundRuntimeExecutionTests {
         #expect(!runtime.hasActiveTurn(requestId: session.requestId))
     }
 
+    @Test func startWhileActiveRejectsWithoutOrphaningFirstExecution() async throws {
+        let runtime = FakeForegroundRuntime()
+        let execution = YishuForegroundRuntimeExecution(runtime: runtime)
+        let first = try execution.startTestTurn("第一轮")
+        var received: [String] = []
+        let consumer = Task { @MainActor in
+            do {
+                for try await event in first.events {
+                    if case let .responseDelta(text, _) = event {
+                        received.append(text)
+                    }
+                }
+            } catch is CancellationError {
+            }
+        }
+
+        #expect(runtime.startCount == 1)
+        #expect(execution.owns(first.requestId))
+        #expect(execution.activeRequestId == first.requestId)
+        #expect(runtime.hasActiveTurn(requestId: first.requestId))
+
+        runtime.emit(first.requestId, .responseDelta(text: "还在", generation: 1))
+        await waitUntil { received == ["还在"] }
+
+        do {
+            _ = try execution.startTestTurn("第二轮")
+            Issue.record("second start must reject while first is active")
+        } catch YishuForegroundRuntimeExecutionError.alreadyActive {
+        } catch {
+            Issue.record("second start threw \(error)")
+        }
+
+        #expect(runtime.startCount == 1)
+        #expect(runtime.cancelCount == 0)
+        #expect(runtime.startUtterances == ["第一轮"])
+        #expect(execution.owns(first.requestId))
+        #expect(execution.activeRequestId == first.requestId)
+        #expect(runtime.hasActiveTurn(requestId: first.requestId))
+
+        runtime.emit(first.requestId, .responseDelta(text: "仍在消费", generation: 1))
+        await waitUntil { received == ["还在", "仍在消费"] }
+
+        execution.cancel(reason: "user-interrupted")
+        execution.cancel(reason: "user-interrupted")
+        await waitUntil { !execution.isActive }
+        _ = await consumer.result
+
+        #expect(runtime.cancelCount == 1)
+        #expect(runtime.cancelReasons == ["user-interrupted"])
+        #expect(!execution.isActive)
+        #expect(!execution.owns(first.requestId))
+        #expect(!runtime.hasActiveTurn(requestId: first.requestId))
+
+        let second = try execution.startTestTurn("第二轮")
+        #expect(runtime.startCount == 2)
+        #expect(runtime.cancelCount == 1)
+        #expect(execution.owns(second.requestId))
+        #expect(!execution.owns(first.requestId))
+        #expect(runtime.hasActiveTurn(requestId: second.requestId))
+
+        runtime.finish(second.requestId)
+        await waitUntil { !execution.isActive }
+        #expect(!execution.isActive)
+
+        let third = try execution.startTestTurn("第三轮")
+        #expect(runtime.startCount == 3)
+        #expect(runtime.cancelCount == 1)
+        #expect(execution.owns(third.requestId))
+        #expect(runtime.hasActiveTurn(requestId: third.requestId))
+    }
+
     @Test func explicitUserInterruptCancelsRuntimeExactlyOnce() throws {
         let runtime = FakeForegroundRuntime()
         let execution = YishuForegroundRuntimeExecution(runtime: runtime)

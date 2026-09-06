@@ -32,7 +32,7 @@ apps/clicky (Swift)  ──stdio JSON 行──▶  packages/runtime (TS)  ─�
 | 记忆 | `packages/kernel/src/memory/` + `everos-*.ts`；用户可见只有 `~/Documents/Yishu/记忆.md` | 在 Swift 存事实 |
 | 光球画法 | `OverlayMarks.swift` / `OverlayWindow.swift` 的 `showMark` / `clearMarks` | 另开一个窗口画 |
 | 口播文案 | 不加。由模型说；只有失败兜底句允许硬编码 | 新增 canned 台词 |
-| 前台 Runtime 轮次生命周期 | `YishuForegroundRuntimeExecution`：request identity、start/cancel/interrupt/steer、一次终结、Runtime 事件流寿命。停声、取消执行、插话/转向、替换可见生成、拆掉呈现消费是不同操作 | 在 CompanionManager 里直接调 `startTurn`/`cancelTurn`/`interruptTurn`/`steerTurn`、消费 `turn.events`、从呈现 `defer`/`onCancel` 里 `settle`，或把 `activeRuntimeRequestId` 存在呈现层 |
+| 前台 Runtime 轮次生命周期 | `YishuForegroundRuntimeExecution`：request identity、start/cancel/interrupt/steer、一次终结、Runtime 事件流寿命。同一时刻最多一轮前台执行；已有执行时 `start` 拒绝，不隐式 cancel。停声、取消执行、插话/转向、替换可见生成、拆掉呈现消费是不同操作 | 在 CompanionManager 里直接调 `startTurn`/`cancelTurn`/`interruptTurn`/`steerTurn`、消费 `turn.events`、从呈现 `defer`/`onCancel` 里 `settle`，或把 `activeRuntimeRequestId` 存在呈现层 |
 | 延迟 / 质量埋点 | Swift `ClickyAnalytics` → `quality.jsonl`（allowlist 在 `QualityEventRecorder.swift`）；runtime 侧走协议事件字段 | 自己写日志文件 |
 
 ## 不可越的线
@@ -55,7 +55,7 @@ Codex 接入（2026-09-05，卡 `docs/evals/20260905-codex-voice-computer-use.md
 
 - runtime / kernel（TS）一人；Swift 语音与 CompanionManager 一人；Swift 覆盖层 + 评测脚本一人。三者文件不重叠。
 - 谁碰 `CompanionManager.swift`，同一时刻只能一个人。新逻辑放 `CompanionManager+<域>.swift` 扩展文件。
-- 前台 Runtime 执行生命周期只属于 `YishuForegroundRuntimeExecution`。它也拥有 Runtime 轮次/事件流寿命，并向呈现层转发类型化执行事件。`script/check-clicky-foreground-lifecycle-boundary.cjs` 钉死 CompanionManager 不得再直接拥有 request identity、调用 start/cancel/interrupt/steer、消费 `turn.events`、或从呈现清理路径 `settle`。两个健身函数的零都是永久上限。
+- 前台 Runtime 执行生命周期只属于 `YishuForegroundRuntimeExecution`。它也拥有 Runtime 轮次/事件流寿命，并向呈现层转发类型化执行事件。同一时刻最多一轮；已有执行时 `start` 拒绝，不隐式 cancel 上一轮。`script/check-clicky-foreground-lifecycle-boundary.cjs` 钉死 CompanionManager 不得再直接拥有 request identity、调用 start/cancel/interrupt/steer、消费 `turn.events`、或从呈现清理路径 `settle`。两个健身函数的零都是永久上限。
 - 协议改动由 TS 一方先改 schema 并写明字段，Swift 一方对照实现；报告里写清字段名。
 
 ## 门禁命令
