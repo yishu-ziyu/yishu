@@ -109,9 +109,14 @@ describe("product actions via createYishuKernel", () => {
       input: { memoryId: id },
     });
     assert.equal(forgot.status, "verified");
+    const again = await registry.invoke("forget", {
+      caller: "ui",
+      input: { memoryId: id },
+    });
+    assert.equal(again.status, "verified");
   });
 
-  it("does not retire a memory when its store mutation is cancelled", async () => {
+  it("does not delete a memory when its store mutation is cancelled", async () => {
     const { registry, store } = createYishuKernel();
     const remembered = await registry.invoke("remember", {
       caller: "ui",
@@ -119,10 +124,11 @@ describe("product actions via createYishuKernel", () => {
     });
     const memoryId = (remembered.output as MemoryClaim).id;
     const controller = new AbortController();
-    const originalRetireMemory = store.retireMemory.bind(store);
-    store.retireMemory = async (id, options) => {
+    store.forgetMemory = async () => {
       controller.abort("private forget cancellation");
-      return originalRetireMemory(id, options);
+      const error = new Error("memory forget cancelled");
+      error.name = "AbortError";
+      throw error;
     };
 
     const forgot = await registry.invoke("forget", {
@@ -132,26 +138,24 @@ describe("product actions via createYishuKernel", () => {
     });
 
     assert.equal(forgot.status, "cancelled");
-    assert.equal(
-      store.getSnapshot().memories.find((memory) => memory.id === memoryId)
-        ?.retiredAt,
-      undefined,
+    assert.ok(
+      store.getSnapshot().memories.some((memory) => memory.id === memoryId),
     );
   });
 
-  it("reports forget cancellation after the retirement commit", async () => {
+  it("reports forget cancellation after the store commit", async () => {
     const { registry, store } = createYishuKernel();
     const remembered = await registry.invoke("remember", {
       caller: "ui",
-      input: { claim: "retire then cancel" },
+      input: { claim: "forget then cancel" },
     });
     const memoryId = (remembered.output as MemoryClaim).id;
     const controller = new AbortController();
-    const originalRetireMemory = store.retireMemory.bind(store);
-    store.retireMemory = async (id, options) => {
-      const ok = await originalRetireMemory(id, options);
+    const originalForgetMemory = store.forgetMemory.bind(store);
+    store.forgetMemory = async (id, options) => {
+      const result = await originalForgetMemory(id, options);
       controller.abort("private post-commit forget cancellation");
-      return ok;
+      return result;
     };
 
     const receipt = await registry.invoke("forget", {
@@ -161,9 +165,9 @@ describe("product actions via createYishuKernel", () => {
     });
 
     assert.equal(receipt.status, "cancelled_after_commit");
-    assert.ok(
-      store.getSnapshot().memories.find((memory) => memory.id === memoryId)
-        ?.retiredAt,
+    assert.equal(
+      store.getSnapshot().memories.some((memory) => memory.id === memoryId),
+      false,
     );
   });
 
