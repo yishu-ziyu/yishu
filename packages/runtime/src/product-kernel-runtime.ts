@@ -76,12 +76,14 @@ import {
   attachDelegatedResults,
   attachRecentTrail,
   attachRecalledMind,
-  formatTurnMemoryBlock,
   type PromptBehaviorRule,
   type PromptConversationTurn,
-  type PromptMemorySnippet,
   type PromptTrailObservation,
 } from "./context-prompt.js";
+import {
+  attachTurnExecutionContext,
+  createTurnExecutionContext,
+} from "./turn-execution-context.js";
 import {
   DelegationCoordinator,
   isCurrentPageActionsNoteUtterance,
@@ -481,8 +483,9 @@ export class ProductKernelRuntime implements AgentRuntime {
     // ADR 0015 B architecture: the product layer owns turn-context data, the
     // engine owns assembly timing. Skills L1 comes from the kernel's
     // verified-skill registry (empty for private scopes); the status bar v1
-    // renders engine-observable facts only. Turn memory is assembled here
-    // from the per-turn recall cache — never re-attached onto the command.
+    // renders engine-observable facts only. Recalled memory lives on the
+    // typed TurnExecutionContext and is rendered by executor adapters —
+    // assembleTurnMemory must not inject a second copy.
     (
       this.inner as {
         setTurnContextProviderFactory?: (factory: TurnContextProviderFactory) => void;
@@ -499,13 +502,6 @@ export class ProductKernelRuntime implements AgentRuntime {
         } catch {
           return [];
         }
-      },
-      assembleTurnMemory: async () => {
-        if (scopeKind === "private") return undefined;
-        const state = this.activeTurnForConversation(conversationId);
-        const recalled = state?.recalledMemories ?? [];
-        if (recalled.length === 0) return undefined;
-        return formatTurnMemoryBlock(recalled.map(toPromptMemorySnippet));
       },
       statusBar: async (state) => {
         const base = await formatEngineStatusBar(state);
@@ -1680,8 +1676,8 @@ export class ProductKernelRuntime implements AgentRuntime {
       }
 
       // Ordinary turns: small scoped MemoryClaim recall only. Private / failed
-      // retrieval never pretends a memory was used. The engine later prepends
-      // the cached block via assembleTurnMemory (ADR 0015 PR-2).
+      // retrieval never pretends a memory was used. Recalled rows join the
+      // typed TurnExecutionContext; executor adapters render that bundle.
       // Recall, history, mind, rules, and delegated inbox are independent.
       const timing = runtimeTimingFor(state.command.requestId);
       const recallStartedAt = Date.now();
@@ -1718,6 +1714,22 @@ export class ProductKernelRuntime implements AgentRuntime {
         this.emitMemoryUsed(state, recalled.memories);
       }
       const recentTrail = this.recentTrailForOrdinaryTurn(state);
+      const executionContext = createTurnExecutionContext({
+        conversationHistory,
+        recalledMemories: recalled.memories.map(toPromptMemorySnippet),
+        behaviorRules,
+        mindLessons,
+        delegatedResults: delegatedResults.map((result) => ({
+          taskId: result.taskId,
+          parentId: result.parentId,
+          resultKind: result.resultKind,
+          summary: result.summary,
+        })),
+        recentTrail,
+        intentFrame: state.intent,
+        ...(state.contract === undefined ? {} : { taskContract: state.contract }),
+        sessionScopeKind: state.sessionScope.kind,
+      });
       let commandForInner: TurnStartCommand = attachTurnIntentFrame(
         pageNoteCommandForInner(state.command),
         state.intent,
@@ -1732,6 +1744,7 @@ export class ProductKernelRuntime implements AgentRuntime {
       commandForInner = attachDelegatedResults(commandForInner, delegatedResults);
       commandForInner = attachRecentTrail(commandForInner, recentTrail);
       commandForInner = attachTaskExecutionContract(commandForInner, state.contract!);
+      commandForInner = attachTurnExecutionContext(commandForInner, executionContext);
       // Mark started before the last terminal check so a concurrent cancelTurn
       // will invoke inner.cancelTurn and unblock a gated startTurn.
       state.innerStarted = true;

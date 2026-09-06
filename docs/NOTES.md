@@ -2,7 +2,15 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #30 审阅修订：start 时已有执行必须拒绝，待终审）
+## 当前状态（2026-09-06，Issue #31 Main 执行上下文对等）
+
+- 卡 `docs/evals/20260906-issue-31-main-executor-context-parity.md`。只修 #31，不实现全双工 / Task-Run / IM / AgentIdentity。未装真机。
+- 分支 `feat/issue-31-main-executor-context-parity`，从 `main` `13b95b5`。
+- 动手前实测（生产未改）：`main_executor_context_parity_failures: 6`（Issue 写 7；意图帧在有历史等 payload 展开后被非枚举 Symbol 丢掉，两边都缺，不算对等失败）；`turn_scoped_context_assembly_paths: 2`。护栏当时全 0。
+- 目标：一份 `TurnExecutionContext`；Pi / Codex 只渲染；主健身函数 0、次健身函数 1。
+- 交付：`main_executor_context_parity_failures: 6 → 0`；`turn_scoped_context_assembly_paths: 2 → 1`。护栏 0。#29 仍 0/0。runtime 516/516。协议无 diff。collector 880/856 预存红线未动。未装真机。
+
+## 上一状态（2026-09-06，PR #30 审阅修订：start 时已有执行必须拒绝，待终审）
 
 - 卡仍是 `docs/evals/20260906-issue-29-foreground-execution-ownership.md`。只修 #29 / PR #30，不开始下一 Phase 0 issue。未装真机。
 - 审阅点：`start` 在已有执行时先 `startTurn` 再丢掉旧事件消费并覆盖 identity，上一轮 Runtime 变成无主孤儿。

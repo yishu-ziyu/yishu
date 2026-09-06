@@ -33,6 +33,7 @@ apps/clicky (Swift)  ──stdio JSON 行──▶  packages/runtime (TS)  ─�
 | 光球画法 | `OverlayMarks.swift` / `OverlayWindow.swift` 的 `showMark` / `clearMarks` | 另开一个窗口画 |
 | 口播文案 | 不加。由模型说；只有失败兜底句允许硬编码 | 新增 canned 台词 |
 | 前台 Runtime 轮次生命周期 | `YishuForegroundRuntimeExecution`：request identity、start/cancel/interrupt/steer、一次终结、Runtime 事件流寿命。同一时刻最多一轮前台执行；已有执行时 `start` 拒绝，不隐式 cancel。停声、取消执行、插话/转向、替换可见生成、拆掉呈现消费是不同操作 | 在 CompanionManager 里直接调 `startTurn`/`cancelTurn`/`interruptTurn`/`steerTurn`、消费 `turn.events`、从呈现 `defer`/`onCancel` 里 `settle`，或把 `activeRuntimeRequestId` 存在呈现层 |
+| 普通 Main 轮次产品上下文 | `TurnExecutionContext`：Product Kernel 召回/筛选后组一份类型化快照（历史、记忆、规则、mind、委派结果、trail、意图、任务合同、范围与信任）。Pi / Codex 只渲染。检查器 `script/check-main-executor-context-parity.mjs`，两个上限是 `main_executor_context_parity_failures=0` 与 `turn_scoped_context_assembly_paths=1` | 执行器自己查 Kernel/store/EverOS 补上下文；为 Codex 再召回一次；把历史/记忆/trail/委派结果当成授权 |
 | 延迟 / 质量埋点 | Swift `ClickyAnalytics` → `quality.jsonl`（allowlist 在 `QualityEventRecorder.swift`）；runtime 侧走协议事件字段 | 自己写日志文件 |
 
 ## 不可越的线

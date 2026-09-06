@@ -106,7 +106,7 @@ export interface TurnLedgerState {
   contract?: TaskExecutionContract;
   /** Product action name when this turn was routed to the kernel registry. */
   productAction?: string;
-  /** Scoped recall for this turn; engine assembleTurnMemory reads this cache. */
+  /** Scoped recall for this turn; typed execution context copies this cache. */
   recalledMemories?: RecalledMemory[];
   recallSource?: "visible_only" | "everos" | "none";
   recallMs?: number;
