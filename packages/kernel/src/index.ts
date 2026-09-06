@@ -107,6 +107,9 @@ export {
   MEMORY_RECALL_SUMMARY_CHARS,
   contentTokens,
   createMemoryLedger,
+  forgetMemoryClaim,
+  inspectMemoryForget,
+  MemoryForgetIncompleteError,
   recallFromVisibleFacts,
   recallRelevantMemories,
   visibleFactId,
@@ -127,6 +130,9 @@ export {
 } from "./memory/index.js";
 export type {
   MemoryLedger,
+  MemoryForgetInput,
+  MemoryForgetOutcome,
+  MemoryForgetPorts,
   ExtractedMemoryInput,
   MemoryExtractionStorePort,
   RecalledMemory,

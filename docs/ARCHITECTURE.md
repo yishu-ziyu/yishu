@@ -30,6 +30,7 @@ apps/clicky (Swift)  ──stdio JSON 行──▶  packages/runtime (TS)  ─�
 | 帮手 / 子会话 | `delegation.ts` `DelegationCoordinator`（已有子会话、结果收件箱） | 再造一套后台任务 |
 | 例程 | `packages/kernel/src/automation/` + `automation-scheduler.ts` | 在 Swift 起定时器 |
 | 记忆 | `packages/kernel/src/memory/` + `everos-*.ts`；用户可见只有 `~/Documents/Yishu/记忆.md` | 在 Swift 存事实 |
+| 用户确认的忘记 | `forgetMemoryClaim`：解析目标、适用权威层、变异顺序、重试、幂等、验证。action-registry 与 `MemoryLedger` / `MemoryForgetCommand` 只委托。store 索引最后删。检查器 `script/check-memory-forget-correctness.mjs`，上限 `false_positive_memory_forget_successes=0`、`non_convergent_memory_forget_retries=0`、`memory_forget_mutation_paths=1` | 两条独立忘记实现；吞掉 visible/Truth 错误仍报成功；只看 `retiredAt` / 行不存在就验证；先硬删唯一出处导致重试无法收敛 |
 | 光球画法 | `OverlayMarks.swift` / `OverlayWindow.swift` 的 `showMark` / `clearMarks` | 另开一个窗口画 |
 | 口播文案 | 不加。由模型说；只有失败兜底句允许硬编码 | 新增 canned 台词 |
 | 前台 Runtime 轮次生命周期 | `YishuForegroundRuntimeExecution`：request identity、start/cancel/interrupt/steer、一次终结、Runtime 事件流寿命。同一时刻最多一轮前台执行；已有执行时 `start` 拒绝，不隐式 cancel。停声、取消执行、插话/转向、替换可见生成、拆掉呈现消费是不同操作 | 在 CompanionManager 里直接调 `startTurn`/`cancelTurn`/`interruptTurn`/`steerTurn`、消费 `turn.events`、从呈现 `defer`/`onCancel` 里 `settle`，或把 `activeRuntimeRequestId` 存在呈现层 |

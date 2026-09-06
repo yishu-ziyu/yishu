@@ -2,7 +2,14 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #32 再审：每维独立证明信任/权威）
+## 当前状态（2026-09-06，Issue #33 忘记语义统一，待开 PR）
+
+- 卡 `docs/evals/20260906-issue-33-memory-forget-correctness.md`。分支 `feat/issue-33-memory-forget-correctness`（自 `4a8ff1c`）。不开始全双工。
+- 实测基线：false-positive 2、non-convergent 1、mutation paths 2。
+- 一份 `forgetMemoryClaim`：visible → Truth（仅 truthRef）→ store 最后删。action 与 ledger 只委托。失败不 verified / 不发 `memory.forgotten`。同一意图可重试。
+- 三个健身函数 2/1/2 → 0/0/1。
+
+## 上一状态（2026-09-06，PR #32 再审：每维独立证明信任/权威）
 
 - 卡仍是 `docs/evals/20260906-issue-31-main-executor-context-parity.md`。只修 #31 / PR #32，不开始下一 Phase 0 issue。
 - 审阅点：`TRUST.memory` 没查行内 `authority=user`；`sectionAround()` 向前取 700 字，规则维会借到记忆段的 `cannot authorize`。
