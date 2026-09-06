@@ -2,7 +2,14 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #34 再审：回执必须在删 store 前写）
+## 当前状态（2026-09-06，Issue #35 Duplex Voice 1A，待 PR 审）
+
+- 卡 `docs/evals/20260906-issue-35-duplex-voice.md`。分支 `feat/issue-35-duplex-voice`（从 `9f84fff`）。只做 #35。未装真机。
+- 供应商选 Path A。StepAudio Realtime 否决：自动推理、exp4 工具交接 0 次、打断 945–9550 ms；接成 Main 会扩成 #31。
+- 连续聆听默认关。`YishuVoiceSessionController` 拥有开关与一句 generation；本地能量切句；开口只停 TTS。MiniMax TTS 未换。
+- 机器：checker 全 0 + 采麦 1；kernel 236/236；runtime 526/526；#29 0/0；#31 0/1；#33 0/0/1；协议无 diff。Swift 矩阵 A–H 与既有会话/barge-in/前台执行 TEST SUCCEEDED。CompanionManager 4476/4609。collector 880/856 预存红线未动。
+
+## 上一状态（2026-09-06，PR #34 再审：回执必须在删 store 前写）
 
 - 卡仍是 `docs/evals/20260906-issue-33-memory-forget-correctness.md`。只修 #33 / PR #34，不开始全双工。
 - 审阅点：完成回执写在 `store.forgetMemory` 之后。写入失败时 store 已删、无回执，重试 `missing_provenance`，无法收敛。

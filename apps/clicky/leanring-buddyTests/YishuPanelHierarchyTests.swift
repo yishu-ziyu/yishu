@@ -53,6 +53,9 @@ struct YishuPanelHierarchyTests {
         #expect(YishuPanelFirstScreenCopy.promise.contains("验证"))
         #expect(!YishuPanelFirstScreenCopy.promise.contains("帮你完成并告诉你结果"))
         #expect(YishuPanelFirstScreenCopy.noVerifiedCompletion == "还没有验证过的完成")
+        #expect(YishuPanelFirstScreenCopy.listeningNow == "正在听，直接说")
+        #expect(YishuPanelFirstScreenCopy.continuousListeningTitle == "连续聆听")
+        #expect(!YishuPanelFirstScreenCopy.listeningNow.contains("Runtime"))
         #expect(!YishuPanelFirstScreenCopy.promise.contains(WorkspaceSettingsCopy.title))
         #expect(!YishuPanelFirstScreenCopy.greeting.contains(WorkspaceSettingsCopy.add))
     }

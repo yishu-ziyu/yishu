@@ -17,6 +17,7 @@ final class ElevenLabsTTSClient {
     private var prefetch: (text: String, task: Task<Data, Error>)?
     private let streamPipe: YishuHTTPBytePipe
     private let streamSession: URLSession
+    var onPlaybackActiveChange: ((Bool) -> Void)?
 
     init(proxyURL: String) {
         self.proxyURL = URL(string: proxyURL)!
@@ -73,6 +74,8 @@ final class ElevenLabsTTSClient {
     ) async throws {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        onPlaybackActiveChange?(true)
+        defer { onPlaybackActiveChange?(false) }
         try Task.checkCancellation()
 
         if let prefetch, prefetch.text == trimmed {
@@ -103,6 +106,7 @@ final class ElevenLabsTTSClient {
         prefetch = nil
         let wasPlaying = clipPlayer.isPlaying
         clipPlayer.stop()
+        onPlaybackActiveChange?(false)
         if emitStoppedEvent, wasPlaying {
             ClickyAnalytics.trackTTSStopped()
         }
