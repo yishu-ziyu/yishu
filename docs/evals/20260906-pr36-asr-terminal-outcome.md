@@ -85,7 +85,57 @@
 
 ## 人评清单（交付时填）
 
-- [ ] #10 三句烟测：每句都有口播/产品轮次；失败则交该句关联元数据并停
+- [x] #10 三句烟测：失败。装机后至用户说完（launch `2026-09-06T11:45:02Z` → 查日志 `11:51:39Z`）：0 onset / 0 ASR 请求 / 0 `turn.start`。无 utterance id。停。
+
+## 冷启动阻塞（2026-09-06，代码未改）
+
+Change：重启后若偏好是开，麦克风必须真正 armed；「正在听，直接说」只表示 `.armed`；开口至少能打出 `duplex.speech_onset` + utterance id。
+Not this：开关看起来是开；只改 ASR；新开 PR；做 Experience Recorder。
+Evaluator：先做本机 OFF→ON A/B（本段）；分类后再写机器回归。人评：冷启动烟测一句，再三句 ASR。
+Evidence：下面 A/B；分类后才改代码。
+
+### 动手前已装进程（pid 36269，head `b48f992`）
+
+- `defaults` `yishu.continuousListening.enabled` = 1
+- 面板 AX：`正在听，直接说`；头 `在听` → `YishuVoiceSessionController.continuousListeningState.isArmed` 为真（该文案只在 `.isArmed` 时渲染）
+- 不是「正在打开麦克风」、不是失败文案、不是普通 PTT 文案
+- `quality.jsonl` launch 后（L2313–2319，`occurredAt` `2026-09-06T11:45:02Z`）：`app.ready`、`asr.provider=stepplan`、`app.launched`、四条 `permission.granted`。无 `handsfree.enabled` / `handsfree.armed` / `duplex.speech_onset`
+- `proxy-asr.jsonl` 未前进（最后 `2026-09-06T11:17:43Z`）
+- 现有 lsof/日志不能证明 input tap 在出 buffer。偏好开 + 面板说正在听 + 零 onset，不能当成麦克风已在采。
+
+### Phase 1 A/B（同一已装构建，未改代码）
+
+| 步 | 观察 |
+|---|---|
+| 关一次「连续聆听」 | 头 `在线`；文案回到 `按住 Control+Option` / `松开就发送`；开关 AX value=0；偏好=0；`handsfree.disabled` `2026-09-06T12:16:25Z` |
+| 开一次 | 1.2 s 内头 `在听`；`正在听，直接说`；开关=1；偏好=1；`handsfree.enabled` `2026-09-06T12:16:44Z` |
+| 说一句 | **未完成**。`handsfree.enabled` 之后 13 min，quality 仍 line 2321，无 `duplex.speech_onset` / `ptt.key_down`。面板仍「正在听，直接说」。不能证明重开后有人开口。 |
+
+分类未定，停。没有开口证据不得把「无 onset」写成 2B。有 onset → `cold-start preference restoration failure`（2A）；证实开口后仍无 → `continuous microphone capture/start failure independent of preference restoration`（2B）。
+
+### 干净退出后冷启动（pid 52722，head `b48f992`，代码未改）
+
+- 启动前：无正式包进程；无 8787；无 voice-proxy；偏好 = 1（未改）。
+- `./apps/clicky/scripts/run-local.sh open`；新 pid **52722**，runtime **52766**，proxy **52775**；launch `2026-09-06T15:26:36Z`。
+- 启动后偏好 = 1。只点了菜单栏图标打开面板，未碰「连续聆听」。
+- 面板：头「在听」；文案「正在听，直接说」。不是「正在打开麦克风」/失败文案/「按住 Control+Option」。
+- quality L2322–2328 仅 launch 权限事件；无 `handsfree.enabled` / `speech_onset`。proxy-asr 未前进。
+- 开口窗：quality line 2328 / 582625 B；proxy line 255 / 51124 B。等用户说一句后再查新行。
+- 用户确认已开口。新行：无。`duplex.speech_onset=0`；utterance id 无；`ptt.key_down=0`；`asr.request_sent=0`；`asr.terminal=0`；`turn.start=0`。偏好仍 1。面板此前为「正在听，直接说」/头「在听」。
+- 结果：`ONSET_ABSENT`。分类 `continuous capture/onset failure before ASR`。第一缺界：`duplex.speech_onset`。停，不查 ASR 下游，不改代码。
+
+### 2B 六步（pid 52722，系统日志，代码未改）
+
+| 步 | 结论 | 证据 |
+|---|---|---|
+| 1 startContinuousCapture | 执行了 | `23:26:43.546` `Engine start, was running 0`；AUVP 初始化 33/26/17 ms |
+| 2 AVAudioEngine running | 启动成功后 35 ms 被停 | `23:26:43.581` `iounit configuration changed > stopping the engine`；`stop, was running 1` |
+| 3 input tap buffer | 引擎停后不会再来 | 15 min sample 无 AURemoteIO/HAL IO 线程 |
+| 4 power callback | 到不了 | 无 IO |
+| 5 handleAudioPower | 到不了 | 无 power |
+| 6 beginUtterance | 未触发 | 开口窗 0 条新 quality |
+
+根因：IO unit 配置变更停引擎，产品不监听、不重开、不把 UI 改回失败。退出时 `stop, was running 0`。
 
 ## Experience Recorder 证据（只记，不实现）
 
@@ -95,3 +145,6 @@
 - ASR 终端结果不可观测
 - proxy-asr 没有 outcome/error 元数据
 - 日常 quality 事件不带 app commit
+- 能看见持久化偏好，看不见 VoiceSession 启动生命周期
+- 没有任何事件证明 `starting → armed/failed`
+- UI 开关 / 「正在听」文案不足以证明麦克风已就绪
