@@ -2,7 +2,13 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #26 收口 dictation 观察泄漏，待再审）
+## 当前状态（2026-09-06，Issue #27 runtime stdio 传输抽出，待 PR 审）
+
+- 卡 `docs/evals/20260906-runtime-transport-ownership.md`。分支 `feat/issue-27-runtime-transport`（从 `e7aadc3`）。未实现 #24 后续子 issue，未装真机。
+- `YishuRuntimeStdioTransport` 拥有 Process、stdin/stdout/stderr、换行分帧、stderr 排空、单次终止回调。`YishuAgentRuntimeClient` 仍拥有配置/凭证环境、JSON 编解码、turn/RPC/watchdog/插话。
+- 机器：传输分帧/启停/stderr 测、YishuBargeInTests、leanring_buddyTests TEST SUCCEEDED；`pnpm product:build:clicky` 退出 0。client 3900→3861 行。collector 880/856 预存红线未动。
+
+## 上一状态（2026-09-06，PR #26 收口 dictation 观察泄漏，待再审）
 
 - 卡仍是 `docs/evals/20260906-voice-session-ownership.md`。只修 #25/#26，不开始下一 Phase 0 issue。
 - 已删 `YishuVoiceSessionController.dictationManager`。`BuddyDictationManager` 只在控制器内部构造。`CompanionManager` 只订 `$capturePhase`（finalizing > recording > holding > idle），不再引用听写类。

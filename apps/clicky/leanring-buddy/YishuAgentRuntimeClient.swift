@@ -340,11 +340,7 @@ final class YishuAgentRuntimeClient {
     var onLifecycleEvent: ((YishuRuntimeLifecycleEvent) -> Void)?
     var onDelegatedTaskPresenceEvent: ((YishuDelegatedTaskPresenceEvent) -> Void)?
 
-    private var process: Process?
-    private var inputHandle: FileHandle?
-    private var outputHandle: FileHandle?
-    private var errorHandle: FileHandle?
-    private var outputBuffer = Data()
+    private let transport = YishuRuntimeStdioTransport()
     private var turnContinuations: [UUID: AsyncThrowingStream<YishuRuntimeTurnEvent, Error>.Continuation] = [:]
     /// Every command belonging to one active turn reuses its start trace id.
     /// This prevents a cancel/late receipt from becoming a separate trace.
@@ -469,7 +465,7 @@ final class YishuAgentRuntimeClient {
     private var taskListContinuations: [UUID: PendingTaskListRequest] = [:]
     private var taskCancelContinuations: [UUID: PendingTaskCancelRequest] = [:]
 
-    var isRunning: Bool { process?.isRunning == true }
+    var isRunning: Bool { transport.isRunning }
 
     /// True while any turn is still streaming events.
     var hasActiveTurn: Bool { !turnContinuations.isEmpty }
@@ -493,7 +489,17 @@ final class YishuAgentRuntimeClient {
             currentConversationId = newID
             UserDefaults.standard.set(newID.uuidString, forKey: Self.conversationIDDefaultsKey)
         }
+        bindTransport()
         Self.active = self
+    }
+
+    private func bindTransport() {
+        transport.onStdoutLine = { [weak self] line in
+            self?.handleStdoutLine(line)
+        }
+        transport.onTerminated = { [weak self] exitCode in
+            self?.handleTransportTermination(exitCode: exitCode)
+        }
     }
 
     /// Start an explicitly new user conversation at the selected scope.
@@ -924,18 +930,26 @@ final class YishuAgentRuntimeClient {
     }
 
     func start() throws {
-        if process?.isRunning == true { return }
-        if process != nil { resetProcessReferences() }
+        if transport.isRunning { return }
 
         let configuration = try resolveConfiguration()
-        let runtimeProcess = Process()
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
+        let environment = try makeSidecarEnvironment()
+        do {
+            try transport.start(
+                launch: YishuRuntimeTransportLaunch(
+                    executable: configuration.nodeExecutable,
+                    arguments: [configuration.runtimeEntry.path],
+                    workingDirectory: configuration.workingDirectory,
+                    environment: environment
+                )
+            )
+        } catch {
+            throw YishuAgentRuntimeClientError.launchFailed
+        }
+        stopping = false
+    }
 
-        runtimeProcess.executableURL = configuration.nodeExecutable
-        runtimeProcess.arguments = [configuration.runtimeEntry.path]
-        runtimeProcess.currentDirectoryURL = configuration.workingDirectory
+    private func makeSidecarEnvironment() throws -> [String: String] {
         let parentEnvironment = ProcessInfo.processInfo.environment
         var environment = YishuVoiceProxySupervisor.minimumChildEnvironment(
             from: parentEnvironment
@@ -976,55 +990,7 @@ final class YishuAgentRuntimeClient {
         }
         YishuVoiceProxySupervisor.authorizeChildEnvironment(&environment)
         environment["NO_COLOR"] = "1"
-        runtimeProcess.environment = environment
-        runtimeProcess.standardInput = inputPipe
-        runtimeProcess.standardOutput = outputPipe
-        runtimeProcess.standardError = errorPipe
-
-        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            Task { @MainActor in
-                self?.ingest(data)
-            }
-        }
-
-        // Runtime stderr can contain provider request fragments. Consume it but
-        // never mirror it into Console or the user-visible overlay.
-        errorPipe.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
-        }
-
-        runtimeProcess.terminationHandler = { [weak self] terminatedProcess in
-            Task { @MainActor in
-                guard let self else { return }
-                let wasStopping = self.stopping
-                // Turns, auth, and history all wait on the sidecar.  A crash or
-                // unexpected exit must end every pending UI wait immediately so
-                // the panel does not sit on the history timeout for 10s.
-                self.endAllPendingRuntimeRequests(
-                    throwing: YishuAgentRuntimeClientError.runtimeNotRunning
-                )
-                self.resetProcessReferences()
-                if !wasStopping {
-                    self.onLifecycleEvent?(.stopped(exitCode: terminatedProcess.terminationStatus))
-                }
-            }
-        }
-
-        do {
-            try runtimeProcess.run()
-        } catch {
-            outputPipe.fileHandleForReading.readabilityHandler = nil
-            errorPipe.fileHandleForReading.readabilityHandler = nil
-            throw YishuAgentRuntimeClientError.launchFailed
-        }
-
-        stopping = false
-        process = runtimeProcess
-        inputHandle = inputPipe.fileHandleForWriting
-        outputHandle = outputPipe.fileHandleForReading
-        errorHandle = errorPipe.fileHandleForReading
+        return environment
     }
 
     func startTurn(
@@ -1563,13 +1529,7 @@ final class YishuAgentRuntimeClient {
     func stop() {
         stopping = true
         endAllPendingRuntimeRequests(throwing: CancellationError())
-        inputHandle?.closeFile()
-        inputHandle = nil
-        if let process, process.isRunning {
-            process.terminate()
-        } else {
-            resetProcessReferences()
-        }
+        transport.stop()
     }
 
     /// Recovery-only termination keeps `stopping` false so the unexpected
@@ -1579,12 +1539,26 @@ final class YishuAgentRuntimeClient {
         endAllPendingRuntimeRequests(
             throwing: YishuAgentRuntimeClientError.runtimeNotRunning
         )
-        guard let process, process.isRunning else {
-            resetProcessReferences()
+        guard transport.isRunning else {
+            transport.stop()
             onLifecycleEvent?(.stopped(exitCode: -1))
             return
         }
-        process.terminate()
+        transport.stop()
+    }
+
+    private func handleTransportTermination(exitCode: Int32) {
+        let wasStopping = stopping
+        // Turns, auth, and history all wait on the sidecar.  A crash or
+        // unexpected exit must end every pending UI wait immediately so
+        // the panel does not sit on the history timeout for 10s.
+        endAllPendingRuntimeRequests(
+            throwing: YishuAgentRuntimeClientError.runtimeNotRunning
+        )
+        if !wasStopping {
+            onLifecycleEvent?(.stopped(exitCode: exitCode))
+        }
+        stopping = false
     }
 
     /// Ends every in-flight turn / auth / history wait when the sidecar is gone.
@@ -1903,28 +1877,26 @@ final class YishuAgentRuntimeClient {
     }
 
     func send<Command: Encodable>(_ command: Command) throws {
-        guard let inputHandle, process?.isRunning == true else {
+        guard transport.isRunning else {
             throw YishuAgentRuntimeClientError.runtimeNotRunning
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        var data = try encoder.encode(command)
-        data.append(0x0A)
-        try inputHandle.write(contentsOf: data)
+        let data = try encoder.encode(command)
+        do {
+            try transport.send(data)
+        } catch {
+            throw YishuAgentRuntimeClientError.runtimeNotRunning
+        }
     }
 
-    private func ingest(_ data: Data) {
-        outputBuffer.append(data)
-        while let newline = outputBuffer.firstIndex(of: 0x0A) {
-            let line = outputBuffer[..<newline]
-            outputBuffer.removeSubrange(...newline)
-            guard !line.isEmpty,
-                  let object = try? JSONSerialization.jsonObject(with: Data(line)),
-                  let event = object as? [String: Any] else {
-                continue
-            }
-            dispatch(event)
+    private func handleStdoutLine(_ line: Data) {
+        guard !line.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: line),
+              let event = object as? [String: Any] else {
+            return
         }
+        dispatch(event)
     }
 
     private static let runtimeTimingNames: Set<String> = [
@@ -3570,17 +3542,6 @@ final class YishuAgentRuntimeClient {
             runtimeEntry: URL(fileURLWithPath: runtimePath),
             workingDirectory: workingDirectory
         )
-    }
-
-    private func resetProcessReferences() {
-        outputHandle?.readabilityHandler = nil
-        errorHandle?.readabilityHandler = nil
-        process = nil
-        inputHandle = nil
-        outputHandle = nil
-        errorHandle = nil
-        stopping = false
-        outputBuffer.removeAll(keepingCapacity: false)
     }
 
     private static let supportedModelsByProvider: [String: Set<String>] = [
