@@ -3668,8 +3668,10 @@ test("ordinary personal turn recalls related memory, emits memory.used, does not
   const attached = capturing.lastCommand as TurnStartCommand & {
     payload: { __yishuRecalledMemories?: Array<{ id: string; claim: string }> };
   };
-  // PR-2: recall stays on the turn cache; the engine prepends the block.
+  const { turnExecutionContextFromCommand } = await import("../src/turn-execution-context.js");
+  const bundle = turnExecutionContextFromCommand(attached);
   assert.equal(attached.payload.__yishuRecalledMemories, undefined);
+  assert.equal(bundle?.recalledMemories[0]?.claim, "验收回答先给结论");
   assert.equal(attached.payload.utterance, "我希望你怎么回答？");
 });
 
