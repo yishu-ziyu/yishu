@@ -109,6 +109,10 @@ final class FakeForegroundRuntime: YishuForegroundRuntimeControlling {
         continuations[requestId] != nil
     }
 
+    func emit(_ requestId: UUID, _ event: YishuRuntimeTurnEvent) {
+        continuations[requestId]?.yield(event)
+    }
+
     func finish(_ requestId: UUID, throwing error: Error? = nil) {
         if let error {
             continuations[requestId]?.finish(throwing: error)
@@ -124,20 +128,20 @@ struct YishuForegroundRuntimeExecutionTests {
     @Test func startGivesExecutionOwnerAuthoritativeRequestIdentity() throws {
         let runtime = FakeForegroundRuntime()
         let execution = YishuForegroundRuntimeExecution(runtime: runtime)
-        let turn = try execution.startTestTurn("在吗")
+        let session = try execution.startTestTurn("在吗")
 
         #expect(runtime.startCount == 1)
-        #expect(execution.owns(turn.requestId))
+        #expect(execution.owns(session.requestId))
         #expect(execution.isActive)
-        #expect(execution.hasActiveTurn(requestId: turn.requestId))
-        #expect(execution.activeGeneration(requestId: turn.requestId) == 1)
+        #expect(execution.hasActiveTurn(requestId: session.requestId))
+        #expect(execution.activeGeneration(requestId: session.requestId) == 1)
         #expect(!execution.owns(UUID()))
     }
 
     @Test func presentationStopAloneDoesNotCancelRuntimeExecution() throws {
         let runtime = FakeForegroundRuntime()
         let execution = YishuForegroundRuntimeExecution(runtime: runtime)
-        let turn = try execution.startTestTurn("在吗")
+        let session = try execution.startTestTurn("在吗")
         var playbackStops = 0
         let pipeline = YishuSentenceSpeechPipeline(
             speaker: { _ in },
@@ -151,25 +155,200 @@ struct YishuForegroundRuntimeExecutionTests {
         #expect(runtime.cancelCount == 0)
         #expect(runtime.interruptCount == 0)
         #expect(runtime.steerCount == 0)
-        #expect(execution.owns(turn.requestId))
-        #expect(runtime.hasActiveTurn(requestId: turn.requestId))
+        #expect(execution.owns(session.requestId))
+        #expect(runtime.hasActiveTurn(requestId: session.requestId))
+    }
+
+    @Test func presentationDetachDoesNotSettleExecution() async throws {
+        let runtime = FakeForegroundRuntime()
+        let execution = YishuForegroundRuntimeExecution(runtime: runtime)
+        let session = try execution.startTestTurn("在吗")
+
+        let consumer = Task { @MainActor in
+            do {
+                for try await _ in session.events {}
+            } catch is CancellationError {
+            } catch {
+                Issue.record("presentation consumer threw \(error)")
+            }
+        }
+        await waitUntil { runtime.hasActiveTurn(requestId: session.requestId) }
+        consumer.cancel()
+        _ = await consumer.result
+
+        #expect(runtime.cancelCount == 0)
+        #expect(execution.owns(session.requestId))
+        #expect(execution.isActive)
+        #expect(runtime.hasActiveTurn(requestId: session.requestId))
+
+        execution.cancel(reason: "user-interrupted")
+        execution.cancel(reason: "user-interrupted")
+        execution.cancel(requestId: session.requestId, reason: "task-cancelled")
+
+        #expect(runtime.cancelCount == 1)
+        #expect(runtime.cancelReasons == ["user-interrupted"])
+        #expect(runtime.cancelRequestIds == [session.requestId])
+        #expect(!execution.isActive)
+        #expect(!execution.owns(session.requestId))
+        #expect(!runtime.hasActiveTurn(requestId: session.requestId))
+    }
+
+    @Test func runtimeCompletionSettlesOwnerWithoutPresentationSettle() async throws {
+        let runtime = FakeForegroundRuntime()
+        let execution = YishuForegroundRuntimeExecution(runtime: runtime)
+        let session = try execution.startTestTurn("在吗")
+        var sawCompleted = false
+        let consumer = Task { @MainActor in
+            for try await event in session.events {
+                if case .completed = event {
+                    sawCompleted = true
+                }
+            }
+        }
+
+        runtime.emit(
+            session.requestId,
+            .completed(text: "在的", verified: false, generation: 1)
+        )
+        runtime.finish(session.requestId)
+        _ = await consumer.result
+        await waitUntil { !execution.isActive }
+
+        #expect(sawCompleted)
+        #expect(!execution.isActive)
+        #expect(!execution.owns(session.requestId))
+        #expect(runtime.cancelCount == 0)
+        #expect(!runtime.hasActiveTurn(requestId: session.requestId))
+
+        runtime.finish(session.requestId)
+        execution.cancel(reason: "late-duplicate")
+        execution.cancel(requestId: session.requestId, reason: "task-cancelled")
+        #expect(runtime.cancelCount == 0)
+        #expect(!execution.isActive)
+    }
+
+    @Test func runtimeFailureSettlesOwnerAndReachesPresentation() async throws {
+        let runtime = FakeForegroundRuntime()
+        let execution = YishuForegroundRuntimeExecution(runtime: runtime)
+        let session = try execution.startTestTurn("在吗")
+        var presentedError: Error?
+        let consumer = Task { @MainActor in
+            do {
+                for try await _ in session.events {}
+            } catch {
+                presentedError = error
+            }
+        }
+
+        runtime.finish(
+            session.requestId,
+            throwing: YishuAgentRuntimeClientError.turnFailed(
+                code: "turn_failed",
+                message: "model exploded"
+            )
+        )
+        _ = await consumer.result
+        await waitUntil { !execution.isActive }
+
+        #expect(!execution.isActive)
+        #expect(!execution.owns(session.requestId))
+        #expect(runtime.cancelCount == 0)
+        guard case let .turnFailed(code, message) =
+                presentedError as? YishuAgentRuntimeClientError else {
+            Issue.record("expected turnFailed to reach presentation, got \(String(describing: presentedError))")
+            return
+        }
+        #expect(code == "turn_failed")
+        #expect(message == "model exploded")
+    }
+
+    @Test func replacingPresentationConsumerLeavesExecutionAlive() async throws {
+        let runtime = FakeForegroundRuntime()
+        let execution = YishuForegroundRuntimeExecution(runtime: runtime)
+        let session = try execution.startTestTurn("继续说")
+        var firstDeltas = 0
+        let first = Task { @MainActor in
+            do {
+                for try await event in session.events {
+                    if case .responseDelta = event {
+                        firstDeltas += 1
+                    }
+                }
+            } catch is CancellationError {
+            }
+        }
+        runtime.emit(session.requestId, .responseDelta(text: "旧回答", generation: 1))
+        await waitUntil { firstDeltas == 1 }
+        first.cancel()
+        _ = await first.result
+
+        var replacementTexts: [String] = []
+        let replacement = execution.makePresentationEvents()
+        let second = Task { @MainActor in
+            do {
+                for try await event in replacement {
+                    if case let .responseDelta(text, _) = event {
+                        replacementTexts.append(text)
+                    }
+                }
+            } catch is CancellationError {
+            }
+        }
+        runtime.emit(session.requestId, .responseDelta(text: "新回答", generation: 1))
+        await waitUntil { replacementTexts.contains("新回答") }
+
+        #expect(runtime.cancelCount == 0)
+        #expect(execution.owns(session.requestId))
+        #expect(execution.isActive)
+        #expect(runtime.hasActiveTurn(requestId: session.requestId))
+        #expect(replacementTexts == ["新回答"])
+        second.cancel()
+        _ = await second.result
+        #expect(execution.owns(session.requestId))
+        #expect(runtime.cancelCount == 0)
+    }
+
+    @Test func explicitProductCancelSettlesOnceWhilePresentationStopsIndependently() async throws {
+        let runtime = FakeForegroundRuntime()
+        let execution = YishuForegroundRuntimeExecution(runtime: runtime)
+        let session = try execution.startTestTurn("先说这个")
+        var presentationStopped = false
+        let consumer = Task { @MainActor in
+            do {
+                for try await _ in session.events {}
+            } catch {
+            }
+            presentationStopped = true
+        }
+        await waitUntil { runtime.hasActiveTurn(requestId: session.requestId) }
+
+        execution.cancel(reason: "user-interrupted")
+        execution.cancel(reason: "user-interrupted")
+        await waitUntil { presentationStopped && !execution.isActive }
+
+        #expect(runtime.cancelCount == 1)
+        #expect(runtime.cancelReasons == ["user-interrupted"])
+        #expect(!execution.isActive)
+        #expect(!execution.owns(session.requestId))
+        #expect(presentationStopped)
+        #expect(!runtime.hasActiveTurn(requestId: session.requestId))
     }
 
     @Test func explicitUserInterruptCancelsRuntimeExactlyOnce() throws {
         let runtime = FakeForegroundRuntime()
         let execution = YishuForegroundRuntimeExecution(runtime: runtime)
-        let turn = try execution.startTestTurn("先说这个")
+        let session = try execution.startTestTurn("先说这个")
 
         execution.cancel(reason: "user-interrupted")
         execution.cancel(reason: "user-interrupted")
-        execution.cancel(requestId: turn.requestId, reason: "task-cancelled")
+        execution.cancel(requestId: session.requestId, reason: "task-cancelled")
 
         #expect(runtime.cancelCount == 1)
         #expect(runtime.cancelReasons == ["user-interrupted"])
-        #expect(runtime.cancelRequestIds == [turn.requestId])
+        #expect(runtime.cancelRequestIds == [session.requestId])
         #expect(!execution.isActive)
-        #expect(!execution.owns(turn.requestId))
-        #expect(!runtime.hasActiveTurn(requestId: turn.requestId))
+        #expect(!execution.owns(session.requestId))
+        #expect(!runtime.hasActiveTurn(requestId: session.requestId))
     }
 
     @Test func eligibleConversationalBargeInSteersSameTurn() async throws {
@@ -177,15 +356,15 @@ struct YishuForegroundRuntimeExecutionTests {
         let execution = YishuForegroundRuntimeExecution(runtime: runtime)
         let firstUtterance = "换个说法，我想问为什么天空是蓝色的"
         #expect(YishuBargeInPolicy.allowsSameSessionConversation(firstUtterance))
-        let turn = try execution.startTestTurn("天空为什么是蓝的")
-        let generation = try #require(execution.activeGeneration(requestId: turn.requestId))
+        let session = try execution.startTestTurn("天空为什么是蓝的")
+        let generation = try #require(execution.activeGeneration(requestId: session.requestId))
 
         #expect(execution.suppressForInterruption(
-            requestId: turn.requestId,
+            requestId: session.requestId,
             expectedGeneration: generation
         ))
         let decision = try await execution.interrupt(
-            requestId: turn.requestId,
+            requestId: session.requestId,
             expectedGeneration: generation
         )
         guard case let .accepted(interruptedGeneration, nextGeneration) = decision else {
@@ -194,7 +373,7 @@ struct YishuForegroundRuntimeExecutionTests {
         }
         #expect(interruptedGeneration == generation)
         try execution.steer(
-            requestId: turn.requestId,
+            requestId: session.requestId,
             message: firstUtterance,
             nextGeneration: nextGeneration
         )
@@ -205,7 +384,7 @@ struct YishuForegroundRuntimeExecutionTests {
         #expect(runtime.steerCount == 1)
         #expect(runtime.steerMessages == [firstUtterance])
         #expect(runtime.steerGenerations == [nextGeneration])
-        #expect(execution.owns(turn.requestId))
+        #expect(execution.owns(session.requestId))
         var presentation = YishuRuntimePresentationReducer()
         presentation.appendCurrentDelta("旧回答。")
         #expect(presentation.advancePresentation(to: nextGeneration) == .advanced)
@@ -239,34 +418,33 @@ struct YishuForegroundRuntimeExecutionTests {
         .timedOut,
         .terminated,
     ])
-    func terminalOutcomesSettleExecutionExactlyOnce(kind: TerminalKind) throws {
+    func terminalOutcomesSettleExecutionExactlyOnce(kind: TerminalKind) async throws {
         let runtime = FakeForegroundRuntime()
         let execution = YishuForegroundRuntimeExecution(runtime: runtime)
-        let turn = try execution.startTestTurn("在吗")
+        let session = try execution.startTestTurn("在吗")
 
         switch kind {
         case .cancelled:
             execution.cancel(reason: "user-interrupted")
-        case .completed, .failed, .timedOut, .terminated:
-            if kind == .failed {
-                runtime.finish(turn.requestId, throwing: YishuAgentRuntimeClientError.turnFailed(
-                    code: "turn_failed",
-                    message: nil
-                ))
-            } else if kind == .timedOut {
-                runtime.finish(turn.requestId, throwing: YishuAgentRuntimeClientError.turnTimedOut)
-            } else {
-                runtime.finish(turn.requestId)
-            }
-            execution.settle(turn.requestId)
+        case .completed, .terminated:
+            runtime.finish(session.requestId)
+            await waitUntil { !execution.isActive }
+        case .failed:
+            runtime.finish(session.requestId, throwing: YishuAgentRuntimeClientError.turnFailed(
+                code: "turn_failed",
+                message: nil
+            ))
+            await waitUntil { !execution.isActive }
+        case .timedOut:
+            runtime.finish(session.requestId, throwing: YishuAgentRuntimeClientError.turnTimedOut)
+            await waitUntil { !execution.isActive }
         }
 
-        execution.settle(turn.requestId)
         execution.cancel(reason: "late-duplicate")
-        execution.cancel(requestId: turn.requestId, reason: "task-cancelled")
+        execution.cancel(requestId: session.requestId, reason: "task-cancelled")
 
         #expect(!execution.isActive)
-        #expect(!execution.owns(turn.requestId))
+        #expect(!execution.owns(session.requestId))
         if kind == .cancelled {
             #expect(runtime.cancelCount == 1)
             #expect(runtime.cancelReasons == ["user-interrupted"])
@@ -279,11 +457,11 @@ struct YishuForegroundRuntimeExecutionTests {
         let runtime = FakeForegroundRuntime()
         let execution = YishuForegroundRuntimeExecution(runtime: runtime)
         let first = try execution.startTestTurn("第一轮")
-        execution.settle(first.requestId)
+        runtime.finish(first.requestId)
+        await waitUntil { !execution.owns(first.requestId) }
         let second = try execution.startTestTurn("第二轮")
 
         runtime.finish(first.requestId)
-        execution.settle(first.requestId)
         execution.cancel(requestId: first.requestId, reason: "stale")
         do {
             try execution.steer(
@@ -328,7 +506,7 @@ enum TerminalKind: String, CaseIterable {
 }
 
 extension YishuForegroundRuntimeExecution {
-    fileprivate func startTestTurn(_ utterance: String) throws -> YishuRuntimeTurn {
+    fileprivate func startTestTurn(_ utterance: String) throws -> YishuForegroundRuntimeSession {
         try start(
             utterance: utterance,
             contextFrame: dummyFrame(),
@@ -339,6 +517,21 @@ extension YishuForegroundRuntimeExecution {
             )
         )
     }
+}
+
+@MainActor
+private func waitUntil(
+    _ condition: () -> Bool
+) async {
+    for step in 0..<80 {
+        if condition() { return }
+        if step % 4 == 3 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        } else {
+            await Task.yield()
+        }
+    }
+    Issue.record("timed out waiting for execution lifecycle condition")
 }
 
 private func dummyFrame() -> YishuContextFrame {

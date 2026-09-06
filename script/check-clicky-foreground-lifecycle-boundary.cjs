@@ -1,20 +1,28 @@
 #!/usr/bin/env node
 /**
- * Architecture ratchet: CompanionManager must not directly own or mutate
- * the foreground Runtime execution lifecycle.
+ * Architecture ratchet: CompanionManager must not own foreground Runtime
+ * execution lifecycle or the Runtime event-stream lifetime.
  *
- * Metric: foreground_execution_ownership_violations
+ * Metric 1: foreground_execution_ownership_violations
+ *   Count one violation for each:
+ *   1. direct call/definition of low-level foreground Runtime lifecycle
+ *      mutation methods (startTurn, cancelTurn, interruptTurn, steerTurn)
+ *      in any production CompanionManager*.swift file;
+ *   2. mutable storage of the authoritative active Runtime request identity
+ *      (activeRuntimeRequestId or an equivalent stored request-id property)
+ *      in those files.
  *
- * Count one violation for each:
- * 1. direct call/definition of low-level foreground Runtime lifecycle
- *    mutation methods (startTurn, cancelTurn, interruptTurn, steerTurn)
- *    in any production CompanionManager*.swift file;
- * 2. mutable storage of the authoritative active Runtime request identity
- *    (activeRuntimeRequestId or an equivalent stored request-id property)
- *    in those files.
+ * Metric 2: presentation_owned_runtime_event_lifetimes
+ *   Count one violation for each Runtime execution/event-stream lifetime
+ *   whose authoritative consumption or terminal settlement is owned by
+ *   production CompanionManager*.swift:
+ *   1. direct `turn.events` / Runtime event-stream consumption;
+ *   2. execution terminal settlement (`settle(`) from presentation code;
+ *   3. holding the raw `YishuRuntimeTurn` handle (the Runtime stream owner),
+ *      as distinct from consuming typed `YishuRuntimeTurnEvent` values.
  *
- * Zero is the permanent ceiling. Do not raise, disable, exclude files,
- * rename around, or wrap-forward inside CompanionManager to pass.
+ * Zero is the permanent ceiling for both. Do not raise, disable, exclude
+ * files, rename around, or wrap-forward inside CompanionManager to pass.
  *
  * Usage: node script/check-clicky-foreground-lifecycle-boundary.cjs
  */
@@ -30,6 +38,10 @@ const FILE_RE = /^CompanionManager.*\.swift$/;
 const LIFECYCLE_CALL_RE = /\b(startTurn|cancelTurn|interruptTurn|steerTurn)\s*\(/;
 const IDENTITY_STORAGE_RE =
   /\bvar\s+(?:(?:private|internal|fileprivate|public|open|package)\s+)*(?:(?:weak|unowned(?:\(unsafe\))?)\s+)?(?:activeRuntimeRequestId|(?:active|current|foreground)\w*RuntimeRequestId)\b/;
+const TURN_EVENTS_RE = /\bturn\.events\b/;
+const SETTLE_RE = /\.settle\s*\(/;
+const RAW_TURN_TYPE_RE = /\bYishuRuntimeTurn\b/;
+const TARGET = 0;
 
 function collectCompanionManagerFiles(dir, out = []) {
   let entries;
@@ -53,15 +65,13 @@ function collectCompanionManagerFiles(dir, out = []) {
   return out;
 }
 
-function scanFile(file) {
-  const rel = path.relative(ROOT, file);
-  const source = fs.readFileSync(file, "utf8");
+function codeLines(source) {
   const lines = source.split(/\r?\n/);
-  const violations = [];
+  const out = [];
   let inBlockComment = false;
 
   for (let i = 0; i < lines.length; i++) {
-    let line = lines[i];
+    const line = lines[i];
     let code = "";
     let inString = false;
     let stringQuote = "";
@@ -111,31 +121,84 @@ function scanFile(file) {
 
     const trimmed = code.trim();
     if (!trimmed) continue;
+    out.push({ line: i + 1, text: trimmed });
+  }
 
-    const call = trimmed.match(LIFECYCLE_CALL_RE);
+  return out;
+}
+
+function scanOwnership(file, lines) {
+  const rel = path.relative(ROOT, file);
+  const violations = [];
+  for (const { line, text } of lines) {
+    const call = text.match(LIFECYCLE_CALL_RE);
     if (call) {
       violations.push({
         file: rel,
-        line: i + 1,
+        line,
         kind: "lifecycle_call",
         symbol: call[1],
-        text: trimmed,
+        text,
       });
     }
-
-    const storage = trimmed.match(IDENTITY_STORAGE_RE);
-    if (storage) {
+    if (IDENTITY_STORAGE_RE.test(text)) {
       violations.push({
         file: rel,
-        line: i + 1,
+        line,
         kind: "identity_storage",
         symbol: "activeRuntimeRequestId",
-        text: trimmed,
+        text,
       });
     }
   }
-
   return violations;
+}
+
+function scanEventLifetimes(file, lines) {
+  const rel = path.relative(ROOT, file);
+  const violations = [];
+  for (const { line, text } of lines) {
+    if (TURN_EVENTS_RE.test(text)) {
+      violations.push({
+        file: rel,
+        line,
+        kind: "runtime_event_consumption",
+        symbol: "turn.events",
+        text,
+      });
+    }
+    if (SETTLE_RE.test(text)) {
+      violations.push({
+        file: rel,
+        line,
+        kind: "presentation_terminal_settle",
+        symbol: "settle",
+        text,
+      });
+    }
+    if (RAW_TURN_TYPE_RE.test(text)) {
+      violations.push({
+        file: rel,
+        line,
+        kind: "raw_runtime_turn_handle",
+        symbol: "YishuRuntimeTurn",
+        text,
+      });
+    }
+  }
+  return violations;
+}
+
+function printMetric(name, violations) {
+  const count = violations.length;
+  console.log(`${name}: ${count}`);
+  console.log(`target: ${TARGET}`);
+  for (const item of violations) {
+    console.log(
+      `  ${item.file}:${item.line} ${item.kind} ${item.symbol}  ${item.text}`,
+    );
+  }
+  return count;
 }
 
 if (!fs.existsSync(PRODUCT_SWIFT)) {
@@ -153,23 +216,42 @@ if (files.length === 0) {
   process.exit(2);
 }
 
-const violations = files.flatMap(scanFile);
-const count = violations.length;
+const scanned = files.map((file) => ({
+  file,
+  lines: codeLines(fs.readFileSync(file, "utf8")),
+}));
+const ownership = scanned.flatMap(({ file, lines }) =>
+  scanOwnership(file, lines),
+);
+const lifetimes = scanned.flatMap(({ file, lines }) =>
+  scanEventLifetimes(file, lines),
+);
 
-console.log(`foreground_execution_ownership_violations: ${count}`);
-if (count === 0) {
-  console.log(
-    `scanned ${files.length} CompanionManager*.swift file(s); zero is the permanent ceiling.`,
-  );
+const ownershipCount = printMetric(
+  "foreground_execution_ownership_violations",
+  ownership,
+);
+const lifetimeCount = printMetric(
+  "presentation_owned_runtime_event_lifetimes",
+  lifetimes,
+);
+
+console.log(
+  `scanned ${files.length} CompanionManager*.swift file(s); zero is the permanent ceiling for both metrics.`,
+);
+
+if (ownershipCount === 0 && lifetimeCount === 0) {
   process.exit(0);
 }
 
-for (const item of violations) {
-  console.log(
-    `  ${item.file}:${item.line} ${item.kind} ${item.symbol}  ${item.text}`,
+if (ownershipCount > 0) {
+  console.error(
+    `foreground lifecycle boundary FAILED: ${ownershipCount} ownership violation(s); ceiling is 0.`,
   );
 }
-console.error(
-  `foreground lifecycle boundary FAILED: ${count} violation(s); ceiling is 0.`,
-);
+if (lifetimeCount > 0) {
+  console.error(
+    `foreground lifecycle boundary FAILED: ${lifetimeCount} presentation-owned Runtime event lifetime(s); ceiling is 0.`,
+  );
+}
 process.exit(1);

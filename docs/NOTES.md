@@ -2,7 +2,15 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，Issue #29 前台 Runtime 执行所有权抽出，待 PR 审）
+## 当前状态（2026-09-06，PR #30 审阅修订：呈现不得拥有 Runtime 事件流寿命，待再审）
+
+- 卡仍是 `docs/evals/20260906-issue-29-foreground-execution-ownership.md`。只修 #29 / PR #30，不开始下一 Phase 0 issue。未装真机。
+- 审阅点：`CompanionManager` 仍 `for try await event in turn.events`，呈现 `defer` 里 `settle`。呈现消费结束会结算执行身份，即使 Runtime 轮次没被取消。
+- 实测第二健身函数基线 2（不是审阅写的「至少 1」）：L2918 `settle` + L2976 `turn.events`。原 `foreground_execution_ownership_violations` 保持 0。
+- `YishuForegroundRuntimeExecution` 现在自己消费 Runtime `turn.events`，向呈现转发类型化事件；Runtime 流结束或失败时自己结算。呈现拆掉/停声不 `settle`、不 `cancelTurn`。显式产品策略 cancel 仍恰好一次。
+- 两个健身函数都是 0。CompanionManager 4444/4609。表征测 A–F + barge-in / computer-action / file-drop / held-scene / leanring_buddyTests TEST SUCCEEDED。`pnpm product:build:clicky` 退出 0。协议无 diff。collector 880/856 预存红线未动。
+
+## 上一状态（2026-09-06，Issue #29 前台 Runtime 执行所有权抽出，待 PR 审）
 
 - 卡 `docs/evals/20260906-issue-29-foreground-execution-ownership.md`。分支 `feat/issue-29-foreground-execution-ownership`（从 `a244c84`）。未实现全双工 / Task-Run / IM / AgentIdentity。未装真机。
 - `YishuForegroundRuntimeExecution` 拥有前台 request identity 与 start/cancel/interrupt/steer/一次终结。`CompanionManager` 仍决定是否新开、能否插话、何时停声、UI 显示什么。`onCancel` 只停声，不再隐式 `cancelTurn`。
