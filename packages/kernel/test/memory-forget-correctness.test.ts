@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -11,11 +11,14 @@ import {
   type YishuKernel,
 } from "../src/index.js";
 import {
+  analyzeForgetMutationPaths,
   FORGET_FIXTURE_CLAIM,
   FORGET_FIXTURE_OTHER,
   FORGET_FIXTURE_TRUTH_CLAIM,
+  loadProductionForgetSources,
   measureMemoryForgetFitness,
 } from "./memory-forget-harness.js";
+import { FORGET_RECEIPT_FILE_NAME } from "../src/memory/forget-receipts.js";
 
 const PROJECT_SCOPE = "project:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -120,7 +123,79 @@ describe("memory forget correctness", () => {
       });
       assert.equal(again?.alreadyGone, true);
       await assertFullyForgotten(kernel, remembered);
+
+      const actionAgain = await kernel.registry.invoke("forget", {
+        caller: "ui",
+        input: { memoryId: remembered.id },
+      });
+      assert.equal(actionAgain.status, "verified", actionAgain.message);
     });
+  });
+
+  it("legacy store-gone visible residue is not verified through either entry", async () => {
+    await withDir("yishu-forget-legacy-residue-", async (_dir, kernel) => {
+      const remembered = await remember(kernel, FORGET_FIXTURE_CLAIM);
+      const other = await remember(kernel, FORGET_FIXTURE_OTHER);
+      await kernel.store.forgetMemory(remembered.id, { expectedScope: "personal" });
+      assert.equal(
+        visibleHas(await kernel.memory!.visible.readText(), FORGET_FIXTURE_CLAIM),
+        true,
+      );
+
+      const viaAction = await kernel.registry.invoke("forget", {
+        caller: "ui",
+        input: { memoryId: remembered.id },
+      });
+      const viaLedger = await kernel.memories.forget({
+        id: remembered.id,
+        expectedScope: "personal",
+      }).then((result) => result, (error: unknown) => error);
+
+      assert.notEqual(viaAction.status, "verified");
+      assert.notEqual(viaAction.status, "ok");
+      assert.ok(viaLedger instanceof Error);
+      const text = await kernel.memory!.visible.readText();
+      assert.equal(visibleHas(text, FORGET_FIXTURE_CLAIM), true);
+      assert.equal(visibleHas(text, FORGET_FIXTURE_OTHER), true);
+      assert.ok(
+        (await kernel.store.searchMemory("", { minConfidence: 0 }))
+          .some((row) => row.id === other.id),
+      );
+    });
+  });
+
+  it("completed forget writes a fingerprint receipt and stays alreadyGone after reopen", async () => {
+    await withDir("yishu-forget-receipt-reopen-", async (dir, kernel) => {
+      const remembered = await remember(kernel, FORGET_FIXTURE_CLAIM);
+      const forgotten = await kernel.memories.forget({
+        id: remembered.id,
+        expectedScope: "personal",
+      });
+      assert.equal(forgotten?.alreadyGone, false);
+      const receiptPath = path.join(dir, "memory", FORGET_RECEIPT_FILE_NAME);
+      const raw = await readFile(receiptPath, "utf8");
+      assert.equal(raw.includes(FORGET_FIXTURE_CLAIM), false);
+      assert.equal(raw.includes(remembered.claim), false);
+      assert.equal(raw.includes(remembered.id), true);
+
+      const reopened = createYishuKernel({
+        storeBackend: "json",
+        storeDir: dir,
+        memoryDir: path.join(dir, "memory"),
+      });
+      await reopened.store.load();
+      const again = await reopened.memories.forget({
+        id: remembered.id,
+        expectedScope: "personal",
+      });
+      assert.equal(again?.alreadyGone, true);
+      await assertFullyForgotten(reopened, remembered);
+      const actionAgain = await reopened.registry.invoke("forget", {
+        caller: "ui",
+        input: { memoryId: remembered.id },
+      });
+      assert.equal(actionAgain.status, "verified", actionAgain.message);
+    }, "json");
   });
 
   it("visible-authority failure is not success and retry converges", async () => {
@@ -379,5 +454,104 @@ describe("memory forget correctness", () => {
       const report = await measureMemoryForgetFitness();
       assert.equal(report.mutationPaths, 1);
     });
+  });
+
+  it("evaluator fails if an entry independently decides missing-id success", () => {
+    const production = loadProductionForgetSources();
+    const owner = production.find((file) => file.role === "owner");
+    const ledger = production.find((file) => file.label === "MemoryLedger.forget");
+    const runtime = production.find((file) => file.label === "MemoryForgetCommand");
+    assert.ok(owner && ledger && runtime);
+
+    const shortcutAction = `
+export function createForgetAction(store, truth, visible) {
+  return defineYishuAction({
+    run: async (ctx) => {
+      const existing = store.getSnapshot().memories.find((row) => row.id === ctx.input.memoryId);
+      if (existing === undefined) {
+        return { id: ctx.input.memoryId, forgotten: true as const, alreadyGone: true, scope: "" };
+      }
+      return forgetMemoryClaim(ports, { id: ctx.input.memoryId, expectedScope: existing.scope });
+    },
+  });
+}
+`;
+    const bypassLedger = `
+export function createMemoryLedger(store, visible, truth) {
+  return {
+    async forget(input) {
+      const existing = store.getSnapshot().memories.find((row) => row.id === input.id);
+      if (existing === undefined) {
+        return { id: input.id, forgotten: true, alreadyGone: true };
+      }
+      return forgetMemoryClaim({ store, visible, truth }, input);
+    },
+  };
+}
+`;
+    const storeAbsenceVerified = `
+export function createForgetAction(store) {
+  return defineYishuAction({
+    verify: async (ctx) => {
+      const existing = store.getSnapshot().memories.find((row) => row.id === ctx.input.memoryId);
+      return { verified: existing === undefined };
+    },
+  });
+}
+`;
+    const storeAbsenceAlreadyGone = `
+async function forgetMemory(command, emit) {
+  const existing = this.kernel.store.getSnapshot().memories.find((row) => row.id === command.payload.memoryId);
+  if (existing === undefined) {
+    emit(runtimeEvent("memory.forgotten", command.requestId, command.traceId, {
+      memoryId: command.payload.memoryId,
+      alreadyGone: true,
+    }));
+    return;
+  }
+  const result = await this.kernel.memories.forget({
+    id: command.payload.memoryId,
+    expectedScope: "personal",
+  });
+  emit(runtimeEvent("memory.forgotten", command.requestId, command.traceId, {
+    alreadyGone: result.alreadyGone,
+  }));
+}
+`;
+
+    const productionCount = analyzeForgetMutationPaths(production);
+    assert.equal(productionCount.count, 1, productionCount.paths.join(", "));
+
+    const actionGamed = analyzeForgetMutationPaths([
+      { label: "createForgetAction", role: "entry", source: shortcutAction },
+      ledger,
+      runtime,
+      owner,
+    ]);
+    assert.notEqual(actionGamed.count, 1, "missing-id action shortcut must not report one owner");
+
+    const ledgerGamed = analyzeForgetMutationPaths([
+      { label: "createForgetAction", role: "entry", source: production.find((file) => file.label === "createForgetAction")!.source },
+      { label: "MemoryLedger.forget", role: "entry", source: bypassLedger },
+      runtime,
+      owner,
+    ]);
+    assert.notEqual(ledgerGamed.count, 1, "ledger missing-target bypass must not report one owner");
+
+    const verifiedGamed = analyzeForgetMutationPaths([
+      { label: "createForgetAction", role: "entry", source: storeAbsenceVerified },
+      ledger,
+      runtime,
+      owner,
+    ]);
+    assert.notEqual(verifiedGamed.count, 1, "store absence as verified must not report one owner");
+
+    const runtimeGamed = analyzeForgetMutationPaths([
+      { label: "createForgetAction", role: "entry", source: production.find((file) => file.label === "createForgetAction")!.source },
+      ledger,
+      { label: "MemoryForgetCommand", role: "entry", source: storeAbsenceAlreadyGone },
+      owner,
+    ]);
+    assert.notEqual(runtimeGamed.count, 1, "runtime store-absence alreadyGone must not report one owner");
   });
 });

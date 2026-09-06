@@ -7,6 +7,7 @@
  * Success is the applicable postcondition, not a single layer's return value.
  */
 
+import path from "node:path";
 import type { ForgetMemoryResult, MemoryClaim } from "../store/types.js";
 import type { YishuStorePort } from "../store/yishu-store.js";
 import {
@@ -16,6 +17,10 @@ import {
   type VisibleMemoryFile,
 } from "./visible-file.js";
 import type { MemoryTruthLayer } from "./truth-layer.js";
+import {
+  readForgetReceipt,
+  writeForgetReceipt,
+} from "./forget-receipts.js";
 
 export interface MemoryForgetPorts {
   readonly store: YishuStorePort;
@@ -25,7 +30,12 @@ export interface MemoryForgetPorts {
 
 export interface MemoryForgetInput {
   readonly id: string;
-  readonly expectedScope: string;
+  /**
+   * Required for the ledger/UI path. Omitted by the action path, which
+   * only has a memory id; the owner resolves scope from the store row or
+   * a completion receipt.
+   */
+  readonly expectedScope?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -173,40 +183,131 @@ async function removeTruthIfApplicable(
   return factId;
 }
 
+function parseExpectedScope(input: MemoryForgetInput): string | undefined | null {
+  if (input.expectedScope === undefined) return undefined;
+  const expected = input.expectedScope.trim();
+  return expected.length === 0 ? null : expected;
+}
+
+function visibleAuthorityCouldApply(
+  ports: MemoryForgetPorts,
+  scope: string | undefined,
+): boolean {
+  if (ports.visible === undefined) return false;
+  if (scope === undefined || scope.length === 0) return true;
+  return scope === "personal";
+}
+
+function receiptDirectory(ports: MemoryForgetPorts): string | undefined {
+  if (ports.visible === undefined) return undefined;
+  return path.dirname(ports.visible.filePath);
+}
+
+async function persistCompletionReceipt(
+  ports: MemoryForgetPorts,
+  receipt: {
+    readonly id: string;
+    readonly scope: string;
+    readonly visibleFingerprint?: string;
+    readonly truthFactId?: string;
+  },
+): Promise<void> {
+  const directory = receiptDirectory(ports);
+  if (directory === undefined) return;
+  await writeForgetReceipt(directory, receipt);
+}
+
+async function forgetMissingStoreRow(
+  ports: MemoryForgetPorts,
+  input: MemoryForgetInput,
+  expectedScope: string | undefined,
+): Promise<MemoryForgetOutcome | null> {
+  throwIfAborted(input.signal);
+  const directory = receiptDirectory(ports);
+  const receipt = directory === undefined
+    ? undefined
+    : await readForgetReceipt(directory, input.id);
+
+  if (receipt !== undefined) {
+    if (expectedScope !== undefined && receipt.scope !== expectedScope) {
+      return null;
+    }
+    const inspection = await inspectMemoryForget(ports, {
+      id: input.id,
+      scope: receipt.scope,
+      requireVisibleSuppression: receipt.visibleFingerprint !== undefined,
+      ...(receipt.visibleFingerprint !== undefined
+        ? { visibleFingerprint: receipt.visibleFingerprint }
+        : {}),
+      ...(receipt.truthFactId !== undefined ? { truthFactId: receipt.truthFactId } : {}),
+    });
+    if (!inspection.complete) {
+      throw new MemoryForgetIncompleteError(inspection.residue);
+    }
+    return {
+      id: input.id,
+      forgotten: true,
+      alreadyGone: true,
+      scope: receipt.scope,
+      ...(receipt.visibleFingerprint !== undefined
+        ? { visibleFingerprint: receipt.visibleFingerprint }
+        : {}),
+      ...(receipt.truthFactId !== undefined ? { truthFactId: receipt.truthFactId } : {}),
+    };
+  }
+
+  if (visibleAuthorityCouldApply(ports, expectedScope)) {
+    throw new MemoryForgetIncompleteError(["missing_provenance"]);
+  }
+
+  if (expectedScope === undefined) {
+    return {
+      id: input.id,
+      forgotten: true,
+      alreadyGone: true,
+      scope: "",
+    };
+  }
+
+  if (ports.truth !== undefined) {
+    await ports.truth.removeFact(expectedScope, input.id);
+    if (await truthContains(ports.truth, expectedScope, input.id)) {
+      throw new MemoryForgetIncompleteError(["truth"]);
+    }
+  }
+  const storeResult = await ports.store.forgetMemory(input.id, { expectedScope });
+  if (storeResult === null) return null;
+  return {
+    id: input.id,
+    forgotten: true,
+    alreadyGone: true,
+    scope: expectedScope,
+  };
+}
+
 /**
- * Forget one memory by exact id + expected scope.
- * Returns null on scope mismatch (no mutation). Missing id is alreadyGone
- * only after applicable leftover Truth for that id is also absent.
+ * Forget one memory by exact id, with optional expected scope.
+ * Returns null on scope mismatch (no mutation).
+ *
+ * Missing store row is alreadyGone only when a completion receipt proves
+ * the prior forget, or when visible authority cannot apply. Store absence
+ * alone is not verified success.
  */
 export async function forgetMemoryClaim(
   ports: MemoryForgetPorts,
   input: MemoryForgetInput,
 ): Promise<MemoryForgetOutcome | null> {
   throwIfAborted(input.signal);
-  const expectedScope = input.expectedScope.trim();
-  if (expectedScope.length === 0) return null;
+  const expectedScope = parseExpectedScope(input);
+  if (expectedScope === null) return null;
 
   const existing = findClaim(ports.store, input.id);
-  if (existing !== undefined && existing.scope !== expectedScope) {
+  if (existing !== undefined && expectedScope !== undefined && existing.scope !== expectedScope) {
     return null;
   }
 
   if (existing === undefined) {
-    throwIfAborted(input.signal);
-    if (ports.truth !== undefined) {
-      await ports.truth.removeFact(expectedScope, input.id);
-      if (await truthContains(ports.truth, expectedScope, input.id)) {
-        throw new MemoryForgetIncompleteError(["truth"]);
-      }
-    }
-    const storeResult = await ports.store.forgetMemory(input.id, { expectedScope });
-    if (storeResult === null) return null;
-    return {
-      id: input.id,
-      forgotten: true,
-      alreadyGone: true,
-      scope: expectedScope,
-    };
+    return forgetMissingStoreRow(ports, input, expectedScope);
   }
 
   const visibleMeta = await removeVisibleIfApplicable(
@@ -221,7 +322,9 @@ export async function forgetMemoryClaim(
   );
 
   throwIfAborted(input.signal);
-  const storeResult = await ports.store.forgetMemory(existing.id, { expectedScope });
+  const storeResult = await ports.store.forgetMemory(existing.id, {
+    expectedScope: existing.scope,
+  });
   if (storeResult === null) return null;
 
   const inspection = await inspectMemoryForget(ports, {
@@ -237,6 +340,15 @@ export async function forgetMemoryClaim(
   if (!inspection.complete) {
     throw new MemoryForgetIncompleteError(inspection.residue);
   }
+
+  await persistCompletionReceipt(ports, {
+    id: existing.id,
+    scope: existing.scope,
+    ...(visibleMeta.fingerprint !== undefined
+      ? { visibleFingerprint: visibleMeta.fingerprint }
+      : {}),
+    ...(truthFactId !== undefined ? { truthFactId } : {}),
+  });
 
   return {
     id: existing.id,
