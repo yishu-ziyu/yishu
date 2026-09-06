@@ -10,6 +10,7 @@ import {
   classifyTerminal,
   evaluate,
   evaluateFiles,
+  EvaluatorAccountingError,
   parseJSONL,
   publicReport,
 } from "./check-lifecycle-integrity.mjs";
@@ -41,16 +42,28 @@ function writeTemp(events, fileName = "quality.jsonl") {
   return path;
 }
 
+function evaluateClosed(events) {
+  return evaluate(events, { closedWindow: true });
+}
+
 function assertInvariants(report) {
   assert.ok(report.operations_reconstructed >= 0);
   assert.ok(report.operations_unreconstructable >= 0);
   assert.ok(report.lifecycle_integrity_failures >= 0);
   assert.ok(report.semantic_lifecycle_failures >= 0);
   assert.ok(report.observability_integrity_failures >= 0);
+  assert.ok(report.pending_operations >= 0);
   assert.equal(
     report.operations_reconstructed + report.operations_unreconstructable,
     report.operations.length,
   );
+  assert.equal(report.logical_operations_count, report.operations.length);
+  assert.equal(
+    report.lifecycle_integrity_failures,
+    report.semantic_lifecycle_failures + report.observability_integrity_failures,
+  );
+  assert.ok(report.lifecycle_integrity_failures <= report.logical_operations_count);
+  assert.equal(report.unique_observability_gaps, report.observability_gaps.length);
   if (report.reconstructability_rate != null) {
     assert.ok(report.reconstructability_rate >= 0);
     assert.ok(report.reconstructability_rate <= 1);
@@ -83,12 +96,43 @@ test("cancellation is a valid terminal", () => {
   assert.equal(report.operations[0].terminal_kind, "cancelled");
 });
 
-test("missing terminal is a semantic failure", () => {
-  const report = evaluate(load("missing-terminal.jsonl"));
+test("missing terminal is a semantic failure only in a closed window", () => {
+  const closed = evaluateClosed(load("missing-terminal.jsonl"));
+  assertInvariants(closed);
+  assert.ok(closed.semantic_lifecycle_failures >= 1);
+  assert.ok(closed.started_without_terminal_outcome >= 1);
+  assert.equal(closed.pending_operations, 0);
+  assert.equal(
+    runCli(["--closed-window", "--expect-zero", join(FIX, "missing-terminal.jsonl")]).status,
+    1,
+  );
+
+  const open = evaluate(load("missing-terminal.jsonl"));
+  assertInvariants(open);
+  assert.equal(open.semantic_lifecycle_failures, 0);
+  assert.ok(open.pending_operations >= 1);
+  assert.equal(runCli(["--expect-zero", join(FIX, "missing-terminal.jsonl")]).status, 0);
+});
+
+test("live tail open operation is not a semantic failure", () => {
+  const report = evaluate(load("live-tail.jsonl"));
   assertInvariants(report);
+  assert.equal(report.observation_window, "open");
+  assert.equal(report.semantic_lifecycle_failures, 0);
+  assert.ok(report.pending_operations >= 1);
+  assert.equal(runCli(["--expect-zero", join(FIX, "live-tail.jsonl")]).status, 0);
+});
+
+test("closed window same open start is a semantic failure", () => {
+  const report = evaluateClosed(load("closed-window.jsonl"));
+  assertInvariants(report);
+  assert.equal(report.observation_window, "closed");
   assert.ok(report.semantic_lifecycle_failures >= 1);
-  assert.ok(report.started_without_terminal_outcome >= 1);
-  assert.equal(runCli(["--expect-zero", join(FIX, "missing-terminal.jsonl")]).status, 1);
+  assert.equal(report.pending_operations, 0);
+  assert.equal(
+    runCli(["--closed-window", "--expect-zero", join(FIX, "closed-window.jsonl")]).status,
+    1,
+  );
 });
 
 test("duplicate canonical terminal is a semantic failure", () => {
@@ -107,12 +151,12 @@ test("orphan terminal is a semantic failure when the same source has starts", ()
 });
 
 test("terminal without usable id is observability debt plus open-start semantic failure", () => {
-  const report = evaluate(load("missing-correlation.jsonl"));
+  const report = evaluateClosed(load("missing-correlation.jsonl"));
   assertInvariants(report);
   assert.ok(report.uncorrelated_terminal_events >= 1);
-  assert.ok(report.observability_integrity_failures >= 1);
   assert.ok(report.started_without_terminal_outcome >= 2);
   assert.ok(report.semantic_lifecycle_failures >= 1);
+  assert.ok(report.lifecycle_integrity_failures <= report.logical_operations_count);
 });
 
 test("three interleaved captures reconstruct with zero failures", () => {
@@ -142,12 +186,13 @@ test("legacy incomplete log surfaces observability gaps and is not silently gree
   const silentlyGreen =
     report.semantic_lifecycle_failures === 0 &&
     report.observability_integrity_failures === 0 &&
+    report.pending_operations === 0 &&
     report.observability_gaps.length === 0;
   assert.equal(silentlyGreen, false);
 });
 
 test("does not infer success from missing errors", () => {
-  const report = evaluate(load("missing-terminal.jsonl"));
+  const report = evaluateClosed(load("missing-terminal.jsonl"));
   assert.equal(report.operations_reconstructed, 0);
   assert.ok(report.operations.every((op) => op.terminal_kind !== "success"));
 });
@@ -199,7 +244,7 @@ test("unknown outcome is an ambiguous terminal", () => {
 
 test("anti-gaming: deleting a terminal cannot stay green", () => {
   const events = load("good-success.jsonl").filter((event) => event.name !== "model.completed");
-  const report = evaluate(events);
+  const report = evaluateClosed(events);
   assertInvariants(report);
   assert.ok(report.semantic_lifecycle_failures >= 1);
   assert.ok(report.started_without_terminal_outcome >= 1);
@@ -218,7 +263,7 @@ test("anti-gaming: removing an operation id cannot stay green", () => {
   const events = load("good-success.jsonl").map((event) =>
     event.name === "ptt.key_up" ? { ...event, operationId: null } : event,
   );
-  const report = evaluate(events);
+  const report = evaluateClosed(events);
   assertInvariants(report);
   assert.ok(report.uncorrelated_terminal_events >= 1);
   assert.ok(report.semantic_lifecycle_failures >= 1);
@@ -246,7 +291,7 @@ test("anti-gaming: unrelated success does not close another operation", () => {
     status: null,
     errorCode: null,
   });
-  const report = evaluate(events);
+  const report = evaluateClosed(events);
   assertInvariants(report);
   assert.ok(report.started_without_terminal_outcome >= 1);
   assert.ok(report.semantic_lifecycle_failures >= 1);
@@ -287,6 +332,19 @@ test("ASR production shape: repeated request_sent is not a false semantic failur
   assert.ok(report.uncorrelated_terminal_events >= 1);
 });
 
+test("id-less alias events do not inflate an operation-count primary", () => {
+  const report = evaluate(load("asr-production-shape.jsonl"));
+  assertInvariants(report);
+  assert.ok(report.uncorrelated_terminal_events >= 1);
+  assert.ok(report.low_fidelity_alias_events >= 1);
+  assert.equal(report.operations.filter((op) => op.family === "asr").length, 1);
+  assert.ok(report.lifecycle_integrity_failures <= report.logical_operations_count);
+  assert.equal(
+    report.lifecycle_integrity_failures,
+    report.semantic_lifecycle_failures + report.observability_integrity_failures,
+  );
+});
+
 test("runtime cross-source: correlated done reconstructs; id-less completed is observability", () => {
   const report = evaluateFiles([
     join(FIX, "runtime-cross-source-quality.jsonl"),
@@ -295,17 +353,21 @@ test("runtime cross-source: correlated done reconstructs; id-less completed is o
   assertInvariants(report);
   assert.equal(report.semantic_lifecycle_failures, 0);
   assert.equal(report.by_family.runtime_turn.operations_reconstructed, 1);
-  assert.ok(report.observability_integrity_failures >= 1);
   assert.ok(report.uncorrelated_terminal_events >= 1);
+  assert.ok(report.low_fidelity_alias_events >= 1);
   assert.equal(report.operations.filter((op) => op.family === "runtime_turn").length, 1);
+  assert.equal(report.lifecycle_integrity_failures, 0);
 });
 
 test("computer_result current shape is observability debt, not two semantic failures", () => {
   const report = evaluate(load("computer-result-current.jsonl"));
   assertInvariants(report);
   assert.equal(report.semantic_lifecycle_failures, 0);
-  assert.ok(report.observability_integrity_failures >= 1);
+  assert.equal(report.observability_integrity_failures, 0);
+  assert.equal(report.lifecycle_integrity_failures, 0);
   assert.equal(report.by_family.computer_result.operations_reconstructed, 0);
+  assert.equal(report.operations.filter((op) => op.family === "computer_result").length, 0);
+  assert.ok(report.unique_observability_gaps >= 1);
   assert.ok(report.observability_gaps.some((gap) => gap.family === "computer_result"));
 });
 
@@ -342,4 +404,79 @@ test("modern instrumentation does not turn a legacy orphan into a product failur
   assert.equal(report.by_family.asr.semantic_lifecycle_failures, 0);
   assert.ok(report.by_family.asr.observability_integrity_failures >= 1);
   assert.equal(report.semantic_lifecycle_failures, 0);
+});
+
+test("primary metric stays at or below the logical operation count", () => {
+  for (const name of [
+    "good-success.jsonl",
+    "asr-production-shape.jsonl",
+    "missing-correlation.jsonl",
+    "computer-result-current.jsonl",
+    "live-tail.jsonl",
+    "orphan-duplicate.jsonl",
+  ]) {
+    const report = evaluateClosed(load(name));
+    assertInvariants(report);
+    assert.ok(
+      report.lifecycle_integrity_failures <= report.logical_operations_count,
+      `${name}: ${report.lifecycle_integrity_failures} > ${report.logical_operations_count}`,
+    );
+  }
+});
+
+test("evaluator invariant violation fails loudly, never clamps", () => {
+  const negative = () =>
+    evaluate(load("good-success.jsonl"), {
+      injectInvalidAccounting(report) {
+        report.operations_reconstructed = -1;
+      },
+    });
+  assert.throws(negative, EvaluatorAccountingError);
+  try {
+    negative();
+    assert.fail("expected throw");
+  } catch (err) {
+    assert.equal(err.name, "EvaluatorAccountingError");
+    assert.match(err.message, /operations_reconstructed=-1/);
+    assert.equal(err.report.operations_reconstructed, -1);
+  }
+
+  const rate = () =>
+    evaluate(load("good-success.jsonl"), {
+      injectInvalidAccounting(report) {
+        report.reconstructability_rate = 1.5;
+      },
+    });
+  try {
+    rate();
+    assert.fail("expected throw");
+  } catch (err) {
+    assert.equal(err.report.reconstructability_rate, 1.5);
+    assert.match(err.message, /reconstructability_rate=1\.5/);
+  }
+
+  const overcount = () =>
+    evaluate(load("good-success.jsonl"), {
+      injectInvalidAccounting(report) {
+        report.lifecycle_integrity_failures = report.logical_operations_count + 3;
+        report.semantic_lifecycle_failures = report.lifecycle_integrity_failures;
+        report.observability_integrity_failures = 0;
+      },
+    });
+  try {
+    overcount();
+    assert.fail("expected throw");
+  } catch (err) {
+    assert.ok(err.report.lifecycle_integrity_failures > err.report.logical_operations_count);
+    assert.match(err.message, /lifecycle_integrity_failures=/);
+  }
+});
+
+test("deterministic evaluator suite is wired into product verification", () => {
+  const script = readFileSync(join(ROOT, "script/verify-product.sh"), "utf8");
+  assert.match(
+    script,
+    /node --test evals\/observability\/check-lifecycle-integrity\.test\.mjs/,
+  );
+  assert.doesNotMatch(script, /quality\.sample\.jsonl --expect-zero/);
 });
