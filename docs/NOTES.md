@@ -2,7 +2,16 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #36 再审：生产音频地板永久门）
+## 当前状态（2026-09-06，PR #36 再审：ASR 终端结果）
+
+- 卡 `docs/evals/20260906-pr36-asr-terminal-outcome.md`。更新 PR #36，不开新 PR，不合并。头仍从 `c35b55c` 修。不开始 StepAudio Realtime / Experience Recorder。
+- 真机窗 `2026-09-06T11:00:19Z`：开口/收尾在，代理多数有 first-byte；`turn.start = 0`。已证实客户端把失败收成空串并当成静音。未证实上游 SSE 具体类型。
+- Stage A：一次打开「连续聆听」后面板为「正在听，直接说」；`handsfree.enabled` 1；偏好在 armed 后为 1。
+- Stage B 阻塞：验收窗 `quality.jsonl` 自 line 1372 起 `duplex.speech_onset` 多次、`asr.request_sent` interim+final 都有、voice proxy `/audio/asr/sse` 有 body；但 `asr.first_partial` 0、`asr.final` 0、`duplex.final_accepted` 0、`turn.start` 0、`tts.first_audio` 0。runtime-timing 行数未增。无 `ptt.key_down`。`ptt.key_up` 来自连续听收尾复用，不是 Control+Option。
+- Stage C–G 未做（没有可打断的 TTS）。裁决 `NOT_READY`。证据只在 `/tmp/yishu-duplex-acceptance-20260906-185505/`，不入库。
+- 待用户：四项人评（第一字 / 切句 / 停太久 / 其他怪异）以及奕枢有没有真正开口回答。
+
+## 上一状态（2026-09-06，PR #36 再审：生产音频地板永久门）
 
 - 卡 `docs/evals/20260906-pr36-audio-floor-gate.md`。分支 `feat/issue-35-duplex-voice`。更新 PR #36，不开新 PR，不合并。未装真机。不开始 StepAudio Realtime。
 - Path A / PCM pre-roll / VoiceSession off-starting-armed-failed / 可听播放门 / 连续听 PTT 文案 均保持。

@@ -58,6 +58,21 @@ enum ClickyAnalytics {
         QualityEventRecorder.record(name: "permission.granted", sessionId: "app", attributes: ["permission": permission])
     }
 
+    static func currentVoiceTurnId() -> String {
+        voiceTurnId
+    }
+
+    static func bindVoiceTurn(_ turnId: String) {
+        voiceTurnId = turnId
+        keyUpAt = nil
+        emittedVoiceEvents = []
+    }
+
+    static func markUtteranceReleased() {
+        pushToTalkStartedAt = nil
+        keyUpAt = DispatchTime.now().uptimeNanoseconds
+    }
+
     static func trackPushToTalkStarted(turnId: String = "voice") {
         pushToTalkStartedAt = DispatchTime.now().uptimeNanoseconds
         voiceTurnId = turnId
@@ -78,6 +93,19 @@ enum ClickyAnalytics {
             sessionId: "voice",
             durationMs: durationMs,
             attributes: voiceAttributes(sinceKeyUpMs: 0)
+        )
+    }
+
+    static func trackAsrTerminal(kind: YishuAsrTerminalKind) {
+        QualityEventRecorder.record(
+            name: "asr.terminal",
+            sessionId: "voice",
+            durationMs: sinceKeyUpMs(),
+            attributes: [
+                "turnId": voiceTurnId,
+                "sinceKeyUpMs": max(0, sinceKeyUpMs()),
+                "outcome": kind.rawValue,
+            ]
         )
     }
 

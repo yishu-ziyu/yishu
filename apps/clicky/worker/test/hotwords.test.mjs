@@ -277,6 +277,9 @@ test("asr timing log has no audio and no keys", () => {
   assert.match(detailed, /reused=1/);
   assert.match(detailed, /body_bytes=2048/);
   assert.match(detailed, /body_read_ms=3/);
+  assert.match(detailed, /terminal=-/);
+  assert.match(detailed, /sse_error_n=0/);
+  assert.equal(detailed.includes("transcript"), false);
   assert.equal(line.includes("sk-"), false);
   assert.equal(audioSecondsFromBase64Length("cpcm", 16000) >= 0, true);
   assert.equal(audioSecondsFromBase64Length("A".repeat(64_000), 16_000) > 1, true);
