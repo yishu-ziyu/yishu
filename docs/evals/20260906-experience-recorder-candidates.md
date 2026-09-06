@@ -16,7 +16,7 @@
 
 | 现象 | 怎么读 |
 |---|---|
-| `quality.sample.jsonl` 40 次 `turn.start` 无终端 | 评估器计 **语义** `started_without_terminal_outcome`，因为有界文件里看见了 start。这证明 **这份样本还原不了 Runtime 结束**，不是现网 40 次崩溃的现场证据 |
+| `quality.sample.jsonl` 40 次 `turn.start` 无终端 | 默认开放窗计 **pending**，不是语义失败。EOF 不是「本该已经结束」的证据。这份样本是延迟夹具，只能证明 **观测窗未闭合时还原不了 Runtime 结束**，不是现网 40 次崩溃 |
 
 ## 不写
 

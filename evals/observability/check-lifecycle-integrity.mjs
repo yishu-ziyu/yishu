@@ -4,12 +4,21 @@
  *
  * Read-only. Metadata only. Does not infer success from the absence of errors.
  * Distinguishes semantic lifecycle failures from observability debt.
+ * Does not treat end-of-input as proof that an open operation failed.
  *
  *   node evals/observability/check-lifecycle-integrity.mjs <files...>
  *   node evals/observability/check-lifecycle-integrity.mjs --json <files...>
  *   node evals/observability/check-lifecycle-integrity.mjs --expect-zero <files...>
+ *   node evals/observability/check-lifecycle-integrity.mjs --closed-window <files...>
+ *
+ * Observation window:
+ *   default (open/live/incomplete) — start with no terminal stays pending.
+ *   --closed-window (complete)     — start with no terminal is a semantic failure.
  *
  * --expect-zero fails only on semantic_lifecycle_failures.
+ *
+ * Primary metric `lifecycle_integrity_failures` counts logical operations
+ * only (union of semantic + observability, each operation once).
  */
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
@@ -89,6 +98,15 @@ for (const [family, spec] of Object.entries(FAMILIES)) {
   }
 }
 
+const OPERATION_TOTAL_FIELDS = [
+  "operations_reconstructed",
+  "operations_unreconstructable",
+  "lifecycle_integrity_failures",
+  "semantic_lifecycle_failures",
+  "observability_integrity_failures",
+  "pending_operations",
+];
+
 function emptyMetrics() {
   return {
     started_without_terminal_outcome: 0,
@@ -97,6 +115,7 @@ function emptyMetrics() {
     uncorrelated_terminal_events: 0,
     ambiguous_terminal_outcomes: 0,
     equivalent_terminal_aliases: 0,
+    low_fidelity_alias_events: 0,
   };
 }
 
@@ -107,9 +126,18 @@ function emptyFamilyBucket() {
     lifecycle_integrity_failures: 0,
     semantic_lifecycle_failures: 0,
     observability_integrity_failures: 0,
+    pending_operations: 0,
     ...emptyMetrics(),
     observability_gaps: [],
   };
+}
+
+export class EvaluatorAccountingError extends Error {
+  constructor(message, report) {
+    super(message);
+    this.name = "EvaluatorAccountingError";
+    this.report = report;
+  }
 }
 
 export function parseJSONL(text, sourceFile = "input") {
@@ -231,6 +259,11 @@ export function classifyTerminal(event) {
   return "unknown";
 }
 
+function isLowFidelityAlias(event) {
+  const spec = FAMILIES[event.family];
+  return spec.successAliases.includes(event.name);
+}
+
 function relationToExistingTerminal(operation, event, kind) {
   if (!operation.terminal_kind) return "first";
   if (kind === "unknown" || operation.terminal_kind === "unknown") return "ambiguous";
@@ -257,79 +290,171 @@ function bump(report, family, field, n = 1) {
   report.by_family[family][field] += n;
 }
 
-function markSemantic(report, family, operation) {
-  if (operation.failure_class === "semantic") return;
-  if (operation.failure_class === "observability") {
-    bump(report, family, "observability_integrity_failures", -1);
-    bump(report, family, "semantic_lifecycle_failures");
-    operation.failure_class = "semantic";
-    operation.counted_as = "unreconstructable";
-    operation.correlation_quality = "semantic_failure";
-    return;
-  }
-  if (operation.counted_as === "reconstructed") {
-    bump(report, family, "operations_reconstructed", -1);
-    bump(report, family, "operations_unreconstructable");
-  } else if (operation.counted_as !== "unreconstructable") {
-    bump(report, family, "operations_unreconstructable");
-  }
-  bump(report, family, "semantic_lifecycle_failures");
-  bump(report, family, "lifecycle_integrity_failures");
+function newOperation(fields) {
+  return {
+    counted_as: null,
+    failure_class: null,
+    correlation_quality: null,
+    terminal_names: [],
+    events: [],
+    source_files: [],
+    ...fields,
+  };
+}
+
+function markSemantic(operation) {
   operation.failure_class = "semantic";
   operation.counted_as = "unreconstructable";
   operation.correlation_quality = "semantic_failure";
 }
 
-function markObservability(report, family, operation) {
-  if (operation.failure_class === "semantic" || operation.failure_class === "observability") return;
-  if (operation.counted_as === "reconstructed") {
-    bump(report, family, "operations_reconstructed", -1);
-    bump(report, family, "operations_unreconstructable");
-  } else if (operation.counted_as !== "unreconstructable") {
-    bump(report, family, "operations_unreconstructable");
-  }
-  bump(report, family, "observability_integrity_failures");
-  bump(report, family, "lifecycle_integrity_failures");
+function markObservability(operation) {
+  if (operation.failure_class === "semantic") return;
   operation.failure_class = "observability";
   operation.counted_as = "unreconstructable";
   operation.correlation_quality = "observability";
 }
 
-function markReconstructed(report, family, operation) {
+function markPending(operation) {
+  if (operation.failure_class === "semantic" || operation.failure_class === "observability") return;
+  operation.failure_class = "pending";
+  operation.counted_as = "unreconstructable";
+  operation.correlation_quality = "incomplete_window";
+}
+
+function markReconstructed(operation) {
+  if (operation.failure_class === "semantic" || operation.failure_class === "observability") return;
   operation.counted_as = "reconstructed";
   operation.failure_class = null;
   operation.correlation_quality = "id";
-  bump(report, family, "operations_reconstructed");
 }
 
-function assertNonNegative(report) {
+function resetOperationTotals(report) {
+  for (const field of OPERATION_TOTAL_FIELDS) {
+    report[field] = 0;
+    for (const bucket of Object.values(report.by_family)) {
+      bucket[field] = 0;
+    }
+  }
+}
+
+function finalizeAccounting(report) {
+  resetOperationTotals(report);
+  for (const operation of report.operations) {
+    const family = operation.family;
+    if (operation.counted_as === "reconstructed") {
+      bump(report, family, "operations_reconstructed");
+    } else {
+      operation.counted_as = "unreconstructable";
+      bump(report, family, "operations_unreconstructable");
+    }
+    if (operation.failure_class === "semantic") {
+      bump(report, family, "semantic_lifecycle_failures");
+      bump(report, family, "lifecycle_integrity_failures");
+    } else if (operation.failure_class === "observability") {
+      bump(report, family, "observability_integrity_failures");
+      bump(report, family, "lifecycle_integrity_failures");
+    } else if (operation.failure_class === "pending") {
+      bump(report, family, "pending_operations");
+    }
+  }
+  report.logical_operations_count = report.operations.length;
+  report.unique_observability_gaps = report.observability_gaps.length;
+  const denom = report.operations_reconstructed + report.operations_unreconstructable;
+  report.reconstructability_rate = denom === 0 ? null : report.operations_reconstructed / denom;
+}
+
+/**
+ * Fitness-evaluator accounting must be valid by construction.
+ * Impossible values are fatal. This function never mutates the report
+ * into a legal shape.
+ */
+export function assertAccountingInvariants(report) {
   const fields = [
-    "operations_reconstructed",
-    "operations_unreconstructable",
-    "lifecycle_integrity_failures",
-    "semantic_lifecycle_failures",
-    "observability_integrity_failures",
+    ...OPERATION_TOTAL_FIELDS,
+    "logical_operations_count",
+    "unique_observability_gaps",
     ...Object.keys(emptyMetrics()),
   ];
-  for (const field of fields) {
-    if (report[field] < 0) report[field] = 0;
-    for (const bucket of Object.values(report.by_family)) {
-      if (bucket[field] < 0) bucket[field] = 0;
+  const fail = (message) => {
+    throw new EvaluatorAccountingError(message, report);
+  };
+  const checkObject = (obj, label) => {
+    for (const field of fields) {
+      if (!Object.hasOwn(obj, field)) continue;
+      const value = obj[field];
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        fail(`evaluator accounting invariant violated: ${label}.${field}=${value}`);
+      }
+    }
+  };
+  checkObject(report, "report");
+  for (const [family, bucket] of Object.entries(report.by_family ?? {})) {
+    checkObject(bucket, `by_family.${family}`);
+  }
+  const documented = Array.isArray(report.operations) ? report.operations.length : NaN;
+  if (report.logical_operations_count !== documented) {
+    fail(
+      `evaluator accounting invariant violated: logical_operations_count=${report.logical_operations_count} operations=${documented}`,
+    );
+  }
+  const reconstructedPlus = report.operations_reconstructed + report.operations_unreconstructable;
+  if (reconstructedPlus !== documented) {
+    fail(
+      `evaluator accounting invariant violated: reconstructed+unreconstructable=${reconstructedPlus} documented=${documented}`,
+    );
+  }
+  const union = report.semantic_lifecycle_failures + report.observability_integrity_failures;
+  if (report.lifecycle_integrity_failures !== union) {
+    fail(
+      `evaluator accounting invariant violated: lifecycle_integrity_failures=${report.lifecycle_integrity_failures} != semantic+observability=${union}`,
+    );
+  }
+  if (report.lifecycle_integrity_failures > documented) {
+    fail(
+      `evaluator accounting invariant violated: lifecycle_integrity_failures=${report.lifecycle_integrity_failures} > logical_operations_count=${documented}`,
+    );
+  }
+  if (report.pending_operations > documented) {
+    fail(
+      `evaluator accounting invariant violated: pending_operations=${report.pending_operations} > logical_operations_count=${documented}`,
+    );
+  }
+  if (report.unique_observability_gaps !== report.observability_gaps.length) {
+    fail(
+      `evaluator accounting invariant violated: unique_observability_gaps=${report.unique_observability_gaps} gaps=${report.observability_gaps.length}`,
+    );
+  }
+  if (report.reconstructability_rate != null) {
+    if (
+      typeof report.reconstructability_rate !== "number" ||
+      !Number.isFinite(report.reconstructability_rate) ||
+      report.reconstructability_rate < 0 ||
+      report.reconstructability_rate > 1
+    ) {
+      fail(
+        `evaluator accounting invariant violated: reconstructability_rate=${report.reconstructability_rate}`,
+      );
     }
   }
 }
 
 export function evaluate(events, options = {}) {
   const sourceFiles = options.sourceFiles ?? [];
+  const closedWindow = options.closedWindow === true;
   const report = {
     operations_reconstructed: 0,
     operations_unreconstructable: 0,
     lifecycle_integrity_failures: 0,
     semantic_lifecycle_failures: 0,
     observability_integrity_failures: 0,
+    pending_operations: 0,
+    logical_operations_count: 0,
+    unique_observability_gaps: 0,
     ...emptyMetrics(),
     reconstructability_rate: null,
     empty_input: events.length === 0,
+    observation_window: closedWindow ? "closed" : "open",
     observability_gaps: [],
     by_family: Object.fromEntries(Object.keys(FAMILIES).map((name) => [name, emptyFamilyBucket()])),
     operations: [],
@@ -357,7 +482,6 @@ export function evaluate(events, options = {}) {
   const open = new Map();
   const closed = new Map();
   const observations = new Map();
-  const observabilityOnlyDomains = new Set();
   const keyFor = (family, id) => `${family}::${id}`;
 
   const pushOp = (operation) => {
@@ -382,6 +506,15 @@ export function evaluate(events, options = {}) {
 
   const takeObservations = (family, id) => observations.get(keyFor(family, id)) ?? [];
 
+  const noteIdLessTerminal = (event) => {
+    addGap(report, event.family, "correlation_id", event.sourceFile);
+    bump(report, event.family, "uncorrelated_terminal_events");
+    if (isLowFidelityAlias(event)) {
+      bump(report, event.family, "low_fidelity_alias_events");
+      addGap(report, event.family, `low-fidelity alias ${event.name}`, event.sourceFile);
+    }
+  };
+
   for (const event of indexed) {
     if (!event.family) continue;
     const family = event.family;
@@ -390,31 +523,7 @@ export function evaluate(events, options = {}) {
     if (!role) continue;
 
     if (spec.mode === "observability_only") {
-      const domain = event.sourceFile;
-      addGap(report, family, spec.missingStart || "correlation_id", domain);
-      if (!observabilityOnlyDomains.has(`${family}::${domain}`)) {
-        observabilityOnlyDomains.add(`${family}::${domain}`);
-        const operation = {
-          family,
-          operation_id: event.operationId,
-          started_at: null,
-          terminal_at: event.occurredAt,
-          terminal_kind: null,
-          terminal_names: [],
-          events: [summarize(event)],
-          correlation_quality: "observability",
-          source_files: [domain],
-          counted_as: null,
-          failure_class: null,
-        };
-        markObservability(report, family, operation);
-        pushOp(operation);
-      } else {
-        const existing = report.operations.find(
-          (op) => op.family === family && op.source_files.includes(domain),
-        );
-        if (existing) attach(existing, event);
-      }
+      addGap(report, family, spec.missingStart || "correlation_id", event.sourceFile);
       continue;
     }
 
@@ -435,20 +544,17 @@ export function evaluate(events, options = {}) {
     if (role === "start") {
       if (!event.operationId) {
         addGap(report, family, "correlation_id", event.sourceFile);
-        const operation = {
+        const operation = newOperation({
           family,
           operation_id: null,
           started_at: event.occurredAt,
           terminal_at: null,
           terminal_kind: null,
-          terminal_names: [],
           events: [summarize(event)],
           source_files: [event.sourceFile],
-          counted_as: null,
-          failure_class: null,
-        };
+        });
         bump(report, family, "started_without_terminal_outcome");
-        markSemantic(report, family, operation);
+        markObservability(operation);
         pushOp(operation);
         continue;
       }
@@ -456,22 +562,20 @@ export function evaluate(events, options = {}) {
       const existing = open.get(key);
       if (existing) {
         bump(report, family, "started_without_terminal_outcome");
-        markSemantic(report, family, existing);
+        markSemantic(existing);
         open.delete(key);
         closed.set(key, existing);
+        pushOp(existing);
       }
-      const operation = {
+      const operation = newOperation({
         family,
         operation_id: event.operationId,
         started_at: event.occurredAt,
         terminal_at: null,
         terminal_kind: null,
-        terminal_names: [],
         events: [summarize(event), ...takeObservations(family, event.operationId).map(summarize)],
         source_files: [event.sourceFile],
-        counted_as: null,
-        failure_class: null,
-      };
+      });
       open.set(key, operation);
       continue;
     }
@@ -480,11 +584,7 @@ export function evaluate(events, options = {}) {
     if (kind === "unknown") bump(report, family, "ambiguous_terminal_outcomes");
 
     if (!event.operationId) {
-      addGap(report, family, "correlation_id", event.sourceFile);
-      bump(report, family, "uncorrelated_terminal_events");
-      addGap(report, family, `low-fidelity alias ${event.name}`, event.sourceFile);
-      bump(report, family, "observability_integrity_failures");
-      bump(report, family, "lifecycle_integrity_failures");
+      noteIdLessTerminal(event);
       continue;
     }
 
@@ -497,17 +597,11 @@ export function evaluate(events, options = {}) {
       if (relation === "first") {
         current.terminal_kind = kind;
         current.terminal_at = event.occurredAt;
-        if (kind === "unknown") {
-          open.delete(key);
-          closed.set(key, current);
-          pushOp(current);
-          markSemantic(report, family, current);
-        } else {
-          open.delete(key);
-          closed.set(key, current);
-          pushOp(current);
-          markReconstructed(report, family, current);
-        }
+        open.delete(key);
+        closed.set(key, current);
+        pushOp(current);
+        if (kind === "unknown") markSemantic(current);
+        else markReconstructed(current);
       } else if (relation === "alias") {
         bump(report, family, "equivalent_terminal_aliases");
       } else if (relation === "duplicate") {
@@ -515,13 +609,13 @@ export function evaluate(events, options = {}) {
         open.delete(key);
         closed.set(key, current);
         pushOp(current);
-        markSemantic(report, family, current);
+        markSemantic(current);
       } else if (relation === "conflict" || relation === "ambiguous") {
         if (relation === "conflict") bump(report, family, "duplicate_terminal_outcomes");
         open.delete(key);
         closed.set(key, current);
         pushOp(current);
-        markSemantic(report, family, current);
+        markSemantic(current);
       }
       continue;
     }
@@ -537,12 +631,12 @@ export function evaluate(events, options = {}) {
       }
       if (relation === "duplicate") {
         bump(report, family, "duplicate_terminal_outcomes");
-        markSemantic(report, family, current);
+        markSemantic(current);
         continue;
       }
       if (relation === "conflict" || relation === "ambiguous") {
         if (relation === "conflict") bump(report, family, "duplicate_terminal_outcomes");
-        markSemantic(report, family, current);
+        markSemantic(current);
         continue;
       }
     }
@@ -550,7 +644,7 @@ export function evaluate(events, options = {}) {
     const domainHasStart = startsByDomain.has(`${family}::${event.sourceFile}`);
     addGap(report, family, spec.missingStart || `start:${spec.start.join("|") || "(none)"}`, event.sourceFile);
     bump(report, family, "terminal_without_start");
-    const orphan = {
+    const orphan = newOperation({
       family,
       operation_id: event.operationId,
       started_at: null,
@@ -559,31 +653,37 @@ export function evaluate(events, options = {}) {
       terminal_names: [event.name],
       events: [...takeObservations(family, event.operationId).map(summarize), summarize(event)],
       source_files: [event.sourceFile],
-      counted_as: null,
-      failure_class: null,
-    };
+    });
     closed.set(key, orphan);
     pushOp(orphan);
     if (domainHasStart && spec.start.length > 0) {
-      markSemantic(report, family, orphan);
+      markSemantic(orphan);
     } else {
-      markObservability(report, family, orphan);
+      markObservability(orphan);
     }
   }
 
   for (const operation of open.values()) {
     bump(report, operation.family, "started_without_terminal_outcome");
     pushOp(operation);
-    markSemantic(report, operation.family, operation);
+    if (closedWindow) {
+      markSemantic(operation);
+    } else {
+      markPending(operation);
+      addGap(
+        report,
+        operation.family,
+        "complete observation window (start still open at EOF)",
+        operation.source_files[0] ?? "input",
+      );
+    }
   }
 
-  assertNonNegative(report);
-  const denom = report.operations_reconstructed + report.operations_unreconstructable;
-  report.reconstructability_rate = denom === 0 ? null : report.operations_reconstructed / denom;
-  if (report.reconstructability_rate != null) {
-    if (report.reconstructability_rate < 0) report.reconstructability_rate = 0;
-    if (report.reconstructability_rate > 1) report.reconstructability_rate = 1;
+  finalizeAccounting(report);
+  if (typeof options.injectInvalidAccounting === "function") {
+    options.injectInvalidAccounting(report);
   }
+  assertAccountingInvariants(report);
   delete report._gapKeys;
   for (const operation of report.operations) {
     delete operation._pushed;
@@ -608,8 +708,11 @@ export function formatText(report) {
   const lines = [
     "Lifecycle Integrity",
     "",
+    `observation_window: ${report.observation_window}`,
+    `logical_operations_count: ${report.logical_operations_count}`,
     `operations_reconstructed: ${report.operations_reconstructed}`,
     `operations_unreconstructable: ${report.operations_unreconstructable}`,
+    `pending_operations: ${report.pending_operations}`,
     `lifecycle_integrity_failures: ${report.lifecycle_integrity_failures}`,
     `semantic_lifecycle_failures: ${report.semantic_lifecycle_failures}`,
     `observability_integrity_failures: ${report.observability_integrity_failures}`,
@@ -618,8 +721,10 @@ export function formatText(report) {
     `duplicate_terminal_outcomes: ${report.duplicate_terminal_outcomes}`,
     `terminal_without_start: ${report.terminal_without_start}`,
     `uncorrelated_terminal_events: ${report.uncorrelated_terminal_events}`,
+    `low_fidelity_alias_events: ${report.low_fidelity_alias_events}`,
     `ambiguous_terminal_outcomes: ${report.ambiguous_terminal_outcomes}`,
     `equivalent_terminal_aliases: ${report.equivalent_terminal_aliases}`,
+    `unique_observability_gaps: ${report.unique_observability_gaps}`,
     "",
     `reconstructability_rate: ${formatRate(report)}`,
   ];
@@ -629,6 +734,7 @@ export function formatText(report) {
     lines.push(`  ${family}:`);
     lines.push(`    reconstructed: ${bucket.operations_reconstructed}`);
     lines.push(`    unreconstructable: ${bucket.operations_unreconstructable}`);
+    lines.push(`    pending: ${bucket.pending_operations}`);
     lines.push(`    semantic_failures: ${bucket.semantic_lifecycle_failures}`);
     lines.push(`    observability_failures: ${bucket.observability_integrity_failures}`);
   }
@@ -666,7 +772,7 @@ export function publicReport(report) {
   };
 }
 
-export function evaluateFiles(paths) {
+export function evaluateFiles(paths, options = {}) {
   const events = [];
   const sourceFiles = [];
   for (const path of paths) {
@@ -675,14 +781,19 @@ export function evaluateFiles(paths) {
     const parsed = parseJSONL(text, basename(path));
     events.push(...parsed.events);
   }
-  return evaluate(events, { sourceFiles });
+  return evaluate(events, {
+    sourceFiles,
+    closedWindow: options.closedWindow === true,
+    injectInvalidAccounting: options.injectInvalidAccounting,
+  });
 }
 
 export function parseArgs(argv) {
-  const args = { json: false, expectZero: false, help: false, files: [] };
+  const args = { json: false, expectZero: false, closedWindow: false, help: false, files: [] };
   for (const a of argv) {
     if (a === "--json") args.json = true;
     else if (a === "--expect-zero") args.expectZero = true;
+    else if (a === "--closed-window") args.closedWindow = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else if (a.startsWith("-")) args.unknown = a;
     else args.files.push(a);
@@ -695,11 +806,11 @@ function main(argv) {
   if (args.help || args.unknown || args.files.length === 0) {
     const out = args.unknown ? process.stderr : process.stdout;
     out.write(
-      "Usage: node evals/observability/check-lifecycle-integrity.mjs [--json] [--expect-zero] <files...>\n",
+      "Usage: node evals/observability/check-lifecycle-integrity.mjs [--json] [--expect-zero] [--closed-window] <files...>\n",
     );
     process.exit(args.help ? 0 : 2);
   }
-  const report = evaluateFiles(args.files);
+  const report = evaluateFiles(args.files, { closedWindow: args.closedWindow });
   if (args.json) {
     process.stdout.write(`${JSON.stringify(publicReport(report), null, 2)}\n`);
   } else {
