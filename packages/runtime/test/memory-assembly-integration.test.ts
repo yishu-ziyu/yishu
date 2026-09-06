@@ -1,6 +1,7 @@
 /**
- * PR-2 read-side: PKR recalls into the turn cache; the engine prepends the
- * memory block to the first user message. No command-payload attachment.
+ * Product Kernel recalls into one typed execution context; executor adapters
+ * render it. Recalled memory is not attached on `__yishuRecalledMemories`
+ * and is not prepended again by assembleTurnMemory.
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -153,9 +154,8 @@ test("engine prepends cached recall once; private turns get no memory block", as
   assert.equal(
     personalUser.split("<durable_memories>").length - 1,
     1,
-    "memory block must be assembled once, not also attached onto the command",
+    "memory block must be assembled once from the shared execution context",
   );
-  assert.match(personalUser, /^These are relevant memory candidates/);
 
   const privateEvents: RuntimeEvent[] = [];
   await runtime.startTurn(
