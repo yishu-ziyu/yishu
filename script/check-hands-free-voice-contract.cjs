@@ -3,9 +3,12 @@
  * Issue #35 duplex voice contract.
  *
  * Behavioral metrics are derived from an executed production VoiceSession
- * harness (YishuHandsFreeFitnessHarness), not from source-symbol presence.
+ * harness (YishuHandsFreeFitnessHarness) plus the production audio-floor
+ * coordinator (YishuDuplexAudioFloor.takeFloorOnSpeechOnset with injectable
+ * presentation/Runtime effects). speech_onset_runtime_cancellations is the
+ * recorded cancel/settle/supersede count from that seam, not a constant.
  * Static analysis remains a secondary architecture guardrail for microphone
- * ownership and realtime semantic authority.
+ * ownership, realtime semantic authority, and onset-handler ownership.
  *
  * Usage: node script/check-hands-free-voice-contract.cjs
  */
@@ -81,12 +84,29 @@ function metricsFromBehavior(report) {
     scenarioFailures.push("B: ten-utterance re-arm contract did not execute");
   }
   const c = report.C || {};
-  if (c.speechOnset !== true || c.hasFinal !== false) {
-    scenarioFailures.push("C: speech onset did not take the floor before a final");
+  if (
+    c.speechOnset !== true
+    || c.hasFinal !== false
+    || c.presentationStopped !== true
+  ) {
+    scenarioFailures.push(
+      "C: speech onset did not synchronously stop presentation before a final",
+    );
+  }
+  if (c.waitedForTranscript === true || c.waitedForRuntimeAck === true) {
+    scenarioFailures.push(
+      "C: presentation stop waited for transcript or Runtime acknowledgement",
+    );
   }
   const d = report.D || {};
-  if (d.runtimeCancels !== 0) {
-    scenarioFailures.push("D: speech onset cancelled Runtime");
+  const cancels = recordedCount(d, "runtimeCancels");
+  const settles = recordedCount(d, "runtimeSettles");
+  const supersedes = recordedCount(d, "runtimeSupersedes");
+  const runtimeTerminations = (cancels ?? 1) + (settles ?? 1) + (supersedes ?? 1);
+  if (runtimeTerminations !== 0 || d.runtimeActive !== true) {
+    scenarioFailures.push(
+      "D: speech onset cancelled, settled, or superseded Runtime",
+    );
   }
   const e = report.E || {};
   if ((e.turns || 0) !== 0 || (e.begins || 0) !== 0) {
@@ -120,7 +140,7 @@ function metricsFromBehavior(report) {
       )
         ? 10
         : 0,
-      speech_onset_runtime_cancellations: d.runtimeCancels === 0 ? 0 : 1,
+      speech_onset_runtime_cancellations: runtimeTerminations === 0 ? 0 : 1,
       assistant_self_triggered_user_turns: scenarioFailures.some((row) =>
         row.startsWith("E:"),
       )
@@ -133,6 +153,221 @@ function metricsFromBehavior(report) {
       ptt_regressions: pttRegressions,
     },
   };
+}
+
+function recordedCount(obj, key) {
+  if (obj == null || !Object.prototype.hasOwnProperty.call(obj, key)) return null;
+  const n = Number(obj[key]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function passingBehavior(patchC = {}, patchD = {}) {
+  return {
+    A: {
+      finals: ["第一句", "第二句", "第三句"],
+      pressed: 0,
+      keyboardStarts: 0,
+      armed: true,
+    },
+    B: {
+      finalCount: 10,
+      keyboardStarts: 0,
+      stopCount: 0,
+      armed: true,
+    },
+    C: {
+      speechOnset: true,
+      hasFinal: false,
+      presentationStopped: true,
+      waitedForTranscript: false,
+      waitedForRuntimeAck: false,
+      ...patchC,
+    },
+    D: {
+      runtimeCancels: 0,
+      runtimeSettles: 0,
+      runtimeSupersedes: 0,
+      runtimeActive: true,
+      ...patchD,
+    },
+    E: { turns: 0, begins: 0 },
+    F: { turns: 0, begins: 0 },
+    G: { lateFinal: false },
+    duplicateFinals: 1,
+    H: { kinds: ["pressed", "partial:按住", "released", "finalized:按住说话"] },
+  };
+}
+
+function proveAudioFloorMutationsFail() {
+  const mutations = [
+    [
+      "remove TTS/presentation stop from onset",
+      passingBehavior({ presentationStopped: false }),
+    ],
+    [
+      "add Runtime cancel on onset",
+      passingBehavior({}, { runtimeCancels: 1, runtimeActive: false }),
+    ],
+    [
+      "add settle-equivalent Runtime termination on onset",
+      passingBehavior({}, { runtimeSettles: 1, runtimeActive: false }),
+    ],
+    [
+      "add supersede-equivalent Runtime termination on onset",
+      passingBehavior({}, { runtimeSupersedes: 1, runtimeActive: false }),
+    ],
+    [
+      "delay presentation stop until transcript finalization",
+      passingBehavior({
+        presentationStopped: false,
+        waitedForTranscript: true,
+        hasFinal: false,
+      }),
+    ],
+  ];
+  for (const [name, report] of mutations) {
+    const result = metricsFromBehavior(report);
+    if (behavioralAllZero(result.measured) && result.scenarioFailures.length === 0) {
+      console.error(
+        `hands-free voice contract FAILED: mutation "${name}" still produced all-zero fitness`,
+      );
+      process.exit(1);
+    }
+  }
+  const runtimeMutations = mutations.filter(([name]) =>
+    /cancel on onset|settle-equivalent|supersede-equivalent/.test(name),
+  );
+  for (const [name, report] of runtimeMutations) {
+    const result = metricsFromBehavior(report);
+    if (result.measured.speech_onset_runtime_cancellations === 0) {
+      console.error(
+        `hands-free voice contract FAILED: mutation "${name}" left speech_onset_runtime_cancellations at 0`,
+      );
+      process.exit(1);
+    }
+  }
+  console.error("hands-free anti-gaming: audio-floor mutations did not zero fitness");
+}
+
+function extractBalanced(source, startIdx) {
+  const start = source.indexOf("{", startIdx);
+  if (start < 0) return "";
+  let depth = 0;
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === quote) {
+        inString = false;
+        quote = "";
+      }
+      continue;
+    }
+    if (ch === "\"" || ch === "'") {
+      inString = true;
+      quote = ch;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  return "";
+}
+
+function extractFuncBody(source, name) {
+  const re = new RegExp(`\\bfunc\\s+${name}\\s*\\(`);
+  const match = re.exec(source);
+  if (!match) return "";
+  return extractBalanced(source, match.index);
+}
+
+function audioFloorOwnershipGuard() {
+  const failures = [];
+  const handlerSource = stripComments(
+    read("apps/clicky/leanring-buddy/CompanionManager+DuplexVoice.swift"),
+  );
+  const floorSource = stripComments(
+    read("apps/clicky/leanring-buddy/YishuDuplexAudioFloor.swift"),
+  );
+  const handler = extractFuncBody(handlerSource, "handleDuplexSpeechOnset");
+  if (!handler) {
+    failures.push("production speech-onset handler is missing");
+    return failures;
+  }
+  if (!/YishuDuplexAudioFloor\s*\./.test(handler)) {
+    failures.push(
+      "production speech-onset handler does not route through the audio-floor coordinator",
+    );
+  }
+  if (!/cancelActiveSentenceSpeechPipeline/.test(handler)
+    || !/stopPlayback\s*\(/.test(handler)) {
+    failures.push(
+      "production speech-onset handler does not pass sentence-pipeline and TTS presentation stops",
+    );
+  }
+  if (!/duplexForegroundRuntimeBoundary|ForegroundRuntimeBoundary/.test(handler)) {
+    failures.push(
+      "production speech-onset handler does not interact with the foreground Runtime owner boundary",
+    );
+  }
+  const runtimeTerm = /\b(cancelActiveRuntimeTurn|foregroundRuntimeExecution\s*\.\s*(cancel|start)\s*\(|cancelTurn\s*\(|\.settle\s*\(|\.supersede\s*\()/;
+  if (runtimeTerm.test(handler)) {
+    failures.push(
+      "production speech-onset handler terminates or supersedes foreground Runtime",
+    );
+  }
+  if (/\bawait\b/.test(handler)) {
+    failures.push("production speech-onset handler awaits before taking the audio floor");
+  }
+
+  const takeFloor = extractFuncBody(floorSource, "takeFloorOnSpeechOnset");
+  if (!takeFloor) {
+    failures.push("audio-floor coordinator takeFloorOnSpeechOnset is missing");
+    return failures;
+  }
+  if (!/\.isActive\s*\(/.test(takeFloor)) {
+    failures.push(
+      "audio-floor coordinator does not observe the current foreground Runtime owner",
+    );
+  }
+  const sentenceIdx = takeFloor.indexOf("stopSentenceSpeech()");
+  const playbackIdx = takeFloor.indexOf("stopPlayback()");
+  if (sentenceIdx < 0 || playbackIdx < 0) {
+    failures.push("audio-floor coordinator does not invoke presentation stops");
+  } else {
+    const beforeStops = takeFloor.slice(
+      0,
+      Math.min(sentenceIdx, playbackIdx),
+    );
+    if (/\bawait\b/.test(beforeStops)) {
+      failures.push("audio-floor coordinator waits before stopping presentation");
+    }
+    if (/if\s*!\s*transcriptFinalized|guard\s+transcriptFinalized/.test(beforeStops)
+      || /if\s*!\s*runtimeAcknowledged|guard\s+runtimeAcknowledged/.test(beforeStops)) {
+      failures.push(
+        "audio-floor coordinator gates presentation stop on transcript or Runtime acknowledgement",
+      );
+    }
+  }
+  if (/\.cancel\s*\(|\.settle\s*\(|\.supersede\s*\(/.test(takeFloor)) {
+    failures.push(
+      "audio-floor coordinator terminates or supersedes foreground Runtime on onset",
+    );
+  }
+  return failures;
 }
 
 function behavioralAllZero(measured) {
@@ -247,6 +482,7 @@ function architectureGuards() {
     realtimeBypasses += 1;
   }
 
+  failures.push(...audioFloorOwnershipGuard());
   return { failures, microphoneOwners, microphoneOwnerFiles, realtimeBypasses };
 }
 
@@ -276,6 +512,12 @@ function runFitnessHarness() {
     "ENABLE_HARDENED_RUNTIME=NO",
     "ENABLE_DEBUG_DYLIB=NO",
     "-only-testing:leanring-buddyTests/YishuHandsFreeFitnessTests",
+    "-only-testing:leanring-buddyTests/YishuHandsFreeVoiceContractTests",
+    "-only-testing:leanring-buddyTests/YishuContinuousCapturePreRollTests",
+    "-only-testing:leanring-buddyTests/YishuAudiblePlaybackHookTests",
+    "-only-testing:leanring-buddyTests/YishuAudiblePlaybackPolicyTests",
+    "-only-testing:leanring-buddyTests/YishuDuplexAudioFloorTests",
+    "-only-testing:leanring-buddyTests/YishuPanelHierarchyTests",
   ];
   const result = spawnSync("xcodebuild", args, {
     cwd: ROOT,
@@ -300,6 +542,7 @@ function runFitnessHarness() {
 }
 
 proveAntiGaming();
+proveAudioFloorMutationsFail();
 
 const behavior = runFitnessHarness();
 const fromBehavior = metricsFromBehavior(behavior);

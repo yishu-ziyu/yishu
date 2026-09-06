@@ -1,0 +1,3 @@
+{"schemaVersion":1,"eventId":"dpx-audio","occurredAt":"2026-09-06T08:00:00.000Z","appPid":1,"sessionId":"voice","name":"tts.first_audio","attributes":{},"turnId":"dpx-1","t_ms":0}
+{"schemaVersion":1,"eventId":"dpx-onset","occurredAt":"2026-09-06T08:00:00.040Z","appPid":1,"sessionId":"voice","name":"duplex.speech_onset","attributes":{},"turnId":"dpx-2","t_ms":40}
+{"schemaVersion":1,"eventId":"dpx-stop","occurredAt":"2026-09-06T08:00:00.090Z","appPid":1,"sessionId":"voice","name":"tts.stopped","attributes":{},"turnId":"dpx-1","t_ms":90}

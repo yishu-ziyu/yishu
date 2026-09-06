@@ -209,7 +209,9 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
             self.nodeIsPlaying = false
             self.lock.unlock()
         }
-        emitAudiblePlayback(false)
+        emitAudiblePlayback(
+            YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .stopped)
+        )
         continuation?.resume(throwing: CancellationError())
     }
 
@@ -287,7 +289,9 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
             if alreadyDone.trimmedDurationMs > 0 {
                 hooks.onClipDone(alreadyDone)
             }
-            emitAudiblePlayback(false)
+            emitAudiblePlayback(
+                YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .completed)
+            )
             return
         }
 
@@ -369,7 +373,9 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
         }
         if shouldEmitFirst {
             hooks.onFirstAudio()
-            emitAudiblePlayback(true)
+            emitAudiblePlayback(
+                YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .firstScheduledPlayback)
+            )
         }
     }
 
@@ -422,7 +428,9 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
         lock.unlock()
         if done {
             hooks.onClipDone(stats)
-            emitAudiblePlayback(false)
+            emitAudiblePlayback(
+                YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .completed)
+            )
             continuation?.resume()
         }
     }
@@ -469,7 +477,9 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
             self.nodeIsPlaying = false
             self.lock.unlock()
         }
-        emitAudiblePlayback(false)
+        emitAudiblePlayback(
+            YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .failed)
+        )
         continuation?.resume(throwing: error)
     }
 

@@ -2,7 +2,14 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #36 再审：开口前缀 / 可执行健身 / 听写状态 / 可听播放）
+## 当前状态（2026-09-06，PR #36 再审：生产音频地板永久门）
+
+- 卡 `docs/evals/20260906-pr36-audio-floor-gate.md`。分支 `feat/issue-35-duplex-voice`。更新 PR #36，不开新 PR，不合并。未装真机。不开始 StepAudio Realtime。
+- Path A / PCM pre-roll / VoiceSession off-starting-armed-failed / 可听播放门 / 连续听 PTT 文案 均保持。
+- 开口抢地板改为生产缝 `YishuDuplexAudioFloor.takeFloorOnSpeechOnset`：同步停句管道与 MiniMax 播放；只观察前台 Runtime；不 cancel/settle/supersede。`speech_onset_runtime_cancellations` 来自该缝的记录计数，不是常量。永久 xcodebuild 一次跑 fitness + VoiceSession 诚实 + pre-roll + 可听播放 + 地板缝。双工夹具 `evals/voice/fixtures/duplex-interrupt.sample.jsonl`。
+- 机器：`node script/check-hands-free-voice-contract.cjs` 全 0 + 采麦 1；变异夹具不能全 0；#29 0/0；#31 0/1；#33 0/0/1；kernel 236；runtime 526；dep 0；协议无 diff。CompanionManager 4493/4609。`product:check` 越过本门，停在预存 collector 880/856。真机未装。
+
+## 上一状态（2026-09-06，PR #36 再审：开口前缀 / 可执行健身 / 听写状态 / 可听播放）
 
 - 卡 `docs/evals/20260906-pr36-duplex-correctness.md`（原 #35 卡仍在）。分支 `feat/issue-35-duplex-voice`。更新 PR #36，不开新 PR，不合并。未装真机。
 - Path A 不变。StepAudio Realtime 仍不接。

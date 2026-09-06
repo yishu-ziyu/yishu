@@ -74,22 +74,6 @@ enum YishuHandsFreeListeningPolicy {
     }
 }
 
-/// Speech onset may take the audio floor. It must not cancel, settle,
-/// or supersede the owned foreground Runtime execution.
-enum YishuDuplexAudioFloor {
-    static func shouldCancelRuntimeOnSpeechOnset() -> Bool {
-        return false
-    }
-
-    static func shouldWaitForTranscriptBeforeStoppingTTS() -> Bool {
-        return false
-    }
-
-    static func shouldWaitForRuntimeAcknowledgementBeforeStoppingTTS() -> Bool {
-        return false
-    }
-}
-
 protocol YishuMonotonicClock: Sendable {
     func milliseconds() -> Int
 }

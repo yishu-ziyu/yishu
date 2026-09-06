@@ -109,9 +109,6 @@ struct YishuHandsFreeVoiceContractTests {
                 utteranceDurationMs: 400
             ) == .endUtterance
         )
-        #expect(!YishuDuplexAudioFloor.shouldCancelRuntimeOnSpeechOnset())
-        #expect(!YishuDuplexAudioFloor.shouldWaitForTranscriptBeforeStoppingTTS())
-        #expect(!YishuDuplexAudioFloor.shouldWaitForRuntimeAcknowledgementBeforeStoppingTTS())
     }
 
     @Test func threeTurnHandsFreeConversationNeedsNoShortcut() async {
@@ -171,7 +168,24 @@ struct YishuHandsFreeVoiceContractTests {
             if case .finalized = kind { return true }
             return false
         })
-        #expect(!YishuDuplexAudioFloor.shouldWaitForTranscriptBeforeStoppingTTS())
+        var sentenceStops = 0
+        var playbackStops = 0
+        YishuDuplexAudioFloor.takeFloorOnSpeechOnset(
+            presentation: .init(
+                stopSentenceSpeech: { sentenceStops += 1 },
+                stopPlayback: { playbackStops += 1 }
+            ),
+            foreground: .init(
+                isActive: { false },
+                cancel: { _ in },
+                settle: {},
+                supersede: {}
+            ),
+            transcriptFinalized: false,
+            runtimeAcknowledged: false
+        )
+        #expect(sentenceStops == 1)
+        #expect(playbackStops == 1)
     }
 
     @Test func speechOnsetDoesNotCancelForegroundRuntime() async throws {
@@ -190,13 +204,27 @@ struct YishuHandsFreeVoiceContractTests {
         #expect(execution.owns(session.requestId))
 
         var ttsStopped = false
-        if !YishuDuplexAudioFloor.shouldCancelRuntimeOnSpeechOnset() {
-            ttsStopped = true
-        } else {
-            execution.cancel(requestId: session.requestId, reason: "onset")
-        }
+        var runtimeCancels = 0
+        YishuDuplexAudioFloor.takeFloorOnSpeechOnset(
+            presentation: .init(
+                stopSentenceSpeech: {},
+                stopPlayback: { ttsStopped = true }
+            ),
+            foreground: .init(
+                isActive: { execution.isActive },
+                cancel: { reason in
+                    runtimeCancels += 1
+                    execution.cancel(requestId: session.requestId, reason: reason)
+                },
+                settle: {},
+                supersede: {}
+            ),
+            transcriptFinalized: false,
+            runtimeAcknowledged: false
+        )
 
         #expect(ttsStopped)
+        #expect(runtimeCancels == 0)
         #expect(execution.isActive)
         #expect(runtime.cancelCount == 0)
         execution.cancel(requestId: session.requestId, reason: "test-cleanup")

@@ -80,14 +80,14 @@
 |---|---|---|---|
 | 1 | 主健身函数 0 | 机器：`node script/check-hands-free-voice-contract.cjs`（执行 `YishuHandsFreeFitnessHarness`，不靠测试名） | `hands_free_voice_contract_failures: 0` |
 | 2 | 十句免再按键 | 同上 + Swift 矩阵 B | `manual_rearm_actions_per_10_utterances: 0` |
-| 3 | 开口不停 Runtime | 同上 + 矩阵 D | `speech_onset_runtime_cancellations: 0` |
+| 3 | 开口不停 Runtime | 同上 + 矩阵 D（执行 `YishuDuplexAudioFloor.takeFloorOnSpeechOnset` 注入缝） | `speech_onset_runtime_cancellations: 0` |
 | 4 | 自回声 0 句 | 同上 + 矩阵 E | `assistant_self_triggered_user_turns: 0` |
 | 5 | 一句不双提交 | 同上 | `duplicate_auto_submissions: 0` |
 | 6 | 静音不成轮 | 同上 + 矩阵 F | `silence_false_turns: 0` |
 | 7 | PTT 不回退 | 同上 + 矩阵 H + 既有会话/barge-in 测 | `ptt_regressions: 0` |
 | 8 | 无第二脑子 | 同上 | `realtime_semantic_authority_bypasses: 0` |
 | 9 | 只有一个采麦主人 | 同上 | `parallel_microphone_capture_owners: 1` |
-| 10 | 开口停声同步，不等 ASR/Runtime | 机器：Swift 矩阵 C；`stopPlayback` 在 `speechOnset` 路径上同步 | 测试绿 |
+| 10 | 开口停声同步，不等 ASR/Runtime | 机器：Swift 矩阵 C + `YishuDuplexAudioFloorTests`；呈现 stop 在 `takeFloorOnSpeechOnset` 同步发生 | 测试绿；`presentationStopped=true` 且 `hasFinal=false` |
 | 11 | 三轮免按键 | 机器：`… YishuHandsFreeVoiceContractTests` 矩阵 A | 3 次 finalized，0 次 shortcut |
 | 12 | 十轮免按键 | 同上矩阵 B | 10 次 finalized |
 | 13 | 关掉后迟到 final 不提交 | 同上矩阵 G | 0 次 late submit |

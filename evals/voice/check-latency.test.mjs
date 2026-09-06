@@ -198,6 +198,19 @@ test("duplex-interrupt pairs speech_onset while TTS is playing with tts.stopped"
   assert.match(report.rows[0].actual, /p95 50/);
 });
 
+test("duplex-interrupt dedicated fixture command passes", () => {
+  const result = runCli([
+    "--fixture",
+    join(HERE, "fixtures/duplex-interrupt.sample.jsonl"),
+    "--metric",
+    "duplex-interrupt",
+  ]);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.match(result.stdout, /duplex.speech_onset->tts.stopped p95|duplex.speech_onset→tts.stopped p95/);
+  assert.match(result.stdout, /PASS/);
+  assert.match(result.stdout, /p50 50/);
+});
+
 test("duplex-interrupt CLI reports n and percentiles from a fixture", () => {
   const base = Date.parse("2026-09-04T08:00:00.000Z");
   const events = [

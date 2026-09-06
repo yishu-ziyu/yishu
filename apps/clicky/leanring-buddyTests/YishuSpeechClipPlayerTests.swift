@@ -128,3 +128,21 @@ struct YishuAudiblePlaybackHookTests {
         #expect(!player.isPlaying)
     }
 }
+
+struct YishuAudiblePlaybackPolicyTests {
+    @Test func requestNetworkAndDecodePendingDoNotMarkAssistantAudioActive() {
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .requestStarted))
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .networkPending))
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .decodePending))
+    }
+
+    @Test func firstScheduledPlaybackMarksAssistantAudioActive() {
+        #expect(YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .firstScheduledPlayback))
+    }
+
+    @Test func stopCompletionAndFailureReturnInactive() {
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .stopped))
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .completed))
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .failed))
+    }
+}
