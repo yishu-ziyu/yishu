@@ -7,6 +7,7 @@ import {
   createYishuKernel,
   isVisibleFactSuppressed,
   normalizeVisibleFact,
+  visibleFactFingerprint,
   type MemoryClaim,
   type YishuKernel,
 } from "../src/index.js";
@@ -17,8 +18,12 @@ import {
   FORGET_FIXTURE_TRUTH_CLAIM,
   loadProductionForgetSources,
   measureMemoryForgetFitness,
+  receiptPersistBeforeStoreDeletion,
 } from "./memory-forget-harness.js";
-import { FORGET_RECEIPT_FILE_NAME } from "../src/memory/forget-receipts.js";
+import {
+  FORGET_RECEIPT_FILE_NAME,
+  forgetReceiptIO,
+} from "../src/memory/forget-receipts.js";
 
 const PROJECT_SCOPE = "project:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -196,6 +201,78 @@ describe("memory forget correctness", () => {
       });
       assert.equal(actionAgain.status, "verified", actionAgain.message);
     }, "json");
+  });
+
+  it("receipt persist failure is not success and retry converges after reopen", async () => {
+    await withDir("yishu-forget-receipt-fail-", async (dir, kernel) => {
+      const remembered = await remember(kernel, FORGET_FIXTURE_CLAIM);
+      const original = forgetReceiptIO.write;
+      forgetReceiptIO.write = async () => {
+        throw new Error("injected receipt persist failure");
+      };
+      let failed;
+      try {
+        failed = await kernel.registry.invoke("forget", {
+          caller: "ui",
+          input: { memoryId: remembered.id },
+        });
+      } finally {
+        forgetReceiptIO.write = original;
+      }
+      assert.notEqual(failed.status, "verified");
+      assert.notEqual(failed.status, "ok");
+      assert.ok(
+        (await kernel.store.searchMemory("", { minConfidence: 0 }))
+          .some((row) => row.id === remembered.id),
+        "store provenance must remain after receipt persist failure",
+      );
+
+      const reopened = createYishuKernel({
+        storeBackend: "json",
+        storeDir: dir,
+        memoryDir: path.join(dir, "memory"),
+      });
+      await reopened.store.load();
+      const retried = await reopened.memories.forget({
+        id: remembered.id,
+        expectedScope: "personal",
+      });
+      assert.equal(retried?.forgotten, true);
+      await assertFullyForgotten(reopened, remembered);
+      const receiptPath = path.join(dir, "memory", FORGET_RECEIPT_FILE_NAME);
+      const raw = await readFile(receiptPath, "utf8");
+      assert.equal(raw.includes(FORGET_FIXTURE_CLAIM), false);
+      assert.equal(raw.includes(remembered.claim), false);
+
+      const againKernel = createYishuKernel({
+        storeBackend: "json",
+        storeDir: dir,
+        memoryDir: path.join(dir, "memory"),
+      });
+      await againKernel.store.load();
+      const again = await againKernel.memories.forget({
+        id: remembered.id,
+        expectedScope: "personal",
+      });
+      assert.equal(again?.alreadyGone, true);
+    }, "json");
+  });
+
+  it("a prewritten receipt is not success while the store row remains", async () => {
+    await withDir("yishu-forget-receipt-active-store-", async (dir, kernel) => {
+      const remembered = await remember(kernel, FORGET_FIXTURE_CLAIM);
+      await forgetReceiptIO.write(path.join(dir, "memory"), {
+        id: remembered.id,
+        scope: "personal",
+        visibleFingerprint: visibleFactFingerprint(remembered.claim),
+      });
+      const forgotten = await kernel.memories.forget({
+        id: remembered.id,
+        expectedScope: "personal",
+      });
+      assert.equal(forgotten?.alreadyGone, false);
+      await assertFullyForgotten(kernel, remembered);
+    });
   });
 
   it("visible-authority failure is not success and retry converges", async () => {
@@ -553,5 +630,26 @@ async function forgetMemory(command, emit) {
       owner,
     ]);
     assert.notEqual(runtimeGamed.count, 1, "runtime store-absence alreadyGone must not report one owner");
+  });
+
+  it("evaluator fails if receipt persist moves behind store deletion", () => {
+    const owner = loadProductionForgetSources().find((file) => file.role === "owner");
+    assert.ok(owner);
+    assert.equal(receiptPersistBeforeStoreDeletion(owner.source), true);
+
+    const persistAfterDelete = `
+export async function forgetMemoryClaim(ports, input) {
+  await ports.visible.removeFactsMatching(target.claim);
+  await ports.truth.removeFact(scope, id);
+  await ports.store.forgetMemory(id, { expectedScope });
+  await persistCompletionReceipt(ports, receipt);
+  return { forgotten: true, alreadyGone: false };
+}
+`;
+    assert.equal(
+      receiptPersistBeforeStoreDeletion(persistAfterDelete),
+      false,
+      "persist after store deletion must fail the ordering ratchet",
+    );
   });
 });

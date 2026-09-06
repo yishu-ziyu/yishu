@@ -4,6 +4,8 @@
  *
  * Filesystem and store writes are not atomic. Intermediate states must stay
  * truthful and retryable, so the searchable store/index row is removed last.
+ * Narrow reconciliation metadata is persisted before that destructive
+ * deletion; a receipt is not success while the store row remains.
  * Success is the applicable postcondition, not a single layer's return value.
  */
 
@@ -17,10 +19,7 @@ import {
   type VisibleMemoryFile,
 } from "./visible-file.js";
 import type { MemoryTruthLayer } from "./truth-layer.js";
-import {
-  readForgetReceipt,
-  writeForgetReceipt,
-} from "./forget-receipts.js";
+import { forgetReceiptIO } from "./forget-receipts.js";
 
 export interface MemoryForgetPorts {
   readonly store: YishuStorePort;
@@ -214,7 +213,7 @@ async function persistCompletionReceipt(
 ): Promise<void> {
   const directory = receiptDirectory(ports);
   if (directory === undefined) return;
-  await writeForgetReceipt(directory, receipt);
+  await forgetReceiptIO.write(directory, receipt);
 }
 
 async function forgetMissingStoreRow(
@@ -226,7 +225,7 @@ async function forgetMissingStoreRow(
   const directory = receiptDirectory(ports);
   const receipt = directory === undefined
     ? undefined
-    : await readForgetReceipt(directory, input.id);
+    : await forgetReceiptIO.read(directory, input.id);
 
   if (receipt !== undefined) {
     if (expectedScope !== undefined && receipt.scope !== expectedScope) {
@@ -322,6 +321,16 @@ export async function forgetMemoryClaim(
   );
 
   throwIfAborted(input.signal);
+  await persistCompletionReceipt(ports, {
+    id: existing.id,
+    scope: existing.scope,
+    ...(visibleMeta.fingerprint !== undefined
+      ? { visibleFingerprint: visibleMeta.fingerprint }
+      : {}),
+    ...(truthFactId !== undefined ? { truthFactId } : {}),
+  });
+
+  throwIfAborted(input.signal);
   const storeResult = await ports.store.forgetMemory(existing.id, {
     expectedScope: existing.scope,
   });
@@ -340,15 +349,6 @@ export async function forgetMemoryClaim(
   if (!inspection.complete) {
     throw new MemoryForgetIncompleteError(inspection.residue);
   }
-
-  await persistCompletionReceipt(ports, {
-    id: existing.id,
-    scope: existing.scope,
-    ...(visibleMeta.fingerprint !== undefined
-      ? { visibleFingerprint: visibleMeta.fingerprint }
-      : {}),
-    ...(truthFactId !== undefined ? { truthFactId } : {}),
-  });
 
   return {
     id: existing.id,

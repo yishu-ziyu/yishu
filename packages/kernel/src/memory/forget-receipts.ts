@@ -1,8 +1,10 @@
 /**
- * Narrow completion receipts for user-confirmed forget.
+ * Narrow reconciliation receipts for user-confirmed forget.
  *
- * A receipt proves a prior forget finished for this id+scope. It never
- * stores claim plaintext. Only forgetMemoryClaim reads or writes these.
+ * A receipt identifies the id/scope/fingerprint so a later retry can
+ * finish or prove completion. It is not itself a success certificate:
+ * an active store row still fails inspection. It never stores claim
+ * plaintext. Only forgetMemoryClaim reads or writes these.
  */
 
 import { randomUUID } from "node:crypto";
@@ -124,3 +126,9 @@ export async function writeForgetReceipt(
     await rename(tmp, filePath);
   });
 }
+
+/** Live I/O seam so tests can inject persist failure without a second owner. */
+export const forgetReceiptIO = {
+  write: writeForgetReceipt,
+  read: readForgetReceipt,
+};
