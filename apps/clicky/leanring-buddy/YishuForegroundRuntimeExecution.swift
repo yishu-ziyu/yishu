@@ -29,16 +29,35 @@ protocol YishuForegroundRuntimeControlling: AnyObject {
 
 extension YishuAgentRuntimeClient: YishuForegroundRuntimeControlling {}
 
-/// Sole owner of the active foreground Runtime request identity and of
-/// start / cancel / interrupt / steer. CompanionManager decides product
-/// policy and presentation; stopping speech is a different operation.
+/// Presentation-facing view of one foreground execution. Cancelling
+/// iteration of `events` does not cancel or settle the Runtime turn.
+struct YishuForegroundRuntimeSession {
+    let requestId: UUID
+    let conversationId: UUID
+    let events: AsyncThrowingStream<YishuRuntimeTurnEvent, Error>
+}
+
+/// Sole owner of the active foreground Runtime request identity, of
+/// start / cancel / interrupt / steer, and of the async lifetime that
+/// keeps the Runtime turn/event stream alive.
+///
+/// Runtime Client → this type → typed execution events → presentation.
+/// Stopping speech or detaching a presentation consumer is a different
+/// operation from cancelling execution.
 @MainActor
 final class YishuForegroundRuntimeExecution {
     private let runtime: any YishuForegroundRuntimeControlling
     private(set) var activeRequestId: UUID?
+    private var runtimeEventTask: Task<Void, Never>?
+    private var consumingRequestId: UUID?
+    private var presentationSubscribers: [UUID: AsyncThrowingStream<YishuRuntimeTurnEvent, Error>.Continuation] = [:]
 
     init(runtime: any YishuForegroundRuntimeControlling) {
         self.runtime = runtime
+    }
+
+    deinit {
+        runtimeEventTask?.cancel()
     }
 
     var isActive: Bool { activeRequestId != nil }
@@ -63,7 +82,7 @@ final class YishuForegroundRuntimeExecution {
         model: String,
         modelRouting: YishuModelRouting,
         capabilityProfile: String = "conversation"
-    ) throws -> YishuRuntimeTurn {
+    ) throws -> YishuForegroundRuntimeSession {
         let turn = try runtime.startTurn(
             utterance: utterance,
             contextFrame: contextFrame,
@@ -72,8 +91,16 @@ final class YishuForegroundRuntimeExecution {
             modelRouting: modelRouting,
             capabilityProfile: capabilityProfile
         )
+        abandonRuntimeEventConsumer()
         activeRequestId = turn.requestId
-        return turn
+        consumingRequestId = turn.requestId
+        let events = makePresentationEvents()
+        startOwningRuntimeEvents(turn)
+        return YishuForegroundRuntimeSession(
+            requestId: turn.requestId,
+            conversationId: turn.conversationId,
+            events: events
+        )
     }
 
     func cancel(reason: String) {
@@ -85,12 +112,6 @@ final class YishuForegroundRuntimeExecution {
         guard activeRequestId == requestId else { return }
         activeRequestId = nil
         try? runtime.cancelTurn(requestId: requestId, reason: reason)
-    }
-
-    /// Completes, fails, times out, or otherwise ends without sending cancel.
-    func settle(_ requestId: UUID) {
-        guard activeRequestId == requestId else { return }
-        activeRequestId = nil
     }
 
     func suppressForInterruption(requestId: UUID, expectedGeneration: Int) -> Bool {
@@ -127,5 +148,75 @@ final class YishuForegroundRuntimeExecution {
             message: message,
             nextGeneration: nextGeneration
         )
+    }
+
+    /// Additional presentation subscriber. Detaching it does not settle
+    /// execution. Events already observed by a prior consumer are not replayed.
+    func makePresentationEvents() -> AsyncThrowingStream<YishuRuntimeTurnEvent, Error> {
+        let subscriberId = UUID()
+        var continuation: AsyncThrowingStream<YishuRuntimeTurnEvent, Error>.Continuation?
+        let stream = AsyncThrowingStream<YishuRuntimeTurnEvent, Error> { continuation = $0 }
+        guard let continuation else { return stream }
+        presentationSubscribers[subscriberId] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { @MainActor in
+                self?.presentationSubscribers.removeValue(forKey: subscriberId)
+            }
+        }
+        return stream
+    }
+
+    private func abandonRuntimeEventConsumer() {
+        runtimeEventTask?.cancel()
+        runtimeEventTask = nil
+        consumingRequestId = nil
+        let subscribers = presentationSubscribers
+        presentationSubscribers.removeAll()
+        for continuation in subscribers.values {
+            continuation.finish()
+        }
+    }
+
+    private func startOwningRuntimeEvents(_ turn: YishuRuntimeTurn) {
+        let requestId = turn.requestId
+        runtimeEventTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                for try await event in turn.events {
+                    guard !Task.isCancelled else { return }
+                    guard self.consumingRequestId == requestId else { return }
+                    self.broadcast(event)
+                }
+                self.finishRuntimeStream(requestId: requestId, error: nil)
+            } catch is CancellationError {
+                return
+            } catch {
+                self.finishRuntimeStream(requestId: requestId, error: error)
+            }
+        }
+    }
+
+    private func broadcast(_ event: YishuRuntimeTurnEvent) {
+        for continuation in presentationSubscribers.values {
+            continuation.yield(event)
+        }
+    }
+
+    private func finishRuntimeStream(requestId: UUID, error: Error?) {
+        guard consumingRequestId == requestId else { return }
+        if activeRequestId == requestId {
+            activeRequestId = nil
+        }
+        consumingRequestId = nil
+        runtimeEventTask = nil
+        let subscribers = presentationSubscribers
+        presentationSubscribers.removeAll()
+        for continuation in subscribers.values {
+            if let error {
+                continuation.finish(throwing: error)
+            } else {
+                continuation.finish()
+            }
+        }
     }
 }

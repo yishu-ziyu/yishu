@@ -4,9 +4,10 @@
 //
 //  Central state manager for the companion voice mode. Keyboard PTT/dictation
 //  session lifecycle is owned by YishuVoiceSessionController. Foreground
-//  Runtime execution lifecycle is owned by YishuForegroundRuntimeExecution.
-//  This type consumes those events and keeps presentation, barge-in policy,
-//  and held-scene/prewarm behavior.
+//  Runtime execution lifecycle and event-stream lifetime are owned by
+//  YishuForegroundRuntimeExecution. This type consumes typed execution
+//  events and keeps presentation, barge-in policy, and held-scene/prewarm
+//  behavior.
 //
 
 import AVFoundation
@@ -2903,7 +2904,7 @@ final class CompanionManager: ObservableObject {
             }
             startContextTrailSampling()
         }
-        let turn = try foregroundRuntimeExecution.start(
+        let session = try foregroundRuntimeExecution.start(
             utterance: transcript,
             contextFrame: contextFrame,
             modelProvider: selectedModelProvider,
@@ -2914,8 +2915,9 @@ final class CompanionManager: ObservableObject {
         activeRuntimePresentationTranscript = transcript
         responseOverlayManager.showOverlayAndBeginStreaming()
         defer {
-            if foregroundRuntimeExecution.owns(turn.requestId) {
-                foregroundRuntimeExecution.settle(turn.requestId)
+            // Presentation cleanup only. Execution identity settles from a
+            // Runtime terminal event or an explicit product-policy cancel.
+            if !foregroundRuntimeExecution.owns(session.requestId) {
                 activeRuntimePresentationTranscript = nil
                 activeTurnEffectInFlight = false
             }
@@ -2973,8 +2975,8 @@ final class CompanionManager: ObservableObject {
         clearMemorySourceNotice()
         do {
         try await withTaskCancellationHandler {
-            for try await event in turn.events {
-                guard foregroundRuntimeExecution.owns(turn.requestId),
+            for try await event in session.events {
+                guard foregroundRuntimeExecution.owns(session.requestId),
                       ownsVoiceTurn(turnToken) else {
                     continue
                 }
@@ -3026,7 +3028,7 @@ final class CompanionManager: ObservableObject {
                     usedMemories = items
                     applyMemorySourceNotice(Self.formatMemorySourceNotice(items))
                 case let .computerActionRequested(request, _):
-                    guard foregroundRuntimeExecution.owns(turn.requestId),
+                    guard foregroundRuntimeExecution.owns(session.requestId),
                           ownsVoiceTurn(turnToken) else {
                         continue
                     }
@@ -3061,11 +3063,11 @@ final class CompanionManager: ObservableObject {
                             fallback: contextFrame.numberedTargets
                         ),
                         authorizationFence: { [weak self] in
-                            self?.foregroundRuntimeExecution.owns(turn.requestId) == true
+                            self?.foregroundRuntimeExecution.owns(session.requestId) == true
                                 && self?.ownsVoiceTurn(turnToken) == true
                         }
                     )
-                    let stillOwned = foregroundRuntimeExecution.owns(turn.requestId)
+                    let stillOwned = foregroundRuntimeExecution.owns(session.requestId)
                         && ownsVoiceTurn(turnToken)
                     if stillOwned {
                         activeTurnEffectInFlight = false
