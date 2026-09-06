@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import YishuContext
 @testable import Clicky
 
 struct YishuHandsFreeFitnessReport: Equatable, Sendable {
@@ -13,7 +14,13 @@ struct YishuHandsFreeFitnessReport: Equatable, Sendable {
     var tenUtteranceArmed: Bool
     var speechOnsetBeforeFinal: Bool
     var speechOnsetHasFinal: Bool
+    var presentationStoppedOnOnset: Bool
+    var waitedForTranscriptBeforeStop: Bool
+    var waitedForRuntimeAckBeforeStop: Bool
     var runtimeCancelsOnOnset: Int
+    var runtimeSettlesOnOnset: Int
+    var runtimeSupersedesOnOnset: Int
+    var runtimeActiveAfterOnset: Bool
     var echoTurns: Int
     var echoBegins: Int
     var silenceTurns: Int
@@ -39,8 +46,16 @@ struct YishuHandsFreeFitnessReport: Equatable, Sendable {
             "C": [
                 "speechOnset": speechOnsetBeforeFinal,
                 "hasFinal": speechOnsetHasFinal,
+                "presentationStopped": presentationStoppedOnOnset,
+                "waitedForTranscript": waitedForTranscriptBeforeStop,
+                "waitedForRuntimeAck": waitedForRuntimeAckBeforeStop,
             ],
-            "D": ["runtimeCancels": runtimeCancelsOnOnset],
+            "D": [
+                "runtimeCancels": runtimeCancelsOnOnset,
+                "runtimeSettles": runtimeSettlesOnOnset,
+                "runtimeSupersedes": runtimeSupersedesOnOnset,
+                "runtimeActive": runtimeActiveAfterOnset,
+            ],
             "E": ["turns": echoTurns, "begins": echoBegins],
             "F": ["turns": silenceTurns, "begins": silenceBegins],
             "G": ["lateFinal": lateFinalAfterDisable],
@@ -61,6 +76,7 @@ enum YishuHandsFreeFitnessHarness {
         let three = await threeTurnTrace()
         let ten = await tenUtteranceTrace()
         let onset = await speechOnsetTrace()
+        let floor = await audioFloorTrace()
         let echo = await echoTrace()
         let silence = await silenceTrace()
         let disable = await disableTrace()
@@ -77,7 +93,13 @@ enum YishuHandsFreeFitnessHarness {
             tenUtteranceArmed: ten.armed,
             speechOnsetBeforeFinal: onset.speechOnset,
             speechOnsetHasFinal: onset.hasFinal,
-            runtimeCancelsOnOnset: YishuDuplexAudioFloor.shouldCancelRuntimeOnSpeechOnset() ? 1 : 0,
+            presentationStoppedOnOnset: floor.presentationStopped,
+            waitedForTranscriptBeforeStop: floor.waitedForTranscript,
+            waitedForRuntimeAckBeforeStop: floor.waitedForRuntimeAck,
+            runtimeCancelsOnOnset: floor.runtimeCancels,
+            runtimeSettlesOnOnset: floor.runtimeSettles,
+            runtimeSupersedesOnOnset: floor.runtimeSupersedes,
+            runtimeActiveAfterOnset: floor.runtimeActive,
             echoTurns: echo.turns,
             echoBegins: echo.begins,
             silenceTurns: silence.turns,
@@ -145,6 +167,74 @@ enum YishuHandsFreeFitnessHarness {
             return false
         }
         return (harness.events.utteranceKinds.contains(.speechOnset), hasFinal)
+    }
+
+    private static func audioFloorTrace() async -> (
+        presentationStopped: Bool,
+        waitedForTranscript: Bool,
+        waitedForRuntimeAck: Bool,
+        runtimeCancels: Int,
+        runtimeSettles: Int,
+        runtimeSupersedes: Int,
+        runtimeActive: Bool
+    ) {
+        let runtime = FakeForegroundRuntime()
+        let execution = YishuForegroundRuntimeExecution(runtime: runtime)
+        let session: YishuForegroundRuntimeSession
+        do {
+            session = try execution.start(
+                utterance: "先做这件事",
+                contextFrame: fitnessDummyFrame(),
+                modelProvider: "local",
+                model: "test",
+                modelRouting: .fixed(
+                    preference: YishuModelPreference(provider: "local", model: "test")
+                )
+            )
+        } catch {
+            return (false, true, true, 1, 1, 1, false)
+        }
+        var sentenceStops = 0
+        var playbackStops = 0
+        var order: [String] = []
+        var cancels = 0
+        var settles = 0
+        var supersedes = 0
+        YishuDuplexAudioFloor.takeFloorOnSpeechOnset(
+            presentation: .init(
+                stopSentenceSpeech: {
+                    sentenceStops += 1
+                    order.append("sentence")
+                },
+                stopPlayback: {
+                    playbackStops += 1
+                    order.append("playback")
+                }
+            ),
+            foreground: .init(
+                isActive: { execution.isActive },
+                cancel: { reason in
+                    cancels += 1
+                    execution.cancel(requestId: session.requestId, reason: reason)
+                },
+                settle: { settles += 1 },
+                supersede: { supersedes += 1 }
+            ),
+            transcriptFinalized: false,
+            runtimeAcknowledged: false
+        )
+        let presentationStopped = sentenceStops == 1 && playbackStops == 1 && order == ["sentence", "playback"]
+        let stillActive = execution.isActive && runtime.cancelCount == 0
+        execution.cancel(requestId: session.requestId, reason: "test-cleanup")
+        return (
+            presentationStopped,
+            !presentationStopped,
+            !presentationStopped,
+            cancels,
+            settles,
+            supersedes,
+            stillActive
+        )
     }
 
     private static func echoTrace() async -> (turns: Int, begins: Int) {
@@ -310,6 +400,28 @@ enum YishuHandsFreeFitnessHarness {
             return nil
         }
     }
+
+    private static func fitnessDummyFrame() -> YishuContextFrame {
+        let now = Date()
+        let point = YishuScreenPoint(x: 0, y: 0, coordinateSpace: .globalTopLeft)
+        return YishuContextFrame(
+            capturedAt: now,
+            expiresAt: now.addingTimeInterval(15),
+            cursor: YishuObservedValue(
+                value: point,
+                source: "test",
+                capturedAt: now,
+                confidence: 1
+            ),
+            pointerTrail: [],
+            frontmostApplication: nil,
+            activeWindow: nil,
+            elementUnderCursor: nil,
+            screenshots: [],
+            numberedTargets: [],
+            warnings: []
+        )
+    }
 }
 
 @MainActor
@@ -325,7 +437,13 @@ struct YishuHandsFreeFitnessTests {
         #expect(report.tenUtteranceKeyboardStarts == 0)
         #expect(report.speechOnsetBeforeFinal)
         #expect(!report.speechOnsetHasFinal)
+        #expect(report.presentationStoppedOnOnset)
+        #expect(!report.waitedForTranscriptBeforeStop)
+        #expect(!report.waitedForRuntimeAckBeforeStop)
         #expect(report.runtimeCancelsOnOnset == 0)
+        #expect(report.runtimeSettlesOnOnset == 0)
+        #expect(report.runtimeSupersedesOnOnset == 0)
+        #expect(report.runtimeActiveAfterOnset)
         #expect(report.echoTurns == 0)
         #expect(report.silenceTurns == 0)
         #expect(!report.lateFinalAfterDisable)

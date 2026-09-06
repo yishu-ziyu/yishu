@@ -40,7 +40,7 @@
 | 7 | 采麦未变成 active 同上 | 同上 | TEST SUCCEEDED |
 | 8 | TTS 请求已发出但无音频 → 闲时开口阈值 | 机器：Swift TTS audible + VoiceSession 阈值测 | TEST SUCCEEDED |
 | 9 | 真实可听播放中 → 回声阈值；停/完成回到闲时 | 同上 | TEST SUCCEEDED |
-| 10 | 真机双工打断命令可读 quality log，报 n + p50/p95 | 机器：`node evals/voice/check-latency.mjs --metric duplex-interrupt --fixture …` | 夹具测绿；真机未跑、不宣称通过 |
+| 10 | 真机双工打断命令可读 quality log，报 n + p50/p95 | 机器：`node evals/voice/check-latency.mjs --metric duplex-interrupt --fixture evals/voice/fixtures/duplex-interrupt.sample.jsonl` | 夹具测绿；真机未跑、不宣称通过 |
 | 11 | 连续听开启时面板不说可以按住 Control+Option | 机器：`YishuPanelHierarchyTests` | 无该句；「正在听」只在 armed |
 | 12 | 既有健身与棘轮保持 | 机器：hands-free checker + #29/#31/#33 checker + `git diff -- packages/runtime/src/protocol.ts` | 全 0；#31 assembly 1；#33 paths 1；协议无 diff |
 | 13 | 真机自然度 | 人评：原 #35 8 步 + 开口第一字是否进转写 | 待用户裁 |
@@ -60,7 +60,7 @@
   - `node script/check-hands-free-voice-contract.cjs`：行为六项 0，采麦 1，realtime 0；符号夹具不能全 0
   - 权限拒绝 / 采麦未 active 不显示「正在听」
   - 可听播放：请求期闲时阈值；clip player 未播不标 audible
-  - `node evals/voice/check-latency.mjs --metric duplex-interrupt --fixture …` 夹具绿；真机未跑
+  - `node evals/voice/check-latency.mjs --metric duplex-interrupt --fixture evals/voice/fixtures/duplex-interrupt.sample.jsonl` 夹具绿；真机未跑
   - #29 0/0，#31 0/1，#33 0/0/1，协议无 diff，CompanionManager 4479/4609
   - collector 880/856 预存红线未动
 

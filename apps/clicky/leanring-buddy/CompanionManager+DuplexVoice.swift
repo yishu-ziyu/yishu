@@ -45,16 +45,23 @@ extension CompanionManager {
             once: false,
             attributes: ["turnId": traceID]
         )
-        // User speech onset owns the audio floor immediately. Do not wait
-        // for ASR finalization or Runtime acknowledgement.
-        cancelActiveSentenceSpeechPipeline()
-        elevenLabsTTSClient.stopPlayback()
+        YishuDuplexAudioFloor.takeFloorOnSpeechOnset(
+            presentation: .init(
+                stopSentenceSpeech: { [weak self] in
+                    self?.cancelActiveSentenceSpeechPipeline()
+                },
+                stopPlayback: { [weak self] in
+                    self?.elevenLabsTTSClient.stopPlayback()
+                }
+            ),
+            foreground: duplexForegroundRuntimeBoundary(),
+            transcriptFinalized: false,
+            runtimeAcknowledged: false
+        )
         livePartialTranscript = ""
         voiceState = .listening
         ensureOverlayVisibleForVoiceFeedback()
         startHeldSceneCapture(traceID: traceID)
-        // Intentionally no cancel/settle/supersede of foreground Runtime.
-        _ = YishuDuplexAudioFloor.shouldCancelRuntimeOnSpeechOnset()
     }
 
     func handleDuplexCaptureFailedWhileContinuous() {

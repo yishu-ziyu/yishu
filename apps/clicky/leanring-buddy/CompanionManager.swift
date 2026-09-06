@@ -292,6 +292,20 @@ final class CompanionManager: ObservableObject {
     private lazy var foregroundRuntimeExecution = YishuForegroundRuntimeExecution(
         runtime: yishuAgentRuntimeClient
     )
+    /// Speech onset may observe the live foreground execution. The audio-floor
+    /// coordinator must not cancel, settle, or supersede it.
+    func duplexForegroundRuntimeBoundary() -> YishuDuplexAudioFloor.ForegroundRuntimeBoundary {
+        YishuDuplexAudioFloor.ForegroundRuntimeBoundary(
+            isActive: { [weak self] in
+                self?.foregroundRuntimeExecution.isActive ?? false
+            },
+            cancel: { [weak self] reason in
+                self?.foregroundRuntimeExecution.cancel(reason: reason)
+            },
+            settle: {},
+            supersede: {}
+        )
+    }
     private let voiceProxySupervisor = YishuVoiceProxySupervisor.shared
     private var voiceProxyAvailabilityCancellable: AnyCancellable?
     lazy var providerAccountsViewModel = ProviderAccountsViewModel(
