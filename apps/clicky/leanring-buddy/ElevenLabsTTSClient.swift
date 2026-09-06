@@ -39,6 +39,9 @@ final class ElevenLabsTTSClient {
         clipPlayer.hooks.onFirstAudio = {
             ClickyAnalytics.trackVoiceEvent("tts.first_audio")
         }
+        clipPlayer.hooks.onAudiblePlaybackChange = { [weak self] active in
+            self?.onPlaybackActiveChange?(active)
+        }
         clipPlayer.hooks.onClipGap = { gapMs in
             ClickyAnalytics.trackVoiceEvent(
                 "tts.clip_gap",
@@ -74,7 +77,6 @@ final class ElevenLabsTTSClient {
     ) async throws {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        onPlaybackActiveChange?(true)
         defer { onPlaybackActiveChange?(false) }
         try Task.checkCancellation()
 

@@ -1,0 +1,24 @@
+{
+  "A": {
+    "finals": [],
+    "pressed": 0,
+    "keyboardStarts": 0,
+    "armed": true
+  },
+  "B": {
+    "finalCount": 0,
+    "keyboardStarts": 0,
+    "stopCount": 0,
+    "armed": true
+  },
+  "C": {
+    "speechOnset": false,
+    "hasFinal": false
+  },
+  "D": { "runtimeCancels": 1 },
+  "E": { "turns": 1, "begins": 1 },
+  "F": { "turns": 1, "begins": 1 },
+  "G": { "lateFinal": true },
+  "duplicateFinals": 2,
+  "H": { "kinds": [] }
+}

@@ -6,6 +6,9 @@ import YishuContext
 @MainActor
 final class FakeContinuousDictation: YishuContinuousDictationControlling {
     var isContinuousCaptureActive = false
+    var lastContinuousStartError: String?
+    var startShouldSucceed = true
+    var startShouldClaimSuccessWithoutActivating = false
     var beginCount = 0
     var requestFinalCount = 0
     var stopCount = 0
@@ -17,11 +20,23 @@ final class FakeContinuousDictation: YishuContinuousDictationControlling {
         onPartial: @escaping (String) -> Void,
         onFinal: @escaping (String) -> Void,
         onPower: @escaping (CGFloat) -> Void
-    ) async {
-        isContinuousCaptureActive = true
+    ) async -> Bool {
         self.onPartial = onPartial
         self.onFinal = onFinal
         self.onPower = onPower
+        if startShouldClaimSuccessWithoutActivating {
+            isContinuousCaptureActive = false
+            lastContinuousStartError = "capture did not become active"
+            return true
+        }
+        if !startShouldSucceed {
+            isContinuousCaptureActive = false
+            lastContinuousStartError = lastContinuousStartError
+                ?? "microphone permission is required for push to talk."
+            return false
+        }
+        isContinuousCaptureActive = true
+        return true
     }
 
     func beginContinuousUtterance() async {
@@ -102,20 +117,21 @@ struct YishuHandsFreeVoiceContractTests {
     @Test func threeTurnHandsFreeConversationNeedsNoShortcut() async {
         let harness = makeHarness()
         harness.controller.setContinuousListeningEnabled(true)
-        await waitUntilArmed(harness.continuous)
+        await waitUntilArmed(harness)
 
         for text in ["第一句", "第二句", "第三句"] {
             await speakUtterance(text, harness: harness)
         }
 
-        let finals = harness.events.kinds.compactMap { kind -> String? in
+        let finals = harness.events.utteranceKinds.compactMap { kind -> String? in
             if case let .finalized(text) = kind { return text }
             return nil
         }
         #expect(finals == ["第一句", "第二句", "第三句"])
-        #expect(harness.events.kinds.filter { $0 == .speechOnset }.count == 3)
-        #expect(!harness.events.kinds.contains(.pressed))
+        #expect(harness.events.utteranceKinds.filter { $0 == .speechOnset }.count == 3)
+        #expect(!harness.events.utteranceKinds.contains(.pressed))
         #expect(harness.controller.isContinuousListeningEnabled)
+        #expect(harness.controller.continuousListeningState.isArmed)
         #expect(harness.controller.capturePhase == .armed)
         #expect(harness.keyboard.startCallCount == 0)
     }
@@ -123,13 +139,13 @@ struct YishuHandsFreeVoiceContractTests {
     @Test func tenUtterancesNeedZeroRearm() async {
         let harness = makeHarness()
         harness.controller.setContinuousListeningEnabled(true)
-        await waitUntilArmed(harness.continuous)
+        await waitUntilArmed(harness)
 
         for index in 1...10 {
             await speakUtterance("句\(index)", harness: harness)
         }
 
-        let finals = harness.events.kinds.filter { kind in
+        let finals = harness.events.utteranceKinds.filter { kind in
             if case .finalized = kind { return true }
             return false
         }
@@ -137,20 +153,21 @@ struct YishuHandsFreeVoiceContractTests {
         #expect(harness.keyboard.startCallCount == 0)
         #expect(harness.continuous.stopCount == 0)
         #expect(harness.controller.capturePhase == .armed)
+        #expect(harness.controller.continuousListeningState.isArmed)
     }
 
     @Test func speechOnsetStopsPresentationWithoutWaitingForFinal() async {
         let harness = makeHarness()
         harness.controller.setContinuousListeningEnabled(true)
-        await waitUntilArmed(harness.continuous)
+        await waitUntilArmed(harness)
         harness.controller.setAssistantPlaybackActive(true)
 
         harness.clock.now = 10
         harness.continuous.emitPower(0.4)
         await waitUntilBeginCount(harness.continuous, 1)
 
-        #expect(harness.events.kinds.first == .speechOnset)
-        #expect(!harness.events.kinds.contains { kind in
+        #expect(harness.events.utteranceKinds.first == .speechOnset)
+        #expect(!harness.events.utteranceKinds.contains { kind in
             if case .finalized = kind { return true }
             return false
         })
@@ -188,7 +205,7 @@ struct YishuHandsFreeVoiceContractTests {
     @Test func assistantPlaybackWithoutUserSpeechCreatesZeroTurns() async {
         let harness = makeHarness()
         harness.controller.setContinuousListeningEnabled(true)
-        await waitUntilArmed(harness.continuous)
+        await waitUntilArmed(harness)
         harness.controller.setAssistantPlaybackActive(true)
 
         for offset in 0..<12 {
@@ -196,57 +213,116 @@ struct YishuHandsFreeVoiceContractTests {
             harness.continuous.emitPower(0.14)
         }
 
-        #expect(harness.events.kinds.isEmpty)
+        #expect(harness.events.utteranceKinds.isEmpty)
         #expect(harness.continuous.beginCount == 0)
     }
 
     @Test func silenceCreatesZeroTurns() async {
         let harness = makeHarness()
         harness.controller.setContinuousListeningEnabled(true)
-        await waitUntilArmed(harness.continuous)
+        await waitUntilArmed(harness)
 
         for offset in 0..<20 {
             harness.clock.now = offset * 100
             harness.continuous.emitPower(0.03)
         }
 
-        #expect(harness.events.kinds.isEmpty)
+        #expect(harness.events.utteranceKinds.isEmpty)
         #expect(harness.continuous.beginCount == 0)
+    }
+
+    @Test func userSpeechBeforeAudibleTTSUsesIdleThreshold() async {
+        let harness = makeHarness()
+        harness.controller.setContinuousListeningEnabled(true)
+        await waitUntilArmed(harness)
+        harness.controller.setAssistantPlaybackActive(false)
+
+        harness.clock.now = 10
+        harness.continuous.emitPower(0.14)
+        await waitUntilBeginCount(harness.continuous, 1)
+
+        #expect(harness.events.utteranceKinds.contains(.speechOnset))
+        #expect(harness.continuous.beginCount == 1)
+    }
+
+    @Test func permissionRejectedDoesNotPublishListening() async {
+        let harness = makeHarness()
+        harness.continuous.startShouldSucceed = false
+        harness.continuous.lastContinuousStartError =
+            "microphone permission is required for push to talk."
+        harness.controller.setContinuousListeningEnabled(true)
+        await waitUntilFailed(harness.controller)
+
+        #expect(!harness.controller.continuousListeningState.isArmed)
+        #expect(!harness.controller.isContinuousListeningEnabled)
+        #expect(harness.controller.capturePhase == .idle)
+        #expect(!YishuPanelFirstScreenCopy.isListeningNowCopyAllowed(
+            continuousState: harness.controller.continuousListeningState
+        ))
+        if case let .failed(message) = harness.controller.continuousListeningState {
+            #expect(message.contains("microphone"))
+        } else {
+            Issue.record("expected failed continuous listening state")
+        }
+        #expect(harness.events.kinds.contains(
+            .continuousListeningFailed("microphone permission is required for push to talk.")
+        ))
+        #expect(harness.continuous.isContinuousCaptureActive == false)
+    }
+
+    @Test func captureInactiveAfterStartDoesNotPublishListening() async {
+        let harness = makeHarness()
+        harness.continuous.startShouldClaimSuccessWithoutActivating = true
+        harness.controller.setContinuousListeningEnabled(true)
+        await waitUntilFailed(harness.controller)
+
+        #expect(!harness.controller.continuousListeningState.isArmed)
+        #expect(!harness.controller.isContinuousListeningEnabled)
+        #expect(harness.controller.capturePhase == .idle)
+        #expect(!YishuPanelFirstScreenCopy.isListeningNowCopyAllowed(
+            continuousState: harness.controller.continuousListeningState
+        ))
+        #expect(harness.continuous.isContinuousCaptureActive == false)
+        #expect(harness.events.kinds.contains {
+            if case .continuousListeningFailed = $0 { return true }
+            return false
+        })
     }
 
     @Test func disableDropsLateFinal() async {
         let harness = makeHarness()
         harness.controller.setContinuousListeningEnabled(true)
-        await waitUntilArmed(harness.continuous)
+        await waitUntilArmed(harness)
         await beginUtterance(harness: harness)
         harness.continuous.emitPartial("会被关掉")
         harness.controller.setContinuousListeningEnabled(false)
         harness.continuous.emitFinal("迟到终稿")
 
-        #expect(!harness.events.kinds.contains { kind in
+        #expect(!harness.events.utteranceKinds.contains { kind in
             if case .finalized = kind { return true }
             return false
         })
         #expect(harness.continuous.stopCount == 1)
         #expect(!harness.controller.isContinuousListeningEnabled)
+        #expect(harness.controller.continuousListeningState == .off)
     }
 
     @Test func providerFinalAndLocalEndDoNotDoubleSubmit() async {
         let harness = makeHarness()
         harness.controller.setContinuousListeningEnabled(true)
-        await waitUntilArmed(harness.continuous)
+        await waitUntilArmed(harness)
         await beginUtterance(harness: harness)
         harness.continuous.emitPartial("同一句")
         endUtterance(harness: harness)
         harness.continuous.emitFinal("同一句")
         harness.continuous.emitFinal("同一句又来")
 
-        let finals = harness.events.kinds.filter { kind in
+        let finals = harness.events.utteranceKinds.filter { kind in
             if case .finalized = kind { return true }
             return false
         }
         #expect(finals.count == 1)
-        #expect(harness.events.kinds.contains(.finalized("同一句")))
+        #expect(harness.events.utteranceKinds.contains(.finalized("同一句")))
     }
 
     @Test func pttFallbackUnchangedWhenContinuousOff() async {
@@ -259,7 +335,7 @@ struct YishuHandsFreeVoiceContractTests {
         harness.controller.handleShortcutTransition(.released)
         harness.keyboard.emitFinal("按住说话")
 
-        #expect(harness.events.kinds == [
+        #expect(harness.events.utteranceKinds == [
             .pressed,
             .partial("按住"),
             .released,
@@ -290,8 +366,20 @@ struct YishuHandsFreeVoiceContractTests {
         )
     }
 
-    private func waitUntilArmed(_ dictation: FakeContinuousDictation) async {
-        for _ in 0..<50 where !dictation.isContinuousCaptureActive {
+    private func waitUntilArmed(_ harness: Harness) async {
+        for _ in 0..<80 where !harness.continuous.isContinuousCaptureActive {
+            await Task.yield()
+        }
+        for _ in 0..<80 where !harness.controller.continuousListeningState.isArmed {
+            await Task.yield()
+        }
+    }
+
+    private func waitUntilFailed(_ controller: YishuVoiceSessionController) async {
+        for _ in 0..<50 {
+            if case .failed = controller.continuousListeningState {
+                return
+            }
             await Task.yield()
         }
     }

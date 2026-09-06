@@ -78,7 +78,7 @@
 
 | # | 标准 | evaluator | 证据 |
 |---|---|---|---|
-| 1 | 主健身函数 0 | 机器：`node script/check-hands-free-voice-contract.cjs` | `hands_free_voice_contract_failures: 0` |
+| 1 | 主健身函数 0 | 机器：`node script/check-hands-free-voice-contract.cjs`（执行 `YishuHandsFreeFitnessHarness`，不靠测试名） | `hands_free_voice_contract_failures: 0` |
 | 2 | 十句免再按键 | 同上 + Swift 矩阵 B | `manual_rearm_actions_per_10_utterances: 0` |
 | 3 | 开口不停 Runtime | 同上 + 矩阵 D | `speech_onset_runtime_cancellations: 0` |
 | 4 | 自回声 0 句 | 同上 + 矩阵 E | `assistant_self_triggered_user_turns: 0` |

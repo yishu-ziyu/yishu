@@ -2,7 +2,14 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，Issue #35 Duplex Voice 1A，待 PR 审）
+## 当前状态（2026-09-06，PR #36 再审：开口前缀 / 可执行健身 / 听写状态 / 可听播放）
+
+- 卡 `docs/evals/20260906-pr36-duplex-correctness.md`（原 #35 卡仍在）。分支 `feat/issue-35-duplex-voice`。更新 PR #36，不开新 PR，不合并。未装真机。
+- Path A 不变。StepAudio Realtime 仍不接。
+- 连续采麦用有界 PCM pre-roll（2.5 s / 1 MB），ASR 会话就绪后按序回放恰好一次。`YishuVoiceSessionController` 拥有 starting/armed/failed/off；偏好只在 armed 后持久化。「正在听」只在实际 armed。回声门跟 clip player 真实可听播放走。健身检查器跑 `YishuHandsFreeFitnessHarness` 行为报告。真机命令 `node evals/voice/check-latency.mjs --metric duplex-interrupt`，本轮不宣称真机通过。
+- 机器：hands-free checker 全 0 + 采麦 1，反作弊夹具不能全 0；Swift 矩阵/pre-roll/fitness/会话/barge-in/前台执行 TEST SUCCEEDED；#29 0/0；#31 0/1；#33 0/0/1；协议无 diff。CompanionManager 4479/4609。collector 880/856 预存红线未动。真机未装。
+
+## 上一状态（2026-09-06，Issue #35 Duplex Voice 1A，待 PR 审）
 
 - 卡 `docs/evals/20260906-issue-35-duplex-voice.md`。分支 `feat/issue-35-duplex-voice`（从 `9f84fff`）。只做 #35。未装真机。
 - 供应商选 Path A。StepAudio Realtime 否决：自动推理、exp4 工具交接 0 次、打断 945–9550 ms；接成 Main 会扩成 #31。

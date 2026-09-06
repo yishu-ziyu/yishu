@@ -791,7 +791,6 @@ final class CompanionManager: ObservableObject {
         voiceSession.start()
         if isContinuousListeningEnabled {
             voiceSession.setContinuousListeningEnabled(true)
-            voiceState = .listening
         }
         bindVoiceProxyAvailability()
         bindDelegatedPresenceObservation()
@@ -1650,11 +1649,11 @@ final class CompanionManager: ObservableObject {
                     // Keep waveform from key-down through session start / hold.
                     // Continuous armed is still listening.
                     self.voiceState = .listening
-                case .idle:
-                    if self.isContinuousListeningEnabled {
-                        self.voiceState = .listening
-                        return
+                case .starting:
+                    if self.voiceState == .listening {
+                        self.voiceState = .idle
                     }
+                case .idle:
                     self.turnVisualPhase = .idle
                     self.voiceState = .idle
                     // If the user pressed and released the hotkey without
@@ -1676,21 +1675,25 @@ final class CompanionManager: ObservableObject {
             handleVoiceSessionPressed(traceID: traceID)
         case let .speechOnset(traceID):
             handleDuplexSpeechOnset(traceID: traceID)
+        case .continuousListeningArmed:
+            handleContinuousListeningArmed()
+        case let .continuousListeningFailed(message):
+            handleContinuousListeningFailed(message: message)
         case let .partial(traceID, text):
             handleVoiceSessionPartial(traceID: traceID, text: text)
         case let .released(origin):
-            if isContinuousListeningEnabled {
+            if voiceSession.continuousListeningState.isArmed {
                 ClickyAnalytics.trackVoiceEvent("duplex.end_of_speech", once: false)
             }
             handleVoiceSessionReleased(origin: origin)
         case let .finalized(origin, transcript):
-            if isContinuousListeningEnabled {
+            if voiceSession.continuousListeningState.isArmed {
                 ClickyAnalytics.trackVoiceEvent("duplex.final_accepted", once: false)
                 _ = beginBargeInIfEligible(voiceTraceID: origin.traceID)
             }
             handleVoiceSessionFinalized(origin: origin, transcript: transcript)
         case let .captureFailed(traceID, reason):
-            if isContinuousListeningEnabled {
+            if voiceSession.continuousListeningState.isArmed {
                 handleDuplexCaptureFailedWhileContinuous()
             } else {
                 handleVoiceSessionCaptureFailed(traceID: traceID, reason: reason)
