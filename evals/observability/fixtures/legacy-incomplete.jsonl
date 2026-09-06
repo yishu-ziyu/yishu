@@ -1,0 +1,2 @@
+{"schemaVersion":1,"eventId":"old-final","occurredAt":"2026-09-04T04:00:03.400Z","sessionId":"voice","name":"asr.final","turnId":"t01"}
+{"schemaVersion":1,"eventId":"old-turn","occurredAt":"2026-09-04T04:00:03.080Z","sessionId":"voice","name":"turn.start","turnId":"t01"}
