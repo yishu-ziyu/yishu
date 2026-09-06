@@ -15,6 +15,16 @@ export type {
 export { createMemoryLedger } from "./ledger.js";
 export type { MemoryLedger } from "./ledger.js";
 export {
+  forgetMemoryClaim,
+  inspectMemoryForget,
+  MemoryForgetIncompleteError,
+} from "./forget.js";
+export type {
+  MemoryForgetInput,
+  MemoryForgetOutcome,
+  MemoryForgetPorts,
+} from "./forget.js";
+export {
   VISIBLE_MEMORY_FILE_NAME,
   VISIBLE_MEMORY_HEADER,
   VisibleMemoryFile,
