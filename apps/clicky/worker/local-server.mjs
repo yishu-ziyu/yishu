@@ -891,6 +891,60 @@ function asrJsonlPath() {
   );
 }
 
+function sanitizeUtteranceId(value) {
+  if (typeof value !== "string") return null;
+  if (!/^[a-f0-9]{8,32}$/i.test(value)) return null;
+  return value.toLowerCase();
+}
+
+function contentTypeClass(value) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("event-stream")) return "sse";
+  if (text.includes("json")) return "json";
+  if (!text) return "empty";
+  return "other";
+}
+
+function httpStatusClass(status) {
+  if (!Number.isFinite(status) || status <= 0) return null;
+  return `${Math.floor(status / 100)}xx`;
+}
+
+function createSseTypeCounter() {
+  let pending = "";
+  const counts = { delta: 0, done: 0, error: 0, other: 0 };
+  return {
+    counts,
+    push(chunk) {
+      pending += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let type;
+        try {
+          type = JSON.parse(payload)?.type;
+        } catch {
+          counts.other += 1;
+          continue;
+        }
+        if (type === "transcript.text.delta") counts.delta += 1;
+        else if (type === "transcript.text.done") counts.done += 1;
+        else if (type === "error") counts.error += 1;
+        else counts.other += 1;
+      }
+    },
+    terminal() {
+      if (counts.error > 0) return "sse_error";
+      if (counts.done > 0) return "done";
+      if (counts.delta > 0) return "delta_only";
+      return "no_terminal";
+    },
+  };
+}
+
 function logAsrTiming(fields) {
   console.error(formatAsrTimingLog(fields));
   if (process.env.NODE_TEST_CONTEXT && !process.env.YISHU_ASR_JSONL) return;
@@ -911,6 +965,17 @@ function logAsrTiming(fields) {
         reused: fields.reused ? 1 : 0,
         body_bytes: fields.bodyBytes ?? null,
         body_read_ms: fields.bodyReadMs ?? null,
+        utterance_id: fields.utteranceId ?? null,
+        http_status: fields.httpStatus ?? null,
+        http_status_class: fields.httpStatusClass ?? null,
+        content_type_class: fields.contentTypeClass ?? null,
+        first_byte_observed: fields.firstByteObserved ?? (fields.firstByteMs == null ? 0 : 1),
+        sse_delta_n: fields.sseDeltaN ?? 0,
+        sse_done_n: fields.sseDoneN ?? 0,
+        sse_error_n: fields.sseErrorN ?? 0,
+        sse_other_n: fields.sseOtherN ?? 0,
+        cancelled: fields.cancelled ? 1 : 0,
+        terminal: fields.terminal ?? null,
       })}\n`,
       { mode: 0o600 }
     );
@@ -983,13 +1048,27 @@ function pipeAsrHttps({
     let reused = false;
     let connectMs;
     let firstByteMs;
+    let httpStatus;
+    let contentType;
+    let cancelled = false;
+    const sseCounter = createSseTypeCounter();
     let settled = false;
     const finish = (error, extra) => {
       if (settled) return;
       settled = true;
       if (kind === "interim") inFlightInterimDestroy = null;
       if (error) reject(error);
-      else resolve(extra);
+      else resolve({
+        reused,
+        connectMs,
+        firstByteMs,
+        httpStatus,
+        contentType,
+        cancelled,
+        sse: sseCounter.counts,
+        terminal: extra?.terminal ?? (cancelled ? "cancelled" : sseCounter.terminal()),
+        ...extra,
+      });
     };
 
     const up = httpsRequest(
@@ -1006,6 +1085,8 @@ function pipeAsrHttps({
       },
       (upRes) => {
         if (connectMs === undefined) connectMs = Date.now() - started;
+        httpStatus = upRes.statusCode || 0;
+        contentType = upRes.headers?.["content-type"] || "";
         if ((upRes.statusCode || 0) < 200 || (upRes.statusCode || 0) >= 300) {
           upRes.resume();
           if (!res.headersSent) {
@@ -1013,7 +1094,7 @@ function pipeAsrHttps({
               error: "Transcription upstream request failed",
             });
           }
-          finish(null, { reused, connectMs, firstByteMs });
+          finish(null, { terminal: "http_error" });
           return;
         }
         if (wantStream) {
@@ -1025,18 +1106,19 @@ function pipeAsrHttps({
           let upstreamBytes = 0;
           upRes.on("data", (chunk) => {
             if (firstByteMs === undefined) firstByteMs = Date.now() - started;
+            sseCounter.push(chunk);
             upstreamBytes += chunk.length;
             if (upstreamBytes > MAX_UPSTREAM_BYTES.transcribe) {
               up.destroy();
               res.destroy(new Error("Transcription upstream response too large"));
-              finish(null, { reused, connectMs, firstByteMs });
+              finish(null, { terminal: "too_large" });
               return;
             }
             if (!res.writableEnded && !res.destroyed) res.write(chunk);
           });
           upRes.on("end", () => {
             if (!res.writableEnded) res.end();
-            finish(null, { reused, connectMs, firstByteMs });
+            finish(null, {});
           });
           upRes.on("error", (error) => finish(error));
           return;
@@ -1080,18 +1162,20 @@ function pipeAsrHttps({
     if (kind === "interim") {
       abortInFlightInterim();
       inFlightInterimDestroy = () => {
+        cancelled = true;
         up.destroy();
-        finish(null, { reused, connectMs, firstByteMs });
+        finish(null, { terminal: "cancelled" });
       };
     }
 
     const abort = () => {
       if (kind === "interim") {
+        cancelled = true;
         up.destroy();
         if (inFlightInterimDestroy) {
           inFlightInterimDestroy = null;
         }
-        finish(null, { reused, connectMs, firstByteMs });
+        finish(null, { terminal: "cancelled" });
         return;
       }
       // Finals keep the TLS socket for the dedicated agent.
@@ -1131,6 +1215,12 @@ async function pipeAsrUpstream({
   let connectMs;
   let firstByteMs;
   let reused = false;
+  let httpStatus;
+  let contentType;
+  let cancelled = false;
+  let sseCounts = { delta: 0, done: 0, error: 0, other: 0 };
+  let terminal = null;
+  const utteranceId = sanitizeUtteranceId(req.headers["x-yishu-utterance-id"]);
   const pending = useKeepAliveAsrAgent()
     ? null
     : upstreamRequest(
@@ -1196,6 +1286,11 @@ async function pipeAsrUpstream({
     reused = result.reused;
     connectMs = result.connectMs;
     firstByteMs = result.firstByteMs;
+    httpStatus = result.httpStatus;
+    contentType = result.contentType;
+    cancelled = result.cancelled;
+    sseCounts = result.sse || sseCounts;
+    terminal = result.terminal;
     if (kind === "final") scheduleFinalKeepAlive();
   } finally {
     pending?.cleanup();
@@ -1211,6 +1306,17 @@ async function pipeAsrUpstream({
       reused,
       bodyBytes,
       bodyReadMs,
+      utteranceId,
+      httpStatus,
+      httpStatusClass: httpStatusClass(httpStatus),
+      contentTypeClass: contentTypeClass(contentType),
+      firstByteObserved: firstByteMs == null ? 0 : 1,
+      sseDeltaN: sseCounts.delta,
+      sseDoneN: sseCounts.done,
+      sseErrorN: sseCounts.error,
+      sseOtherN: sseCounts.other,
+      cancelled,
+      terminal,
     });
   }
 }

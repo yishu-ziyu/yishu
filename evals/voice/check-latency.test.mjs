@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   buildPassingFixture,
+  duplexInterruptDeltas,
   evaluate,
   groupTurns,
   interruptDeltas,
@@ -165,6 +166,78 @@ test("ack-before-tool fails when tool.started precedes response.delta", () => {
   });
   const report = evaluate(events, { last: 30, metric: "ack-before-tool" });
   assert.equal(report.rows[0].pass, false);
+});
+
+test("duplex-interrupt pairs speech_onset while TTS is playing with tts.stopped", () => {
+  const base = Date.parse("2026-09-04T07:30:00.000Z");
+  const events = [
+    qualityEvent({
+      id: "d-audio",
+      name: "tts.first_audio",
+      turnId: "d",
+      occurredAt: new Date(base).toISOString(),
+    }),
+    qualityEvent({
+      id: "d-onset",
+      name: "duplex.speech_onset",
+      turnId: "d2",
+      occurredAt: new Date(base + 40).toISOString(),
+    }),
+    qualityEvent({
+      id: "d-stop",
+      name: "tts.stopped",
+      turnId: "d",
+      occurredAt: new Date(base + 90).toISOString(),
+    }),
+  ];
+  assert.deepEqual(duplexInterruptDeltas(events), [50]);
+  const report = evaluate(events, { last: 30, metric: "duplex-interrupt" });
+  assert.equal(report.rows[0].n, 1);
+  assert.equal(report.rows[0].pass, true);
+  assert.match(report.rows[0].actual, /p50 50/);
+  assert.match(report.rows[0].actual, /p95 50/);
+});
+
+test("duplex-interrupt dedicated fixture command passes", () => {
+  const result = runCli([
+    "--fixture",
+    join(HERE, "fixtures/duplex-interrupt.sample.jsonl"),
+    "--metric",
+    "duplex-interrupt",
+  ]);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.match(result.stdout, /duplex.speech_onset->tts.stopped p95|duplex.speech_onset→tts.stopped p95/);
+  assert.match(result.stdout, /PASS/);
+  assert.match(result.stdout, /p50 50/);
+});
+
+test("duplex-interrupt CLI reports n and percentiles from a fixture", () => {
+  const base = Date.parse("2026-09-04T08:00:00.000Z");
+  const events = [
+    qualityEvent({
+      id: "c-audio",
+      name: "tts.first_audio",
+      turnId: "c",
+      occurredAt: new Date(base).toISOString(),
+    }),
+    qualityEvent({
+      id: "c-onset",
+      name: "duplex.speech_onset",
+      turnId: "c2",
+      occurredAt: new Date(base + 20).toISOString(),
+    }),
+    qualityEvent({
+      id: "c-stop",
+      name: "tts.stopped",
+      turnId: "c",
+      occurredAt: new Date(base + 80).toISOString(),
+    }),
+  ];
+  const fixture = writeTemp(events);
+  const result = runCli(["--fixture", fixture, "--metric", "duplex-interrupt"]);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.match(result.stdout, /duplex.speech_onset->tts.stopped p95|duplex.speech_onset→tts.stopped p95/);
+  assert.match(result.stdout, /PASS/);
 });
 
 test("interrupt pairs key_down while TTS is playing with tts.stopped", () => {

@@ -11,14 +11,17 @@ struct VoiceTurnOrigin: Equatable {
 
 enum YishuVoiceCaptureFailureReason: Equatable, Sendable {
     case emptyOrNearSilence
+    case asrTerminal(YishuAsrTerminalKind)
 }
 
 /// Read-only capture activity for product voiceState mapping.
 /// Priority matches the former dictation-flag observation:
-/// finalizing > recording > (preparing || key held) > idle.
+/// finalizing > recording > (preparing || key held) > continuous armed > idle.
 enum YishuVoiceCapturePhase: Equatable, Sendable {
     case idle
     case holding
+    case starting
+    case armed
     case recording
     case finalizing
 
@@ -26,11 +29,15 @@ enum YishuVoiceCapturePhase: Equatable, Sendable {
         isFinalizing: Bool,
         isRecording: Bool,
         isPreparing: Bool,
-        isKeyHeld: Bool
+        isKeyHeld: Bool,
+        isContinuousStarting: Bool = false,
+        isContinuousArmed: Bool = false
     ) -> YishuVoiceCapturePhase {
         if isFinalizing { return .finalizing }
         if isRecording { return .recording }
         if isPreparing || isKeyHeld { return .holding }
+        if isContinuousStarting { return .starting }
+        if isContinuousArmed { return .armed }
         return .idle
     }
 }
@@ -39,11 +46,14 @@ enum YishuVoiceCapturePhase: Equatable, Sendable {
 /// own runtime turns, TTS, overlays, or screen capture.
 enum YishuVoiceSessionEvent: Equatable {
     case pressed(traceID: String)
+    case speechOnset(traceID: String)
     case partial(traceID: String, text: String)
     case released(origin: VoiceTurnOrigin)
     case finalized(origin: VoiceTurnOrigin, transcript: String)
     case captureFailed(traceID: String, reason: YishuVoiceCaptureFailureReason)
     case cancelled(traceID: String)
+    case continuousListeningArmed
+    case continuousListeningFailed(message: String)
 }
 
 @MainActor
@@ -61,6 +71,41 @@ protocol YishuKeyboardDictationControlling: AnyObject {
     func cancelCurrentDictation(preserveDraftText: Bool)
 }
 
+enum YishuContinuousListeningState: Equatable, Sendable {
+    case off
+    case starting
+    case armed
+    case failed(String)
+
+    var isRequested: Bool {
+        switch self {
+        case .starting, .armed:
+            return true
+        case .off, .failed:
+            return false
+        }
+    }
+
+    var isArmed: Bool {
+        if case .armed = self { return true }
+        return false
+    }
+}
+
+@MainActor
+protocol YishuContinuousDictationControlling: AnyObject {
+    var isContinuousCaptureActive: Bool { get }
+    var lastContinuousStartError: String? { get }
+    func startContinuousCapture(
+        onPartial: @escaping (String) -> Void,
+        onFinal: @escaping (String, YishuAsrTerminalKind) -> Void,
+        onPower: @escaping (CGFloat) -> Void
+    ) async -> Bool
+    func beginContinuousUtterance() async
+    func requestContinuousUtteranceFinal()
+    func stopContinuousCapture()
+}
+
 protocol YishuPushToTalkShortcutMonitoring: AnyObject {
     var shortcutTransitionPublisher: PassthroughSubject<
         BuddyPushToTalkShortcut.ShortcutTransition,
@@ -71,6 +116,7 @@ protocol YishuPushToTalkShortcutMonitoring: AnyObject {
 }
 
 extension BuddyDictationManager: YishuKeyboardDictationControlling {}
+extension BuddyDictationManager: YishuContinuousDictationControlling {}
 
 extension GlobalPushToTalkShortcutMonitor: YishuPushToTalkShortcutMonitoring {}
 
@@ -83,27 +129,38 @@ final class YishuVoiceSessionController: ObservableObject {
         didSet { refreshCapturePhase() }
     }
     @Published private(set) var capturePhase: YishuVoiceCapturePhase = .idle
+    @Published private(set) var isContinuousListeningEnabled = false
+    @Published private(set) var continuousListeningState: YishuContinuousListeningState = .off
 
     var shouldBegin: () -> Bool
     var onEvent: (YishuVoiceSessionEvent) -> Void
 
     private let dictation: any YishuKeyboardDictationControlling
+    private let continuousDictation: (any YishuContinuousDictationControlling)?
     private let monitor: any YishuPushToTalkShortcutMonitoring
+    private let clock: any YishuMonotonicClock
     private var shortcutTransitionCancellable: AnyCancellable?
     private var pendingStartTask: Task<Void, Never>?
     private var pendingOrigin: VoiceTurnOrigin?
     private var sessionGeneration: UInt64 = 0
     private var didEmitTerminalForGeneration = false
+    private var continuousPhase: YishuHandsFreeListeningPolicy.Phase = .armed
+    private var assistantPlaybackActive = false
+    private var lastLoudAtMs: Int?
+    private var utteranceStartedAtMs: Int?
+    private var continuousStartTask: Task<Void, Never>?
 
     convenience init(
         shouldBegin: @escaping () -> Bool = { true },
         onEvent: @escaping (YishuVoiceSessionEvent) -> Void = { _ in }
     ) {
+        let dictation = BuddyDictationManager()
         self.init(
-            dictation: BuddyDictationManager(),
+            dictation: dictation,
             monitor: GlobalPushToTalkShortcutMonitor(),
             shouldBegin: shouldBegin,
-            onEvent: onEvent
+            onEvent: onEvent,
+            continuousDictation: dictation
         )
     }
 
@@ -111,10 +168,14 @@ final class YishuVoiceSessionController: ObservableObject {
         dictation: any YishuKeyboardDictationControlling,
         monitor: any YishuPushToTalkShortcutMonitoring,
         shouldBegin: @escaping () -> Bool = { true },
-        onEvent: @escaping (YishuVoiceSessionEvent) -> Void = { _ in }
+        onEvent: @escaping (YishuVoiceSessionEvent) -> Void = { _ in },
+        continuousDictation: (any YishuContinuousDictationControlling)? = nil,
+        clock: any YishuMonotonicClock = YishuSystemMonotonicClock()
     ) {
         self.dictation = dictation
+        self.continuousDictation = continuousDictation
         self.monitor = monitor
+        self.clock = clock
         self.shouldBegin = shouldBegin
         self.onEvent = onEvent
         refreshCapturePhase()
@@ -131,6 +192,9 @@ final class YishuVoiceSessionController: ObservableObject {
 
     func stop() {
         cancelCapture()
+        if isContinuousListeningEnabled {
+            setContinuousListeningEnabled(false)
+        }
         monitor.stop()
         shortcutTransitionCancellable?.cancel()
         shortcutTransitionCancellable = nil
@@ -141,6 +205,54 @@ final class YishuVoiceSessionController: ObservableObject {
             monitor.start()
         } else {
             monitor.stop()
+        }
+    }
+
+    func setContinuousListeningEnabled(_ enabled: Bool) {
+        if enabled {
+            guard !continuousListeningState.isRequested else { return }
+            isContinuousListeningEnabled = true
+            continuousListeningState = .starting
+            armContinuousListening()
+        } else if continuousListeningState != .off {
+            isContinuousListeningEnabled = false
+            disarmContinuousListening()
+            continuousListeningState = .off
+        }
+        refreshCapturePhase()
+    }
+
+    func setAssistantPlaybackActive(_ active: Bool) {
+        assistantPlaybackActive = active
+    }
+
+    func handleAudioPower(_ power: CGFloat) {
+        guard continuousListeningState.isArmed else { return }
+        guard continuousDictation != nil else { return }
+        let now = clock.milliseconds()
+        if YishuHandsFreeListeningPolicy.isHoldSpeech(power: power)
+            || YishuHandsFreeListeningPolicy.isUserSpeech(
+                power: power,
+                assistantPlaybackActive: assistantPlaybackActive
+            ) {
+            lastLoudAtMs = now
+        }
+        let millisecondsSinceLoud = lastLoudAtMs.map { now - $0 } ?? Int.max
+        let utteranceDurationMs = utteranceStartedAtMs.map { now - $0 } ?? 0
+        let decision = YishuHandsFreeListeningPolicy.decision(
+            phase: continuousPhase,
+            power: power,
+            assistantPlaybackActive: assistantPlaybackActive,
+            millisecondsSinceLoud: millisecondsSinceLoud,
+            utteranceDurationMs: utteranceDurationMs
+        )
+        switch decision {
+        case .none:
+            break
+        case .beginUtterance:
+            beginContinuousUtterance()
+        case .endUtterance:
+            endContinuousUtterance()
         }
     }
 
@@ -171,11 +283,17 @@ final class YishuVoiceSessionController: ObservableObject {
     }
 
     private func refreshCapturePhase() {
+        let continuousArmed = continuousListeningState.isArmed
+            && continuousPhase == .armed
+            && !isKeyHeld
         let next = YishuVoiceCapturePhase.projected(
-            isFinalizing: dictation.isFinalizingTranscript,
-            isRecording: dictation.isRecordingFromKeyboardShortcut,
+            isFinalizing: dictation.isFinalizingTranscript || continuousPhase == .finalizing,
+            isRecording: dictation.isRecordingFromKeyboardShortcut
+                || continuousPhase == .inUtterance,
             isPreparing: dictation.isPreparingToRecord,
-            isKeyHeld: isKeyHeld
+            isKeyHeld: isKeyHeld,
+            isContinuousStarting: continuousListeningState == .starting && !isKeyHeld,
+            isContinuousArmed: continuousArmed
         )
         if capturePhase != next {
             capturePhase = next
@@ -184,6 +302,7 @@ final class YishuVoiceSessionController: ObservableObject {
 
     private func beginCaptureIfPossible() {
         guard shouldBegin() else { return }
+        guard !isContinuousListeningEnabled else { return }
         guard !dictation.isDictationInProgress else { return }
 
         sessionGeneration &+= 1
@@ -218,6 +337,7 @@ final class YishuVoiceSessionController: ObservableObject {
     }
 
     private func releaseCapture() {
+        guard !isContinuousListeningEnabled else { return }
         let releaseAt = DispatchTime.now().uptimeNanoseconds
         if let origin = pendingOrigin {
             pendingOrigin = VoiceTurnOrigin(
@@ -231,12 +351,154 @@ final class YishuVoiceSessionController: ObservableObject {
         dictation.stopPushToTalkFromKeyboardShortcut()
         isKeyHeld = false
         refreshCapturePhase()
-        onEvent(
-            .released(
-                origin: releasedOrigin
-                    ?? VoiceTurnOrigin(traceID: "unknown", releaseAt: releaseAt)
-            )
+        let origin = releasedOrigin
+            ?? VoiceTurnOrigin(traceID: "unknown", releaseAt: releaseAt)
+        onEvent(.released(origin: origin))
+        YishuAsrReleaseTelemetry.recordCaptureRelease(
+            continuousArmed: false,
+            traceID: origin.traceID
         )
+    }
+
+    private func armContinuousListening() {
+        guard let continuousDictation else { return }
+        continuousPhase = .armed
+        lastLoudAtMs = nil
+        utteranceStartedAtMs = nil
+        didEmitTerminalForGeneration = true
+        pendingOrigin = nil
+        continuousStartTask?.cancel()
+        continuousStartTask = Task { [weak self] in
+            let started = await continuousDictation.startContinuousCapture(
+                onPartial: { [weak self] text in
+                    self?.handleContinuousPartial(text)
+                },
+                onFinal: { [weak self] text, kind in
+                    self?.handleContinuousFinal(text, kind: kind)
+                },
+                onPower: { [weak self] power in
+                    self?.handleAudioPower(power)
+                }
+            )
+            guard let self else { return }
+            self.finishContinuousStart(
+                started: started,
+                captureActive: continuousDictation.isContinuousCaptureActive,
+                error: continuousDictation.lastContinuousStartError
+            )
+        }
+        refreshCapturePhase()
+    }
+
+    private func finishContinuousStart(
+        started: Bool,
+        captureActive: Bool,
+        error: String?
+    ) {
+        guard continuousListeningState == .starting else { return }
+        if started, captureActive {
+            continuousListeningState = .armed
+            isContinuousListeningEnabled = true
+            refreshCapturePhase()
+            onEvent(.continuousListeningArmed)
+            return
+        }
+        let message = (error?.trimmingCharacters(in: .whitespacesAndNewlines))
+            .flatMap { $0.isEmpty ? nil : $0 }
+            ?? "couldn't start voice input. try again."
+        isContinuousListeningEnabled = false
+        disarmContinuousListening()
+        continuousListeningState = .failed(message)
+        refreshCapturePhase()
+        onEvent(.continuousListeningFailed(message: message))
+    }
+
+    private func disarmContinuousListening() {
+        continuousStartTask?.cancel()
+        continuousStartTask = nil
+        continuousDictation?.stopContinuousCapture()
+        continuousPhase = .armed
+        lastLoudAtMs = nil
+        utteranceStartedAtMs = nil
+        didEmitTerminalForGeneration = true
+        sessionGeneration &+= 1
+        let traceID = pendingOrigin?.traceID
+        pendingOrigin = nil
+        if let traceID {
+            onEvent(.cancelled(traceID: traceID))
+        }
+    }
+
+    private func beginContinuousUtterance() {
+        guard continuousListeningState.isArmed else { return }
+        guard continuousPhase == .armed else { return }
+        guard let continuousDictation else { return }
+
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
+        let traceID = Self.newVoiceTurnTraceID()
+        pendingOrigin = VoiceTurnOrigin(traceID: traceID, releaseAt: nil)
+        didEmitTerminalForGeneration = false
+        continuousPhase = .inUtterance
+        utteranceStartedAtMs = clock.milliseconds()
+        lastLoudAtMs = utteranceStartedAtMs
+        onEvent(.speechOnset(traceID: traceID))
+        ClickyAnalytics.bindVoiceTurn(traceID)
+        refreshCapturePhase()
+
+        pendingStartTask?.cancel()
+        pendingStartTask = Task { [weak self] in
+            await continuousDictation.beginContinuousUtterance()
+            guard let self, self.sessionGeneration == generation else { return }
+            self.refreshCapturePhase()
+        }
+    }
+
+    private func endContinuousUtterance() {
+        guard continuousListeningState.isArmed else { return }
+        guard continuousPhase == .inUtterance else { return }
+        continuousPhase = .finalizing
+        let releaseAt = DispatchTime.now().uptimeNanoseconds
+        if let origin = pendingOrigin {
+            pendingOrigin = VoiceTurnOrigin(
+                traceID: origin.traceID,
+                releaseAt: releaseAt
+            )
+        }
+        continuousDictation?.requestContinuousUtteranceFinal()
+        refreshCapturePhase()
+        if let origin = pendingOrigin {
+            onEvent(.released(origin: origin))
+            YishuAsrReleaseTelemetry.recordCaptureRelease(
+                continuousArmed: true,
+                traceID: origin.traceID
+            )
+        }
+    }
+
+    private func handleContinuousPartial(_ text: String) {
+        guard let origin = pendingOrigin else { return }
+        handlePartial(
+            generation: sessionGeneration,
+            traceID: origin.traceID,
+            text: text
+        )
+    }
+
+    private func handleContinuousFinal(_ text: String, kind: YishuAsrTerminalKind) {
+        guard let origin = pendingOrigin else { return }
+        handleFinal(
+            generation: sessionGeneration,
+            traceID: origin.traceID,
+            text: text,
+            kind: kind
+        )
+        if continuousListeningState.isArmed {
+            continuousPhase = .armed
+            utteranceStartedAtMs = nil
+            lastLoudAtMs = clock.milliseconds()
+            refreshCapturePhase()
+        }
     }
 
     private func handlePartial(generation: UInt64, traceID: String, text: String) {
@@ -245,7 +507,12 @@ final class YishuVoiceSessionController: ObservableObject {
         onEvent(.partial(traceID: traceID, text: text))
     }
 
-    private func handleFinal(generation: UInt64, traceID: String, text: String) {
+    private func handleFinal(
+        generation: UInt64,
+        traceID: String,
+        text: String,
+        kind: YishuAsrTerminalKind = .success
+    ) {
         guard generation == sessionGeneration else { return }
         guard !didEmitTerminalForGeneration else { return }
         refreshCapturePhase()
@@ -253,16 +520,29 @@ final class YishuVoiceSessionController: ObservableObject {
         let origin = consumeOrigin(for: traceID)
             ?? VoiceTurnOrigin(traceID: traceID, releaseAt: nil)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            onEvent(
-                .captureFailed(
-                    traceID: traceID,
-                    reason: .emptyOrNearSilence
-                )
-            )
+        let resolvedKind: YishuAsrTerminalKind
+        if kind == .success {
+            resolvedKind = trimmed.isEmpty ? .empty : .success
+        } else {
+            resolvedKind = kind
+        }
+        ClickyAnalytics.trackAsrTerminal(kind: resolvedKind)
+        if resolvedKind == .success, !trimmed.isEmpty {
+            onEvent(.finalized(origin: origin, transcript: trimmed))
             return
         }
-        onEvent(.finalized(origin: origin, transcript: trimmed))
+        if resolvedKind == .fallback, !trimmed.isEmpty {
+            onEvent(.finalized(origin: origin, transcript: trimmed))
+            return
+        }
+        onEvent(
+            .captureFailed(
+                traceID: traceID,
+                reason: resolvedKind == .empty
+                    ? .emptyOrNearSilence
+                    : .asrTerminal(resolvedKind)
+            )
+        )
     }
 
     private func consumeOrigin(for traceID: String) -> VoiceTurnOrigin? {

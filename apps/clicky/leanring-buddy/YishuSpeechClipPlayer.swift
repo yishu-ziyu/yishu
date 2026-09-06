@@ -119,6 +119,8 @@ enum YishuSpeechSilenceTrim {
 
 struct YishuSpeechClipHooks {
     var onFirstAudio: () -> Void = {}
+    /// True at first real scheduled playback; false on completion, stop, or failure.
+    var onAudiblePlaybackChange: (Bool) -> Void = { _ in }
     var onClipGap: (Int) -> Void = { _ in }
     /// Fires once per clip whose last buffer really played back (not on stop/failure).
     var onClipDone: (YishuSpeechClipStats) -> Void = { _ in }
@@ -158,6 +160,7 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
     private var firstScheduledAt: DispatchTime?
     private var lastPlayedBackAt: DispatchTime?
     private var firstBufferScheduled = false
+    private var audiblePlaybackActive = false
 
     private func withLock<T>(_ body: () -> T) -> T {
         lock.lock()
@@ -206,6 +209,9 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
             self.nodeIsPlaying = false
             self.lock.unlock()
         }
+        emitAudiblePlayback(
+            YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .stopped)
+        )
         continuation?.resume(throwing: CancellationError())
     }
 
@@ -283,6 +289,9 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
             if alreadyDone.trimmedDurationMs > 0 {
                 hooks.onClipDone(alreadyDone)
             }
+            emitAudiblePlayback(
+                YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .completed)
+            )
             return
         }
 
@@ -314,6 +323,7 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
         clipInFlight = true
         firstBufferScheduled = false
         firstScheduledAt = nil
+        audiblePlaybackActive = false
         lastStats = YishuSpeechClipStats()
         playContinuation = nil
         lock.unlock()
@@ -363,7 +373,20 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
         }
         if shouldEmitFirst {
             hooks.onFirstAudio()
+            emitAudiblePlayback(
+                YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .firstScheduledPlayback)
+            )
         }
+    }
+
+    private func emitAudiblePlayback(_ active: Bool) {
+        let changed = withLock { () -> Bool in
+            if audiblePlaybackActive == active { return false }
+            audiblePlaybackActive = active
+            return true
+        }
+        guard changed else { return }
+        hooks.onAudiblePlaybackChange(active)
     }
 
     private func handleCallback(
@@ -405,6 +428,9 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
         lock.unlock()
         if done {
             hooks.onClipDone(stats)
+            emitAudiblePlayback(
+                YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .completed)
+            )
             continuation?.resume()
         }
     }
@@ -451,6 +477,9 @@ final class YishuSpeechClipPlayer: @unchecked Sendable {
             self.nodeIsPlaying = false
             self.lock.unlock()
         }
+        emitAudiblePlayback(
+            YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .failed)
+        )
         continuation?.resume(throwing: error)
     }
 

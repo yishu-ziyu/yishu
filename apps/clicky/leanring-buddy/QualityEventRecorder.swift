@@ -27,10 +27,12 @@ enum QualityEventRecorder {
         "ptt.key_down", "ptt.key_up", "asr.first_partial", "asr.final",
         "turn.start", "turn.failed", "model.first_byte", "tts.first_audio",
         "tts.stopped", "tts.clip_gap", "tts.clip_done", "presence.cue",
+        "handsfree.enabled", "handsfree.disabled",
+        "duplex.speech_onset", "duplex.end_of_speech", "duplex.final_accepted",
         "model.completed", "context.resolved",
         "runtime.turn_received", "recall.done", "model.request_sent", "prompt.built",
         "app.ready", "app.launched", "asr.provider", "asr.completed",
-        "asr.request_sent", "asr.first_sse", "asr.session",
+        "asr.request_sent", "asr.first_sse", "asr.session", "asr.terminal",
         "permission.granted", "onboarding.started",
         "onboarding.first_verified_action", "onboarding.step_completed",
         "context.capture_completed", "tts.requested",
@@ -46,7 +48,7 @@ enum QualityEventRecorder {
         "committed", "durationMs", "retryCount", "spanKind", "memoryIdHash",
         "reason", "sourceDimensionsAvailable", "method", "code", "receiptHash", "scopeHash",
         "turnId", "sinceKeyUpMs", "audioMs", "gapMs", "playedMs", "recallSource", "imageCount", "imageBytes",
-        "reused", "proxyUsed", "connectMs",
+        "reused", "proxyUsed", "connectMs", "outcome",
     ]
 
     private static let forbidden = try! NSRegularExpression(

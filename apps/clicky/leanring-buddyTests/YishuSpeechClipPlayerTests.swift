@@ -117,3 +117,32 @@ struct YishuSpeechClipGateTests {
         #expect(gate.isComplete)
     }
 }
+
+struct YishuAudiblePlaybackHookTests {
+    @Test func stopWithoutPlayDoesNotClaimAudiblePlayback() {
+        let player = YishuSpeechClipPlayer()
+        var changes: [Bool] = []
+        player.hooks.onAudiblePlaybackChange = { changes.append($0) }
+        player.stop()
+        #expect(changes.isEmpty)
+        #expect(!player.isPlaying)
+    }
+}
+
+struct YishuAudiblePlaybackPolicyTests {
+    @Test func requestNetworkAndDecodePendingDoNotMarkAssistantAudioActive() {
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .requestStarted))
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .networkPending))
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .decodePending))
+    }
+
+    @Test func firstScheduledPlaybackMarksAssistantAudioActive() {
+        #expect(YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .firstScheduledPlayback))
+    }
+
+    @Test func stopCompletionAndFailureReturnInactive() {
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .stopped))
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .completed))
+        #expect(!YishuAudiblePlaybackPolicy.isAssistantAudioActive(after: .failed))
+    }
+}

@@ -2,7 +2,40 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
-## 当前状态（2026-09-06，PR #34 再审：回执必须在删 store 前写）
+## 当前状态（2026-09-07 收口，PR #36 NOT_READY，PR #37 FINAL PASS，均不合并）
+
+- 今晚停。不继续诊断、不改产品代码、不开新 issue。
+- **#36** `feat/issue-35-duplex-voice`。真机冷启动：偏好开、界面「正在听，直接说」、用户开口无「开始说话」信号。第一断点已证明：采集引擎启动后约 35 ms 被系统音频配置变更停掉，程序不重开、界面仍说在听。卡 `docs/evals/20260906-pr36-asr-terminal-outcome.md`。
+- **#36 明天**：只修这一断点（配置变更后重开采集；引擎没在跑就不要显示正在听）。不调 ASR / 阈值 / TTS，不进插话。
+- **#37** `feat/lifecycle-integrity` @ `38e77de`，机器/审 FINAL PASS，等用户明确说合并。
+- 本地不入库：`.statamcp/debug/traces.jsonl`；真机 `quality.jsonl` / `proxy-asr.jsonl`；`/tmp/yishu-duplex-*`。
+- Stage A：一次打开「连续聆听」后面板为「正在听，直接说」；`handsfree.enabled` 1；偏好在 armed 后为 1。
+- Stage B 阻塞：验收窗 `quality.jsonl` 自 line 1372 起 `duplex.speech_onset` 多次、`asr.request_sent` interim+final 都有、voice proxy `/audio/asr/sse` 有 body；但 `asr.first_partial` 0、`asr.final` 0、`duplex.final_accepted` 0、`turn.start` 0、`tts.first_audio` 0。runtime-timing 行数未增。无 `ptt.key_down`。`ptt.key_up` 来自连续听收尾复用，不是 Control+Option。
+- Stage C–G 未做（没有可打断的 TTS）。裁决 `NOT_READY`。证据只在 `/tmp/yishu-duplex-acceptance-20260906-185505/`，不入库。
+- 待用户：四项人评（第一字 / 切句 / 停太久 / 其他怪异）以及奕枢有没有真正开口回答。
+
+## 上一状态（2026-09-06，PR #36 再审：生产音频地板永久门）
+
+- 卡 `docs/evals/20260906-pr36-audio-floor-gate.md`。分支 `feat/issue-35-duplex-voice`。更新 PR #36，不开新 PR，不合并。未装真机。不开始 StepAudio Realtime。
+- Path A / PCM pre-roll / VoiceSession off-starting-armed-failed / 可听播放门 / 连续听 PTT 文案 均保持。
+- 开口抢地板改为生产缝 `YishuDuplexAudioFloor.takeFloorOnSpeechOnset`：同步停句管道与 MiniMax 播放；只观察前台 Runtime；不 cancel/settle/supersede。`speech_onset_runtime_cancellations` 来自该缝的记录计数，不是常量。永久 xcodebuild 一次跑 fitness + VoiceSession 诚实 + pre-roll + 可听播放 + 地板缝。双工夹具 `evals/voice/fixtures/duplex-interrupt.sample.jsonl`。
+- 机器：`node script/check-hands-free-voice-contract.cjs` 全 0 + 采麦 1；变异夹具不能全 0；#29 0/0；#31 0/1；#33 0/0/1；kernel 236；runtime 526；dep 0；协议无 diff。CompanionManager 4493/4609。`product:check` 越过本门，停在预存 collector 880/856。真机未装。
+
+## 上一状态（2026-09-06，PR #36 再审：开口前缀 / 可执行健身 / 听写状态 / 可听播放）
+
+- 卡 `docs/evals/20260906-pr36-duplex-correctness.md`（原 #35 卡仍在）。分支 `feat/issue-35-duplex-voice`。更新 PR #36，不开新 PR，不合并。未装真机。
+- Path A 不变。StepAudio Realtime 仍不接。
+- 连续采麦用有界 PCM pre-roll（2.5 s / 1 MB），ASR 会话就绪后按序回放恰好一次。`YishuVoiceSessionController` 拥有 starting/armed/failed/off；偏好只在 armed 后持久化。「正在听」只在实际 armed。回声门跟 clip player 真实可听播放走。健身检查器跑 `YishuHandsFreeFitnessHarness` 行为报告。真机命令 `node evals/voice/check-latency.mjs --metric duplex-interrupt`，本轮不宣称真机通过。
+- 机器：hands-free checker 全 0 + 采麦 1，反作弊夹具不能全 0；Swift 矩阵/pre-roll/fitness/会话/barge-in/前台执行 TEST SUCCEEDED；#29 0/0；#31 0/1；#33 0/0/1；协议无 diff。CompanionManager 4479/4609。collector 880/856 预存红线未动。真机未装。
+
+## 上一状态（2026-09-06，Issue #35 Duplex Voice 1A，待 PR 审）
+
+- 卡 `docs/evals/20260906-issue-35-duplex-voice.md`。分支 `feat/issue-35-duplex-voice`（从 `9f84fff`）。只做 #35。未装真机。
+- 供应商选 Path A。StepAudio Realtime 否决：自动推理、exp4 工具交接 0 次、打断 945–9550 ms；接成 Main 会扩成 #31。
+- 连续聆听默认关。`YishuVoiceSessionController` 拥有开关与一句 generation；本地能量切句；开口只停 TTS。MiniMax TTS 未换。
+- 机器：checker 全 0 + 采麦 1；kernel 236/236；runtime 526/526；#29 0/0；#31 0/1；#33 0/0/1；协议无 diff。Swift 矩阵 A–H 与既有会话/barge-in/前台执行 TEST SUCCEEDED。CompanionManager 4476/4609。collector 880/856 预存红线未动。
+
+## 上一状态（2026-09-06，PR #34 再审：回执必须在删 store 前写）
 
 - 卡仍是 `docs/evals/20260906-issue-33-memory-forget-correctness.md`。只修 #33 / PR #34，不开始全双工。
 - 审阅点：完成回执写在 `store.forgetMemory` 之后。写入失败时 store 已删、无回执，重试 `missing_provenance`，无法收敛。

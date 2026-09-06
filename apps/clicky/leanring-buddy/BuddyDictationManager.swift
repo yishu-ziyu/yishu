@@ -205,6 +205,7 @@ enum BuddyDictationPermissionProblem {
 private enum BuddyDictationStartSource {
     case microphoneButton
     case keyboardShortcut
+    case continuousListening
 }
 
 private struct BuddyDictationDraftCallbacks {
@@ -222,6 +223,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     @Published private(set) var isRecordingFromMicrophoneButton = false
     @Published private(set) var isRecordingFromKeyboardShortcut = false
     @Published private(set) var isKeyboardShortcutSessionActiveOrFinalizing = false
+    @Published private(set) var isContinuousCaptureActive = false
+    @Published private(set) var isRecordingFromContinuousListening = false
     @Published private(set) var isFinalizingTranscript = false
     @Published private(set) var isPreparingToRecord = false
     @Published private(set) var currentAudioPowerLevel: CGFloat = 0
@@ -234,12 +237,20 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     @Published var lastErrorMessage: String?
     @Published private(set) var currentPermissionProblem: BuddyDictationPermissionProblem?
 
+    var lastContinuousStartError: String? { lastErrorMessage }
+
     var isDictationInProgress: Bool {
-        isPreparingToRecord || isRecordingFromMicrophoneButton || isRecordingFromKeyboardShortcut || isFinalizingTranscript
+        isPreparingToRecord
+            || isRecordingFromMicrophoneButton
+            || isRecordingFromKeyboardShortcut
+            || isFinalizingTranscript
+            || isContinuousCaptureActive
     }
 
     var isActivelyRecordingAudio: Bool {
-        isRecordingFromMicrophoneButton || isRecordingFromKeyboardShortcut
+        isRecordingFromMicrophoneButton
+            || isRecordingFromKeyboardShortcut
+            || isRecordingFromContinuousListening
     }
 
     var isMicrophoneButtonActivelyRecordingAudio: Bool {
@@ -257,6 +268,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     private let transcriptionProvider: any BuddyTranscriptionProvider
     private let audioEngine = AVAudioEngine()
+    private let continuousPreRoll = YishuContinuousCapturePreRoll()
+    private var continuousTapUsesPreRoll = false
     private var activeTranscriptionSession: (any BuddyStreamingTranscriptionSession)?
     private var activeTranscriptionToken: BuddyTranscriptionSessionToken?
     private var nextTranscriptionTokenValue: UInt64 = 0
@@ -274,6 +287,11 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     /// Timestamp of the last completed permission request, used to debounce
     /// rapid follow-up requests that arrive before macOS updates its cache.
     private var lastPermissionRequestCompletedAt: Date?
+    private var continuousPartialHandler: ((String) -> Void)?
+    private var continuousFinalHandler: ((String, YishuAsrTerminalKind) -> Void)?
+    private var pendingTerminalKind: YishuAsrTerminalKind = .success
+    private var continuousPowerHandler: ((CGFloat) -> Void)?
+    private var voiceProcessingEnabled = false
 
     /// Product submit text for a finished dictation turn.
     /// Non-empty transcript is accepted only when the capture had audible power
@@ -292,8 +310,11 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         return (!trimmed.isEmpty && hadAudibleSignal) ? trimmed : ""
     }
 
-    override init() {
-        let transcriptionProvider = BuddyTranscriptionProviderFactory.makeDefaultProvider()
+    override convenience init() {
+        self.init(transcriptionProvider: BuddyTranscriptionProviderFactory.makeDefaultProvider())
+    }
+
+    init(transcriptionProvider: any BuddyTranscriptionProvider) {
         self.transcriptionProvider = transcriptionProvider
         self.transcriptionProviderDisplayName = transcriptionProvider.displayName
         super.init()
@@ -354,6 +375,161 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         stopPushToTalk(expectedStartSource: .keyboardShortcut)
     }
 
+    func startContinuousCapture(
+        onPartial: @escaping (String) -> Void,
+        onFinal: @escaping (String, YishuAsrTerminalKind) -> Void,
+        onPower: @escaping (CGFloat) -> Void
+    ) async -> Bool {
+        guard !isContinuousCaptureActive else { return true }
+        guard !isRecordingFromKeyboardShortcut,
+              !isRecordingFromMicrophoneButton else {
+            lastErrorMessage = "couldn't start voice input. try again."
+            return false
+        }
+
+        lastErrorMessage = nil
+        currentPermissionProblem = nil
+        isPreparingToRecord = true
+        continuousPartialHandler = onPartial
+        continuousFinalHandler = onFinal
+        continuousPowerHandler = onPower
+
+        let startRequestIdentifier = UUID()
+        pendingStartRequestIdentifier = startRequestIdentifier
+
+        guard await requestDictationPermissionsWithoutDuplicatePrompts() else {
+            isPreparingToRecord = false
+            continuousPartialHandler = nil
+            continuousFinalHandler = nil
+            continuousPowerHandler = nil
+            return false
+        }
+        guard !Task.isCancelled,
+              pendingStartRequestIdentifier == startRequestIdentifier else {
+            isPreparingToRecord = false
+            lastErrorMessage = "couldn't start voice input. try again."
+            return false
+        }
+
+        activeStartSource = .continuousListening
+        shouldAutomaticallySubmitFinalDraft = true
+        hasFinishedCurrentDictationSession = true
+        isFinalizingTranscript = false
+        isRecordingFromContinuousListening = false
+        currentAudioPowerLevel = 0
+        recordedAudioPowerHistory = Array(
+            repeating: Self.recordedAudioPowerHistoryBaselineLevel,
+            count: Self.recordedAudioPowerHistoryLength
+        )
+        lastRecordedAudioPowerSampleDate = .distantPast
+        draftCallbacks = BuddyDictationDraftCallbacks(
+            updateDraftText: { onPartial($0) },
+            submitDraftText: { [weak self] text in
+                guard let self else { return }
+                onFinal(text, self.pendingTerminalKind)
+            }
+        )
+
+        do {
+            try startAudioEngineForContinuousCapture()
+            isContinuousCaptureActive = audioEngine.isRunning
+            isPreparingToRecord = false
+            guard isContinuousCaptureActive else {
+                lastErrorMessage = "couldn't start voice input. try again."
+                continuousPreRoll.clear()
+                resetSessionState()
+                return false
+            }
+            return true
+        } catch {
+            isPreparingToRecord = false
+            lastErrorMessage = userFacingErrorMessage(
+                from: error,
+                fallback: "couldn't start voice input. try again."
+            )
+            continuousPreRoll.clear()
+            resetSessionState()
+            return false
+        }
+    }
+
+    func beginContinuousUtterance() async {
+        guard isContinuousCaptureActive else { return }
+        guard activeStartSource == .continuousListening else { return }
+
+        finalizeFallbackWorkItem?.cancel()
+        finalizeFallbackWorkItem = nil
+        hasFinishedCurrentDictationSession = false
+        isFinalizingTranscript = false
+        isRecordingFromContinuousListening = true
+        latestRecognizedText = ""
+        pendingTerminalKind = .success
+        recordedAudioPowerHistory = Array(
+            repeating: Self.recordedAudioPowerHistoryBaselineLevel,
+            count: Self.recordedAudioPowerHistoryLength
+        )
+
+        let transcriptionToken = startTranscriptionTurn()
+        do {
+            try await openTranscriptionSession(token: transcriptionToken)
+        } catch {
+            isRecordingFromContinuousListening = false
+            lastErrorMessage = userFacingErrorMessage(
+                from: error,
+                fallback: "couldn't transcribe that. try again."
+            )
+        }
+    }
+
+    func requestContinuousUtteranceFinal() {
+        guard isContinuousCaptureActive,
+              activeStartSource == .continuousListening else { return }
+        guard !isFinalizingTranscript else { return }
+
+        isRecordingFromContinuousListening = false
+        isFinalizingTranscript = true
+
+        let finalTranscriptFallbackDelaySeconds = activeTranscriptionSession?.finalTranscriptFallbackDelaySeconds
+            ?? Self.defaultFinalTranscriptFallbackDelaySeconds
+        let expectedToken = activeTranscriptionToken
+        activeTranscriptionSession?.requestFinalTranscript()
+
+        finalizeFallbackWorkItem?.cancel()
+        let fallbackWorkItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self,
+                      let expectedToken,
+                      self.activeTranscriptionToken == expectedToken else { return }
+                self.pendingTerminalKind = .fallback
+                self.finishCurrentDictationSessionIfNeeded(
+                    shouldSubmitFinalDraft: true,
+                    expectedToken: expectedToken
+                )
+            }
+        }
+        finalizeFallbackWorkItem = fallbackWorkItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + finalTranscriptFallbackDelaySeconds,
+            execute: fallbackWorkItem
+        )
+    }
+
+    func stopContinuousCapture() {
+        guard isContinuousCaptureActive || activeStartSource == .continuousListening else {
+            continuousPreRoll.clear()
+            return
+        }
+        pendingStartRequestIdentifier = UUID()
+        finalizeFallbackWorkItem?.cancel()
+        finalizeFallbackWorkItem = nil
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        continuousTapUsesPreRoll = false
+        continuousPreRoll.clear()
+        activeTranscriptionSession?.cancel()
+        resetSessionState()
+    }
+
     func cancelCurrentDictation(preserveDraftText: Bool = true) {
         pendingStartRequestIdentifier = UUID()
 
@@ -369,6 +545,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
+        continuousTapUsesPreRoll = false
+        continuousPreRoll.clear()
         activeTranscriptionSession?.cancel()
 
         resetSessionState()
@@ -407,6 +585,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         shouldAutomaticallySubmitFinalDraftOnStop: Bool
     ) async {
         guard !isDictationInProgress else { return }
+        guard !isContinuousCaptureActive else { return }
 
         print("🎙️ BuddyDictationManager: start requested (\(startSource))")
 
@@ -547,12 +726,22 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     }
 
     private func startRecognitionSession(token: BuddyTranscriptionSessionToken) async throws {
+        try await openTranscriptionSession(token: token)
+        print("🎙️ BuddyDictationManager: provider ready, starting audio engine")
+        try startAudioEngine(appendingTo: activeTranscriptionSession, token: token)
+    }
+
+    private func startAudioEngineForContinuousCapture() throws {
+        try startAudioEngine(appendingTo: nil, token: nil)
+    }
+
+    private func openTranscriptionSession(token: BuddyTranscriptionSessionToken) async throws {
         activeTranscriptionSession?.cancel()
         activeTranscriptionSession = nil
 
         print("🎙️ BuddyDictationManager: opening transcription provider \(transcriptionProvider.displayName)")
 
-        let activeTranscriptionSession = try await transcriptionProvider.startStreamingSession(
+        let session = try await transcriptionProvider.startStreamingSession(
             keyterms: buildTranscriptionKeyterms(),
             onTranscriptUpdate: { [weak self] transcriptText in
                 Task { @MainActor in
@@ -566,6 +755,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 Task { @MainActor in
                     guard let self, self.activeTranscriptionToken == token else { return }
                     self.latestRecognizedText = transcriptText
+                    let trimmed = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if self.pendingTerminalKind != .fallback {
+                        self.pendingTerminalKind = trimmed.isEmpty ? .empty : .success
+                    }
 
                     if self.isFinalizingTranscript {
                         self.finishCurrentDictationSessionIfNeeded(
@@ -583,26 +776,53 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             }
         )
 
-        self.activeTranscriptionSession = activeTranscriptionSession
-        print("🎙️ BuddyDictationManager: provider ready, starting audio engine")
+        self.activeTranscriptionSession = session
+        if isContinuousCaptureActive {
+            continuousPreRoll.attachAndReplay(session)
+        }
+    }
 
+    private func startAudioEngine(
+        appendingTo session: (any BuddyStreamingTranscriptionSession)?,
+        token: BuddyTranscriptionSessionToken?
+    ) throws {
+        enableVoiceProcessingIfPossible()
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
+        let routeThroughPreRoll = session == nil && token == nil
+            && activeStartSource == .continuousListening
+        continuousTapUsesPreRoll = routeThroughPreRoll
 
         inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self, weak activeTranscriptionSession] buffer, _ in
-            // Preserve render-callback order through the provider's own
-            // serial queue. Deferring audio itself to MainActor lets release
-            // request a final transcript before the last queued buffer lands.
-            activeTranscriptionSession?.appendAudioBuffer(buffer)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self, weak session] buffer, _ in
+            if routeThroughPreRoll {
+                self?.continuousPreRoll.noteCaptured(buffer)
+            } else {
+                session?.appendAudioBuffer(buffer)
+            }
             Task { @MainActor [weak self] in
-                guard let self, self.activeTranscriptionToken == token else { return }
+                guard let self else { return }
+                if let token {
+                    guard self.activeTranscriptionToken == token else { return }
+                }
                 self.updateAudioPowerLevel(from: buffer)
             }
         }
 
-        audioEngine.prepare()
-        try audioEngine.start()
+        if !audioEngine.isRunning {
+            audioEngine.prepare()
+            try audioEngine.start()
+        }
+    }
+
+    private func enableVoiceProcessingIfPossible() {
+        guard !voiceProcessingEnabled else { return }
+        do {
+            try audioEngine.inputNode.setVoiceProcessingEnabled(true)
+            voiceProcessingEnabled = true
+        } catch {
+            print("🎙️ BuddyDictationManager: voice processing unavailable (\(error))")
+        }
     }
 
     private func handleRecognitionError(
@@ -614,19 +834,21 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             return
         }
 
-        if isFinalizingTranscript && !latestRecognizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        pendingTerminalKind = (error as? YishuAsrSessionError)?.kind ?? .transport
+        if isFinalizingTranscript {
+            latestRecognizedText = ""
             finishCurrentDictationSessionIfNeeded(
                 shouldSubmitFinalDraft: shouldAutomaticallySubmitFinalDraft,
                 expectedToken: token
             )
-        } else {
-            print("❌ Buddy dictation error (\(transcriptionProvider.displayName)): \(error)")
-            lastErrorMessage = userFacingErrorMessage(
-                from: error,
-                fallback: "couldn't transcribe that. try again."
-            )
-            cancelCurrentDictation(preserveDraftText: false)
+            return
         }
+        print("❌ Buddy dictation error (\(transcriptionProvider.displayName)): \(error)")
+        lastErrorMessage = userFacingErrorMessage(
+            from: error,
+            fallback: "couldn't transcribe that. try again."
+        )
+        cancelCurrentDictation(preserveDraftText: false)
     }
 
     private func finishCurrentDictationSessionIfNeeded(
@@ -652,9 +874,22 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             currentDraftCallbacks?.updateDraftText(finalDraftText)
         }
 
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        let keepEngineRunning = isContinuousCaptureActive
+            && activeStartSource == .continuousListening
         activeTranscriptionSession?.cancel()
+        activeTranscriptionSession = nil
+        activeTranscriptionToken = nil
+        isFinalizingTranscript = false
+        isRecordingFromContinuousListening = false
+
+        if !keepEngineRunning {
+            audioEngine.stop()
+            audioEngine.inputNode.removeTap(onBus: 0)
+            continuousTapUsesPreRoll = false
+            continuousPreRoll.clear()
+        } else {
+            continuousPreRoll.detach()
+        }
 
         // Capture power history BEFORE resetSessionState clears it. Computing
         // hadAudibleSignal after reset always yields false and forces every
@@ -664,7 +899,16 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             recordedAudioPowerHistory: recordedAudioPowerHistory
         )
 
-        resetSessionState()
+        if keepEngineRunning {
+            latestRecognizedText = ""
+            hasFinishedCurrentDictationSession = true
+            recordedAudioPowerHistory = Array(
+                repeating: Self.recordedAudioPowerHistoryBaselineLevel,
+                count: Self.recordedAudioPowerHistoryLength
+            )
+        } else {
+            resetSessionState()
+        }
 
         guard shouldSubmitFinalDraft else { return }
         // Empty final transcript (or near-silence capture) still notifies the
@@ -709,8 +953,13 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         isRecordingFromMicrophoneButton = false
         isRecordingFromKeyboardShortcut = false
         isKeyboardShortcutSessionActiveOrFinalizing = false
+        isContinuousCaptureActive = false
+        isRecordingFromContinuousListening = false
         isFinalizingTranscript = false
         currentAudioPowerLevel = 0
+        continuousPartialHandler = nil
+        continuousFinalHandler = nil
+        continuousPowerHandler = nil
         recordedAudioPowerHistory = Array(
             repeating: Self.recordedAudioPowerHistoryBaselineLevel,
             count: Self.recordedAudioPowerHistoryLength
@@ -783,6 +1032,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 self.currentAudioPowerLevel * 0.72
             )
             self.currentAudioPowerLevel = smoothedAudioPowerLevel
+            self.continuousPowerHandler?(smoothedAudioPowerLevel)
 
             let now = Date()
             if now.timeIntervalSince(self.lastRecordedAudioPowerSampleDate)
