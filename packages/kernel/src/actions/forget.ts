@@ -17,8 +17,10 @@ const forgetInputSchema = z.object({
 export type ForgetInput = z.infer<typeof forgetInputSchema>;
 
 /**
- * User-confirmed forget. Mutation ordering, retries, and verification live
- * in forgetMemoryClaim — the same boundary MemoryLedger uses.
+ * User-confirmed forget. Target resolution, missing-id / alreadyGone
+ * semantics, retries, and verification live in forgetMemoryClaim — the
+ * same boundary MemoryLedger uses. This action never treats a missing
+ * store row as success on its own.
  */
 export function createForgetAction(
   store: YishuStorePort,
@@ -40,20 +42,8 @@ export function createForgetAction(
     context: "none",
     run: async (ctx) => {
       throwIfAborted(ctx.signal);
-      const existing = store.getSnapshot().memories.find(
-        (row) => row.id === ctx.input.memoryId,
-      );
-      if (existing === undefined) {
-        return {
-          id: ctx.input.memoryId,
-          forgotten: true as const,
-          alreadyGone: true,
-          scope: "",
-        };
-      }
       const outcome = await forgetMemoryClaim(ports, {
         id: ctx.input.memoryId,
-        expectedScope: existing.scope,
         ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
       });
       if (outcome === null) {

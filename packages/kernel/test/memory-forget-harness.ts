@@ -77,31 +77,93 @@ function wrapMethod<T extends object, K extends keyof T>(
   };
 }
 
-function countMutationPaths(): { count: number; paths: string[] } {
-  const files: Array<{ label: string; rel: string }> = [
-    { label: "createForgetAction", rel: "packages/kernel/src/actions/forget.ts" },
-    { label: "MemoryLedger.forget", rel: "packages/kernel/src/memory/ledger.ts" },
-    { label: "forgetMemoryClaim", rel: "packages/kernel/src/memory/forget.ts" },
-  ];
+export interface ForgetOwnershipSource {
+  readonly label: string;
+  readonly role: "owner" | "entry";
+  readonly source: string;
+}
+
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+function extractNamedMethod(source: string, name: string): string | undefined {
+  const start = source.search(new RegExp(`async(?:\\s+function)?\\s+${name}\\s*\\(`));
+  if (start < 0) return undefined;
+  const brace = source.indexOf("{", start);
+  if (brace < 0) return undefined;
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Analyze the forget entry surface, not unrelated methods in a god-file.
+ * Kernel action/ledger files have no forgetMemory method, so the whole
+ * file is the surface. Runtime's handler is the forgetMemory method.
+ */
+export function forgetEntrySurface(source: string): string {
+  const stripped = stripComments(source);
+  return extractNamedMethod(stripped, "forgetMemory") ?? stripped;
+}
+
+function delegatesToForgetOwner(stripped: string): boolean {
+  return /forgetMemoryClaim\s*\(/.test(stripped)
+    || /kernel\.memories\.forget\s*\(/.test(stripped);
+}
+
+/**
+ * An entry independently owns forget success/idempotency when it decides
+ * forgotten / alreadyGone / verified completion itself, instead of only
+ * forwarding the unified owner's result.
+ */
+export function entryIndependentlyOwnsForgetSuccess(source: string): boolean {
+  const stripped = forgetEntrySurface(source);
+  const mutatesStore = /\.(retireMemory|forgetMemory)\s*\(/.test(stripped);
+  const mutatesAuthority = /\.(removeFactsMatching|removeFact)\s*\(/.test(stripped);
+  if (mutatesStore && mutatesAuthority) return true;
+  if (/\balreadyGone\s*:\s*(?:true|false)\b/.test(stripped)) return true;
+  if (/\bforgotten\s*:\s*true(?:\s+as\s+const)?\b/.test(stripped)) return true;
+  if (/\bverified\s*:\s*true\b/.test(stripped)) return true;
+  if (mutatesStore && !delegatesToForgetOwner(stripped)) return true;
+
+  const looksUpRow = /getSnapshot\(\)\s*\.memories/.test(stripped)
+    || /\.getById\s*\(/.test(stripped);
+  const treatsAbsence = /===\s*undefined/.test(stripped)
+    || /==\s*null/.test(stripped);
+  const successWord = /\balreadyGone\b/.test(stripped)
+    || /\bforgotten\b/.test(stripped)
+    || /memory\.forgotten/.test(stripped)
+    || /\bverified\s*:/.test(stripped);
+  if (looksUpRow && treatsAbsence && successWord) return true;
+  return false;
+}
+
+export function analyzeForgetMutationPaths(
+  sources: readonly ForgetOwnershipSource[],
+): { count: number; paths: string[] } {
   const independent: string[] = [];
   let coordinator = false;
-  for (const file of files) {
-    let source: string;
-    try {
-      source = readFileSync(path.join(ROOT, file.rel), "utf8");
-    } catch {
-      continue;
-    }
-    const stripped = source
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/(^|[^:])\/\/.*$/gm, "$1");
+  for (const file of sources) {
+    const stripped = stripComments(file.source);
     const mutatesStore = /\.(retireMemory|forgetMemory)\s*\(/.test(stripped);
     const mutatesAuthority = /\.(removeFactsMatching|removeFact)\s*\(/.test(stripped);
-    if (file.label === "forgetMemoryClaim") {
+    if (file.role === "owner") {
       coordinator = mutatesStore && mutatesAuthority;
       continue;
     }
-    if (mutatesStore && mutatesAuthority) independent.push(file.label);
+    if (entryIndependentlyOwnsForgetSuccess(file.source)) {
+      independent.push(file.label);
+    }
   }
   if (coordinator && independent.length === 0) {
     return { count: 1, paths: ["forgetMemoryClaim"] };
@@ -110,6 +172,38 @@ function countMutationPaths(): { count: number; paths: string[] } {
     count: independent.length + (coordinator ? 1 : 0),
     paths: coordinator ? [...independent, "forgetMemoryClaim"] : independent,
   };
+}
+
+const PRODUCTION_FORGET_FILES: readonly ForgetOwnershipSource[] = [
+  { label: "createForgetAction", role: "entry", source: "" },
+  { label: "MemoryLedger.forget", role: "entry", source: "" },
+  { label: "MemoryForgetCommand", role: "entry", source: "" },
+  { label: "forgetMemoryClaim", role: "owner", source: "" },
+];
+
+const PRODUCTION_FORGET_PATHS: Record<string, string> = {
+  createForgetAction: "packages/kernel/src/actions/forget.ts",
+  "MemoryLedger.forget": "packages/kernel/src/memory/ledger.ts",
+  MemoryForgetCommand: "packages/runtime/src/product-kernel-runtime.ts",
+  forgetMemoryClaim: "packages/kernel/src/memory/forget.ts",
+};
+
+export function loadProductionForgetSources(): ForgetOwnershipSource[] {
+  return PRODUCTION_FORGET_FILES.map((file) => {
+    const rel = PRODUCTION_FORGET_PATHS[file.label];
+    if (rel === undefined) return file;
+    let source = "";
+    try {
+      source = readFileSync(path.join(ROOT, rel), "utf8");
+    } catch {
+      source = "";
+    }
+    return { label: file.label, role: file.role, source };
+  });
+}
+
+function countMutationPaths(): { count: number; paths: string[] } {
+  return analyzeForgetMutationPaths(loadProductionForgetSources());
 }
 
 async function actionVisibleFalsePositive(): Promise<string | undefined> {
@@ -186,6 +280,50 @@ async function actionTruthFalsePositive(): Promise<string | undefined> {
   });
 }
 
+async function legacyStoreGoneVisibleResidueFalsePositive(): Promise<string | undefined> {
+  return withDir("yishu-forget-fp-legacy-store-gone-", async (dir) => {
+    const kernel = createYishuKernel({ storeBackend: "memory", memoryDir: dir });
+    const remembered = await rememberPersonal(kernel, CLAIM);
+    const other = await rememberPersonal(kernel, OTHER);
+    await kernel.store.forgetMemory(remembered.id, { expectedScope: "personal" });
+    const visible = kernel.memory!.visible;
+    if (!visibleHas(await visible.readText(), CLAIM)) {
+      return "legacy fixture lost visible residue before forget";
+    }
+
+    const viaAction = await kernel.registry.invoke("forget", {
+      caller: "ui",
+      input: { memoryId: remembered.id },
+    });
+    const viaLedger = await kernel.memories.forget({
+      id: remembered.id,
+      expectedScope: "personal",
+    }).then((result) => result, (error: unknown) => error);
+
+    const text = await visible.readText();
+    const residue = visibleHas(text, CLAIM);
+    const otherKept = visibleHas(text, OTHER);
+    const actionSucceeded = viaAction.status === "verified" || viaAction.status === "ok";
+    const ledgerSucceeded = viaLedger !== null
+      && !(viaLedger instanceof Error)
+      && (viaLedger as { forgotten?: boolean; alreadyGone?: boolean }).forgotten === true;
+
+    if (actionSucceeded) {
+      return "action forget succeeded from missing store row without completed-forget proof";
+    }
+    if (ledgerSucceeded) {
+      return "ledger forget succeeded from missing store row without completed-forget proof";
+    }
+    if (!residue) {
+      return "legacy visible residue was removed without completed-forget proof";
+    }
+    if (!otherKept) {
+      return "unrelated visible fact was removed during legacy missing-store forget";
+    }
+    return undefined;
+  });
+}
+
 async function ledgerVisibleNonConvergence(): Promise<string | undefined> {
   return withDir("yishu-forget-retry-visible-", async (dir) => {
     const kernel = createYishuKernel({ storeBackend: "memory", memoryDir: dir });
@@ -228,6 +366,7 @@ export async function measureMemoryForgetFitness(): Promise<MemoryForgetFitnessR
   const falsePositives = [
     await actionVisibleFalsePositive(),
     await actionTruthFalsePositive(),
+    await legacyStoreGoneVisibleResidueFalsePositive(),
   ].filter((item): item is string => item !== undefined);
   const nonConvergent = [
     await ledgerVisibleNonConvergence(),

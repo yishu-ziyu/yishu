@@ -109,6 +109,11 @@ describe("product actions via createYishuKernel", () => {
       input: { memoryId: id },
     });
     assert.equal(forgot.status, "verified");
+    const again = await registry.invoke("forget", {
+      caller: "ui",
+      input: { memoryId: id },
+    });
+    assert.equal(again.status, "verified");
   });
 
   it("does not delete a memory when its store mutation is cancelled", async () => {
