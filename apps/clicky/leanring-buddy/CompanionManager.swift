@@ -2,9 +2,10 @@
 //  CompanionManager.swift
 //  leanring-buddy
 //
-//  Central state manager for the companion voice mode. Owns the push-to-talk
-//  pipeline (dictation manager + global shortcut monitor + overlay) and
-//  exposes observable voice state for the panel UI.
+//  Central state manager for the companion voice mode. Keyboard PTT/dictation
+//  session lifecycle is owned by YishuVoiceSessionController; this type
+//  consumes those events and keeps runtime, presentation, barge-in, and
+//  held-scene/prewarm behavior.
 //
 
 import AVFoundation
@@ -45,11 +46,6 @@ enum YishuAgentRuntimeAvailability: Equatable {
     case starting
     case ready
     case stopped
-}
-
-struct VoiceTurnOrigin {
-    let traceID: String
-    let releaseAt: UInt64?
 }
 
 private struct YishuRuntimeVoiceResponse {
@@ -264,8 +260,17 @@ final class CompanionManager: ObservableObject {
     private var onboardingMusicPlayer: AVAudioPlayer?
     private var onboardingMusicFadeTimer: Timer?
 
-    let buddyDictationManager = BuddyDictationManager()
-    let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
+    private lazy var voiceSession: YishuVoiceSessionController = {
+        YishuVoiceSessionController(
+            shouldBegin: { [weak self] in
+                guard let self else { return false }
+                return !self.showOnboardingVideo
+            },
+            onEvent: { [weak self] event in
+                self?.handleVoiceSessionEvent(event)
+            }
+        )
+    }()
     let overlayWindowManager = OverlayWindowManager()
     let responseOverlayManager = CompanionResponseOverlayManager()
     var responseOverlayViewModel: CompanionResponseOverlayViewModel {
@@ -365,18 +370,9 @@ final class CompanionManager: ObservableObject {
     private var heldSceneCache: HeldSceneCache?
     private var partialTranscriptCount = 0
     private var firstPartialTranscriptAt: UInt64?
-    /// Origin for the next keyboard PTT transcript. The trace ID is created
-    /// on press; the monotonic release timestamp is filled on release and the
-    /// origin is consumed exactly once when final ASR text is submitted.
-    private var pendingVoiceTurnOrigin: VoiceTurnOrigin?
-
-    private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var delegatedPresenceCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
-    private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
-    /// True while Control+Option (or configured PTT) is physically held.
-    private var isPushToTalkKeyHeld = false
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
@@ -419,7 +415,7 @@ final class CompanionManager: ObservableObject {
         }
         let occupied = voiceState != .idle
             || yishuAgentRuntimeClient.hasActiveTurn
-            || isPushToTalkKeyHeld
+            || voiceSession.isKeyHeld
         agentPresenceWindowManager.setForegroundOccupied(occupied)
     }
 
@@ -781,7 +777,7 @@ final class CompanionManager: ObservableObject {
         print("🔑 奕枢 start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), intro: \(hasSeenIntro), activated: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
-        bindShortcutTransitions()
+        voiceSession.start()
         bindVoiceProxyAvailability()
         bindDelegatedPresenceObservation()
         yishuPointerTrailMonitor.start()
@@ -1134,7 +1130,7 @@ final class CompanionManager: ObservableObject {
                 || currentResponseTask != nil
                 || activeRuntimeRequestId != nil
                 || yishuAgentRuntimeClient.hasActiveTurn
-                || isPushToTalkKeyHeld
+                || voiceSession.isKeyHeld
                 || elevenLabsTTSClient.isPlaying
             let secondsSinceLastUserInput = CGEventSource.secondsSinceLastEventType(
                 .hidSystemState,
@@ -1234,7 +1230,7 @@ final class CompanionManager: ObservableObject {
                 || currentResponseTask != nil
                 || activeRuntimeRequestId != nil
                 || yishuAgentRuntimeClient.hasActiveTurn
-                || isPushToTalkKeyHeld
+                || voiceSession.isKeyHeld
                 || elevenLabsTTSClient.isPlaying
             // quietInterval is 0: HID idle is not a gate. Do not sample it.
             if YishuDelegatedTaskReturnState.canPresent(
@@ -1314,7 +1310,6 @@ final class CompanionManager: ObservableObject {
             }
         case "listening":
             responseOverlayManager.hideOverlay()
-            isPushToTalkKeyHeld = true
             voiceState = .listening
         default:
             break
@@ -1415,8 +1410,7 @@ final class CompanionManager: ObservableObject {
     }
 
     func stop() {
-        globalPushToTalkShortcutMonitor.stop()
-        buddyDictationManager.cancelCurrentDictation()
+        voiceSession.stop()
         directClickPrewarmTask?.cancel()
         directClickPrewarmTask = nil
         directClickPrewarmCache = nil
@@ -1436,7 +1430,6 @@ final class CompanionManager: ObservableObject {
         timeReminderReturnProcessingTask = nil
         timeReminderReturnState.clearPending()
 
-        pendingVoiceTurnOrigin = nil
         currentResponseTask?.cancel()
         currentResponseTask = nil
         cancelActiveRuntimeTurn(reason: "application-stopping")
@@ -1454,7 +1447,6 @@ final class CompanionManager: ObservableObject {
         speechSpeedPreviewTask?.cancel()
         speechSpeedPreviewTask = nil
         elevenLabsTTSClient.stopPlayback()
-        shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
@@ -1469,11 +1461,7 @@ final class CompanionManager: ObservableObject {
         let currentlyHasAccessibility = WindowPositionManager.hasAccessibilityPermission()
         hasAccessibilityPermission = currentlyHasAccessibility
 
-        if currentlyHasAccessibility {
-            globalPushToTalkShortcutMonitor.start()
-        } else {
-            globalPushToTalkShortcutMonitor.stop()
-        }
+        voiceSession.setShortcutMonitorEnabled(currentlyHasAccessibility)
 
         hasScreenRecordingPermission = WindowPositionManager.hasScreenRecordingPermission()
 
@@ -1631,27 +1619,22 @@ final class CompanionManager: ObservableObject {
     }
 
     private func bindVoiceStateObservation() {
-        voiceStateCancellable = buddyDictationManager.$isRecordingFromKeyboardShortcut
-            .combineLatest(
-                buddyDictationManager.$isFinalizingTranscript,
-                buddyDictationManager.$isPreparingToRecord
-            )
+        voiceStateCancellable = voiceSession.$capturePhase
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] isRecording, isFinalizing, isPreparing in
+            .sink { [weak self] phase in
                 guard let self else { return }
                 // Don't override .responding — the AI response pipeline
                 // manages that state directly until streaming finishes.
                 guard self.voiceState != .responding else { return }
 
-                if isFinalizing {
+                switch phase {
+                case .finalizing:
                     self.turnVisualPhase = .finalizingSpeech
                     self.voiceState = .processing
-                } else if isRecording {
-                    self.voiceState = .listening
-                } else if isPreparing || self.isPushToTalkKeyHeld {
+                case .recording, .holding:
                     // Keep waveform from key-down through session start / hold.
                     self.voiceState = .listening
-                } else {
+                case .idle:
                     self.turnVisualPhase = .idle
                     self.voiceState = .idle
                     // If the user pressed and released the hotkey without
@@ -1667,6 +1650,148 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    private func handleVoiceSessionEvent(_ event: YishuVoiceSessionEvent) {
+        switch event {
+        case let .pressed(traceID):
+            handleVoiceSessionPressed(traceID: traceID)
+        case let .partial(traceID, text):
+            handleVoiceSessionPartial(traceID: traceID, text: text)
+        case let .released(origin):
+            handleVoiceSessionReleased(origin: origin)
+        case let .finalized(origin, transcript):
+            handleVoiceSessionFinalized(origin: origin, transcript: transcript)
+        case let .captureFailed(traceID, reason):
+            handleVoiceSessionCaptureFailed(traceID: traceID, reason: reason)
+        case .cancelled:
+            livePartialTranscript = ""
+        }
+    }
+
+    private func handleVoiceSessionPressed(traceID: String) {
+        // Key-down owns the audio channel synchronously. No async Runtime
+        // acknowledgement is allowed to delay stopping a spoken sentence.
+        ClickyAnalytics.trackPushToTalkStarted(turnId: traceID)
+        cancelActiveSentenceSpeechPipeline()
+        elevenLabsTTSClient.stopPlayback()
+        clearMemorySourceNotice()
+
+        // The user takes the floor immediately. Stop only the item already
+        // speaking; waiting returns stay queued for the next quiet window.
+        interruptDelegatedTaskReturnForForegroundTurn()
+
+        let preservingRuntimeTurn = beginBargeInIfEligible(
+            voiceTraceID: traceID
+        )
+        directClickPrewarmTask?.cancel()
+        directClickPrewarmTask = nil
+        directClickPrewarmCache = nil
+        directClickPrewarmTraceID = traceID
+        didAttemptDirectClickPrewarm = false
+        partialTranscriptCount = 0
+        firstPartialTranscriptAt = nil
+        Self.logVoicePhase(
+            turnID: traceID,
+            phase: "ptt_press",
+            deltaMS: 0,
+            totalMS: 0,
+            reason: "shortcut_pressed"
+        )
+
+        // Cancel any pending transient hide so the overlay stays visible
+        transientHideTask?.cancel()
+        transientHideTask = nil
+
+        // Always surface the thinking-orb for PTT feedback (waveform/spinner).
+        // Previously only restored when cursor preference was OFF — if the
+        // preference was ON but overlay never mounted (permission race,
+        // multi-space, ad-hoc re-sign), hold-to-talk had no UI at all.
+        ensureOverlayVisibleForVoiceFeedback()
+
+        // Immediate state so the waveform appears on key-down, not after
+        // the async permission/session start hop.
+        voiceState = .listening
+        livePartialTranscript = ""
+
+        // Dismiss the menu bar panel so it doesn't cover the screen
+        NotificationCenter.default.post(name: .yishuDismissPanel, object: nil)
+
+        // A pure, effect-free Runtime turn stays alive only after its old
+        // generation has been synchronously fenced. Every other path keeps
+        // the established cancel + fresh ContextFrame behavior.
+        if !preservingRuntimeTurn {
+            invalidateActiveVoiceTurn()
+            currentResponseTask?.cancel()
+            currentResponseTask = nil
+            cancelActiveRuntimeTurn(reason: "user-interrupted")
+        }
+        responseOverlayManager.hideOverlay()
+        clearDetectedElementLocation()
+
+        // Dismiss the onboarding prompt if it's showing
+        if showOnboardingPrompt {
+            withAnimation(.easeOut(duration: 0.3)) {
+                onboardingPromptOpacity = 0.0
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                self.showOnboardingPrompt = false
+                self.onboardingPromptText = ""
+            }
+        }
+
+        startHeldSceneCapture(traceID: traceID)
+    }
+
+    private func handleVoiceSessionPartial(traceID: String, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        livePartialTranscript = text
+        responseOverlayManager.updateTranscriptText(text)
+        recordShadowPartial(traceID: traceID)
+        guard voiceState == .listening else { return }
+        startDirectClickPrewarmIfEligible(text, traceID: traceID)
+    }
+
+    private func handleVoiceSessionReleased(origin: VoiceTurnOrigin) {
+        ClickyAnalytics.trackPushToTalkReleased()
+        turnVisualPhase = .finalizingSpeech
+        voiceState = .processing
+        ensureOverlayVisibleForVoiceFeedback()
+        responseOverlayManager.showPresenceCue()
+        ClickyAnalytics.trackVoiceEvent("presence.cue")
+        armBargeInTranscriptWatchdogIfNeeded()
+        Self.logVoicePhase(
+            turnID: origin.traceID,
+            phase: "ptt_release",
+            deltaMS: 0,
+            totalMS: 0,
+            reason: origin.traceID == "unknown"
+                ? "shortcut_released_unknown_origin"
+                : "shortcut_released"
+        )
+    }
+
+    private func handleVoiceSessionFinalized(
+        origin: VoiceTurnOrigin,
+        transcript: String
+    ) {
+        livePartialTranscript = ""
+        lastTranscript = transcript
+        print("🗣️ 奕枢 received transcript (\(transcript.count) characters)")
+        ClickyAnalytics.trackUserMessageSent(transcript: transcript)
+        submitVoiceTranscript(transcript: transcript, origin: origin)
+    }
+
+    private func handleVoiceSessionCaptureFailed(
+        traceID: String,
+        reason: YishuVoiceCaptureFailureReason
+    ) {
+        livePartialTranscript = ""
+        switch reason {
+        case .emptyOrNearSilence:
+            presentUnclearHearingFailure(traceID: traceID)
+        }
+    }
+
     /// Mount (or remount) the cursor overlay so waveform/spinner can show.
     private func ensureOverlayVisibleForVoiceFeedback() {
         if isOverlayVisible, overlayWindowManager.isShowingOverlay() {
@@ -1677,178 +1802,6 @@ final class CompanionManager: ObservableObject {
         overlayWindowManager.hasShownOverlayBefore = true
         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
         isOverlayVisible = true
-    }
-
-    private func bindShortcutTransitions() {
-        shortcutTransitionCancellable = globalPushToTalkShortcutMonitor
-            .shortcutTransitionPublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] transition in
-                self?.handleShortcutTransition(transition)
-            }
-    }
-
-    private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
-        switch transition {
-        case .pressed:
-            guard !buddyDictationManager.isDictationInProgress else { return }
-            // Don't register push-to-talk while the onboarding video is playing
-            guard !showOnboardingVideo else { return }
-
-            // Key-down owns the audio channel synchronously. No async Runtime
-            // acknowledgement is allowed to delay stopping a spoken sentence.
-            let voiceTurnTraceID = Self.newVoiceTurnTraceID()
-            ClickyAnalytics.trackPushToTalkStarted(turnId: voiceTurnTraceID)
-            cancelActiveSentenceSpeechPipeline()
-            elevenLabsTTSClient.stopPlayback()
-            clearMemorySourceNotice()
-
-            // The user takes the floor immediately. Stop only the item already
-            // speaking; waiting returns stay queued for the next quiet window.
-            interruptDelegatedTaskReturnForForegroundTurn()
-
-            pendingVoiceTurnOrigin = VoiceTurnOrigin(
-                traceID: voiceTurnTraceID,
-                releaseAt: nil
-            )
-            let preservingRuntimeTurn = beginBargeInIfEligible(
-                voiceTraceID: voiceTurnTraceID
-            )
-            directClickPrewarmTask?.cancel()
-            directClickPrewarmTask = nil
-            directClickPrewarmCache = nil
-            directClickPrewarmTraceID = voiceTurnTraceID
-            didAttemptDirectClickPrewarm = false
-            partialTranscriptCount = 0
-            firstPartialTranscriptAt = nil
-            Self.logVoicePhase(
-                turnID: voiceTurnTraceID,
-                phase: "ptt_press",
-                deltaMS: 0,
-                totalMS: 0,
-                reason: "shortcut_pressed"
-            )
-            isPushToTalkKeyHeld = true
-
-            // Cancel any pending transient hide so the overlay stays visible
-            transientHideTask?.cancel()
-            transientHideTask = nil
-
-            // Always surface the thinking-orb for PTT feedback (waveform/spinner).
-            // Previously only restored when cursor preference was OFF — if the
-            // preference was ON but overlay never mounted (permission race,
-            // multi-space, ad-hoc re-sign), hold-to-talk had no UI at all.
-            ensureOverlayVisibleForVoiceFeedback()
-
-            // Immediate state so the waveform appears on key-down, not after
-            // the async permission/session start hop.
-            voiceState = .listening
-            livePartialTranscript = ""
-
-            // Dismiss the menu bar panel so it doesn't cover the screen
-            NotificationCenter.default.post(name: .yishuDismissPanel, object: nil)
-
-            // A pure, effect-free Runtime turn stays alive only after its old
-            // generation has been synchronously fenced. Every other path keeps
-            // the established cancel + fresh ContextFrame behavior.
-            if !preservingRuntimeTurn {
-                invalidateActiveVoiceTurn()
-                currentResponseTask?.cancel()
-                currentResponseTask = nil
-                cancelActiveRuntimeTurn(reason: "user-interrupted")
-            }
-            responseOverlayManager.hideOverlay()
-            clearDetectedElementLocation()
-
-            // Dismiss the onboarding prompt if it's showing
-            if showOnboardingPrompt {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    onboardingPromptOpacity = 0.0
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    self.showOnboardingPrompt = false
-                    self.onboardingPromptText = ""
-                }
-            }
-
-
-            startHeldSceneCapture(traceID: voiceTurnTraceID)
-
-            pendingKeyboardShortcutStartTask?.cancel()
-            pendingKeyboardShortcutStartTask = Task { [weak self] in
-                await buddyDictationManager.startPushToTalkFromKeyboardShortcut(
-                    currentDraftText: "",
-                    updateDraftText: { [weak self] partialText in
-                        guard let self else { return }
-                        let trimmed = partialText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else { return }
-                        self.livePartialTranscript = partialText
-                        self.responseOverlayManager.updateTranscriptText(partialText)
-                        self.recordShadowPartial(traceID: voiceTurnTraceID)
-                        guard self.voiceState == .listening else { return }
-                        self.startDirectClickPrewarmIfEligible(
-                            partialText,
-                            traceID: voiceTurnTraceID
-                        )
-                    },
-                    submitDraftText: { [weak self] finalTranscript in
-                        guard let self else { return }
-                        self.livePartialTranscript = ""
-                        let trimmed = finalTranscript
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if trimmed.isEmpty {
-                            // Unclear / blank capture: visible failure only.
-                            // No runtime turn, no store write, no TTS success.
-                            self.presentUnclearHearingFailure(traceID: voiceTurnTraceID)
-                            return
-                        }
-                        self.lastTranscript = trimmed
-                        print("🗣️ 奕枢 received transcript (\(trimmed.count) characters)")
-                        ClickyAnalytics.trackUserMessageSent(transcript: trimmed)
-                        let origin = self.consumeVoiceTurnOrigin(for: voiceTurnTraceID)
-                        self.submitVoiceTranscript(
-                            transcript: trimmed,
-                            origin: origin
-                        )
-                    }
-                )
-            }
-        case .released:
-            // Cancel the pending start task in case the user released the shortcut
-            // before the async startPushToTalk had a chance to begin recording.
-            // Without this, a quick press-and-release drops the release event and
-            // leaves the waveform overlay stuck on screen indefinitely.
-            let releaseAt = DispatchTime.now().uptimeNanoseconds
-            let releasedOrigin = pendingVoiceTurnOrigin
-            if let releasedOrigin {
-                pendingVoiceTurnOrigin = VoiceTurnOrigin(
-                    traceID: releasedOrigin.traceID,
-                    releaseAt: releaseAt
-                )
-            }
-            ClickyAnalytics.trackPushToTalkReleased()
-            pendingKeyboardShortcutStartTask?.cancel()
-            pendingKeyboardShortcutStartTask = nil
-            buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
-            isPushToTalkKeyHeld = false
-            turnVisualPhase = .finalizingSpeech
-            voiceState = .processing
-            ensureOverlayVisibleForVoiceFeedback()
-            responseOverlayManager.showPresenceCue()
-            ClickyAnalytics.trackVoiceEvent("presence.cue")
-            armBargeInTranscriptWatchdogIfNeeded()
-            Self.logVoicePhase(
-                turnID: releasedOrigin?.traceID ?? "unknown",
-                phase: "ptt_release",
-                deltaMS: 0,
-                totalMS: 0,
-                reason: releasedOrigin == nil
-                    ? "shortcut_released_unknown_origin"
-                    : "shortcut_released"
-            )
-        case .none:
-            break
-        }
     }
 
     // MARK: - Companion Prompt
@@ -1883,20 +1836,6 @@ final class CompanionManager: ObservableObject {
     """
 
     // MARK: - AI Response Pipeline
-
-    private func consumeVoiceTurnOrigin(for traceID: String) -> VoiceTurnOrigin? {
-        guard let origin = pendingVoiceTurnOrigin,
-              origin.traceID == traceID else {
-            return nil
-        }
-        pendingVoiceTurnOrigin = nil
-        return origin
-    }
-
-    private static func newVoiceTurnTraceID() -> String {
-        let compactUUID = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        return String(compactUUID.prefix(12)).lowercased()
-    }
 
     private func beginBargeInIfEligible(voiceTraceID: String) -> Bool {
         guard let requestId = activeRuntimeRequestId,
