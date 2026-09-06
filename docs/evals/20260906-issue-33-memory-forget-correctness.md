@@ -50,6 +50,7 @@
 | 13a | 缺 store 行且无完成回执不得报成功 | 同上：legacy store-gone + visible residue 夹具，两条入口 | action 非 verified/ok；ledger 非 forgotten；可见残留仍在；其它子弹仍在。该夹具计入 `false_positive_memory_forget_successes` |
 | 13b | 真正完成后的再忘记仍幂等 | 同上 + JSON 重开 | 有完成回执（无明文）；`alreadyGone` / verified |
 | 13c | 入口不得独立决定 alreadyGone / verified | 反作弊：把 missing-id shortcut、ledger 旁路、store 缺失即 verified、Runtime store 缺失即 alreadyGone 喂给路径计数器 | 四种作弊源都使 `memory_forget_mutation_paths ≠ 1` |
+| 13d | 完成回执写入失败不得毁掉重试 | 同上：注入 `forgetReceiptIO.write` 失败 + JSON 重开；源码顺序回执必须在 store 删除前 | 无 verified；出处仍在；恢复后重开重试完成；再忘记 `alreadyGone`；无明文。该夹具计入 `non_convergent_memory_forget_retries` |
 | 14 | Runtime 显式 forget 失败不发 `memory.forgotten` | 机器：`pnpm --filter @yishu/runtime exec node --import tsx --test test/product-kernel-runtime.test.ts` 中相关用例 | 可见失败 → `memory.failed` |
 | 15 | 既有 kernel 记忆/动作/store 测不回退 | 机器：`pnpm --filter @yishu/kernel test` | 全绿 |
 | 16 | #29 / #31 保持 | 机器：lifecycle + parity checker | 0/0 与 0/1 |
@@ -71,6 +72,7 @@
 - 目标：0 / 0 / 1。
 - 交付：`false_positive_memory_forget_successes: 2 → 0`；`non_convergent_memory_forget_retries: 1 → 0`；`memory_forget_mutation_paths: 2 → 1`。#29 0/0、#31 0/1 保持。协议无 diff。`pnpm product:check` 越过本检查器，停在预存 collector 880/856。
 - PR #34 再审：缺 store 行 + 可见残留且无完成回执不得报成功；真正完成后的窄回执支持幂等。路径计数改为所有权（独立 alreadyGone/verified 也算额外路径）。目标仍 0/0/1。
+- PR #34 再审 2：完成回执必须在硬删 store 之前写。回执写入失败要保持可重试，计入 `non_convergent_memory_forget_retries`。预写回执在 store 行仍在时不算成功。
 
 ## 人评清单（交付时填）
 
