@@ -148,3 +148,8 @@ assert_files_in_allowlist 'YishuStorePort\b' 'YishuStorePort' \
   packages/runtime/src/delegation.ts
 
 echo "Product boundary check passed: runtime kernel.store cap PKR<=34 src<=36 files<=delegation+PKR; YishuStorePort<=2 files<=delegation"
+
+# Foreground Runtime execution and its event-stream lifetime must not be
+# owned by CompanionManager. Both metrics' zero is the permanent ceiling;
+# see Issue #29.
+node "$ROOT_DIR/script/check-clicky-foreground-lifecycle-boundary.cjs"
