@@ -1,0 +1,5 @@
+{"schemaVersion":1,"eventId":"asr-i1","occurredAt":"2026-09-06T10:10:00.000Z","sessionId":"voice","name":"asr.request_sent","attributes":{"turnId":"t1","actionKind":"interim","audioMs":800}}
+{"schemaVersion":1,"eventId":"asr-i2","occurredAt":"2026-09-06T10:10:00.400Z","sessionId":"voice","name":"asr.request_sent","attributes":{"turnId":"t1","actionKind":"interim","audioMs":1600}}
+{"schemaVersion":1,"eventId":"asr-f","occurredAt":"2026-09-06T10:10:00.800Z","sessionId":"voice","name":"asr.request_sent","attributes":{"turnId":"t1","actionKind":"final","audioMs":2400}}
+{"schemaVersion":1,"eventId":"asr-final","occurredAt":"2026-09-06T10:10:01.200Z","sessionId":"voice","name":"asr.final","attributes":{"turnId":"t1"}}
+{"schemaVersion":1,"eventId":"asr-completed","occurredAt":"2026-09-06T10:10:01.210Z","sessionId":"voice","name":"asr.completed"}

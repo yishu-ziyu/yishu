@@ -1,0 +1,2 @@
+{"schemaVersion":1,"eventId":"r-start","occurredAt":"2026-09-06T10:01:00.000Z","sessionId":"voice","name":"turn.start","attributes":{"turnId":"fail-1"}}
+{"schemaVersion":1,"eventId":"r-fail","occurredAt":"2026-09-06T10:01:08.000Z","sessionId":"voice","name":"turn.failed","attributes":{"turnId":"fail-1","errorCode":"runtime_error"}}

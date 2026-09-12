@@ -1,0 +1,3 @@
+{"schemaVersion":1,"eventId":"a-start","occurredAt":"2026-09-06T10:06:00.000Z","sessionId":"voice","name":"ptt.key_down","attributes":{"turnId":"a"}}
+{"schemaVersion":1,"eventId":"b-start","occurredAt":"2026-09-06T10:06:00.100Z","sessionId":"voice","name":"ptt.key_down","attributes":{"turnId":"b"}}
+{"schemaVersion":1,"eventId":"anon-end","occurredAt":"2026-09-06T10:06:01.000Z","sessionId":"voice","name":"ptt.key_up","attributes":{}}

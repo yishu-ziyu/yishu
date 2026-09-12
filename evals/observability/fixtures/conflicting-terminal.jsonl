@@ -1,0 +1,3 @@
+{"schemaVersion":1,"eventId":"r-start","occurredAt":"2026-09-06T10:13:00.000Z","sessionId":"voice","name":"turn.start","attributes":{"turnId":"cf-1"}}
+{"schemaVersion":1,"eventId":"r-ok","occurredAt":"2026-09-06T10:13:02.000Z","sessionId":"voice","name":"model.done","attributes":{"turnId":"cf-1"}}
+{"schemaVersion":1,"eventId":"r-fail","occurredAt":"2026-09-06T10:13:02.100Z","sessionId":"voice","name":"turn.failed","attributes":{"turnId":"cf-1","errorCode":"runtime_error"}}

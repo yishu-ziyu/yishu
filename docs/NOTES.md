@@ -2,6 +2,23 @@
 
 压缩后先读这里。头部永远是「当前状态」，每个子任务刚做完就写，不等会话结束。不得写入凭据、截图、私人对话、用户记忆正文。
 
+## 当前状态（2026-09-06，PR #37 观测窗/单位校正，不合并）
+
+- 工作树 `.work/lifecycle-integrity`，分支 `feat/lifecycle-integrity`。不碰 PR #36，不改 `apps/` `packages/`。不合并。
+- 观测窗：默认 open。EOF 上仍打开的 start → `pending_operations`，不是语义失败。`--closed-window` 才把同一形状判成语义失败。
+- 主指标：`lifecycle_integrity_failures` 只计逻辑操作（语义∪观测，各一次）。无 id 别名 → `uncorrelated_terminal_events` / `low_fidelity_alias_events`，不抬主指标。
+- 账目：结束时从操作汇总；`assertAccountingInvariants` 抛错，不钳制。`reconstructed + unreconstructable == logical_operations_count`。
+- CI：`script/verify-product.sh` 在 `size:check` 前跑 `node --test evals/observability/check-lifecycle-integrity.test.mjs`。不对 `quality.sample` 做 `--expect-zero`。
+- 入库样本开放窗：语义 **0** / 观测 **30** / pending **40** / 并集 **30**；PTT 30/30；rate 0.30。测试 35/35。PR **#37**。
+
+## 上一状态（2026-09-06，PR #37 测量校正，不合并）
+
+- 工作树 `.work/lifecycle-integrity`，分支 `feat/lifecycle-integrity`。不碰 PR #36，不改 `apps/` `packages/`。
+- ASR：`asr.request_sent` 是请求观测，不是 start；无 request id → 不发明请求级生命周期。无独立 utterance start → 观测债。
+- 终端：等价别名 ≠ 双终端；无 id 的 `asr.completed`/`model.completed` 不拆幽灵操作。`computer_result` 仅观测。仪器域按 source file。
+- 指标：`semantic_lifecycle_failures` / `observability_integrity_failures`；并集 `lifecycle_integrity_failures`。`--expect-zero` 只看语义。
+- 入库样本：语义 **40**（runtime 无终端）/ 观测 **30**（ASR 无 utterance start）/ 并集 **70**；PTT 30/30；rate 0.30。测试 29/29。PR **#37**，不合并。
+
 ## 当前状态（2026-09-06，PR #34 再审：回执必须在删 store 前写）
 
 - 卡仍是 `docs/evals/20260906-issue-33-memory-forget-correctness.md`。只修 #33 / PR #34，不开始全双工。

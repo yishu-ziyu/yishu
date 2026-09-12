@@ -1,0 +1,2 @@
+{"schemaVersion":1,"eventId":"send","occurredAt":"2026-09-06T10:12:00.000Z","sessionId":"desktop","name":"computer.result.sending","attributes":{"receiptStatus":"ok"}}
+{"schemaVersion":1,"eventId":"sent","occurredAt":"2026-09-06T10:12:00.020Z","sessionId":"desktop","name":"computer.result.sent","attributes":{"receiptStatus":"ok"}}
