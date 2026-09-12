@@ -204,19 +204,38 @@ struct CompanionPanelView: View {
     private var permissionsCopySection: some View {
         if companionManager.hasSeenIntro && companionManager.allPermissionsGranted {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(YishuPanelFirstScreenCopy.holdToTalkPrefix)
+                if companionManager.voiceSession.continuousListeningState.isArmed {
+                    Text(YishuPanelFirstScreenCopy.listeningNow)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(DS.Colors.textSecondary)
-                    keyboardKey("Control")
-                    Text("+")
+                } else if companionManager.voiceSession.continuousListeningState == .starting {
+                    Text(YishuPanelFirstScreenCopy.startingContinuous)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(DS.Colors.textSecondary)
-                    keyboardKey("Option")
+                } else if case let .failed(message) = companionManager.voiceSession.continuousListeningState {
+                    Text(YishuPanelFirstScreenCopy.continuousStartFailed)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    if !message.isEmpty {
+                        Text(message)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(DS.Colors.textTertiary)
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        Text(YishuPanelFirstScreenCopy.holdToTalkPrefix)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(DS.Colors.textSecondary)
+                        keyboardKey("Control")
+                        Text("+")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(DS.Colors.textSecondary)
+                        keyboardKey("Option")
+                    }
+                    Text(YishuPanelFirstScreenCopy.releaseToSend)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
                 }
-                Text(YishuPanelFirstScreenCopy.releaseToSend)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.allPermissionsGranted {
@@ -785,6 +804,7 @@ struct CompanionPanelView: View {
                 YishuRoutinesSection(companionManager: companionManager)
                 chatModelPickerSection
                 ProviderAccountsView(viewModel: accountViewModel)
+                continuousListeningToggleRow
                 showYishuCursorToggleRow
                 WorkspaceSettingsView()
             }
@@ -1201,6 +1221,36 @@ struct CompanionPanelView: View {
 
     // MARK: - Show Cursor Toggle
 
+    private var continuousListeningToggleRow: some View {
+        HStack {
+            HStack(spacing: 8) {
+                Image(systemName: companionManager.isContinuousListeningEnabled
+                    ? "mic.fill"
+                    : "mic")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(width: 16)
+
+                Text(YishuPanelFirstScreenCopy.continuousListeningTitle)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { companionManager.isContinuousListeningEnabled },
+                set: { companionManager.setContinuousListeningEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .tint(DS.Colors.accent)
+            .scaleEffect(0.8)
+            .accessibilityLabel(YishuPanelFirstScreenCopy.continuousListeningTitle)
+        }
+        .padding(.vertical, 4)
+    }
+
     private var showYishuCursorToggleRow: some View {
         HStack {
             HStack(spacing: 8) {
@@ -1336,6 +1386,11 @@ struct CompanionPanelView: View {
         }
         if !companionManager.hasSeenIntro || !companionManager.allPermissionsGranted {
             return "设置中"
+        }
+        if companionManager.voiceSession.continuousListeningState.isArmed,
+           companionManager.voiceState == .listening
+            || companionManager.voiceSession.capturePhase == .armed {
+            return "在听"
         }
         if !companionManager.isOverlayVisible {
             return "就绪"

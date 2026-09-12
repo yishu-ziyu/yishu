@@ -170,7 +170,7 @@ final class CompanionManager: ObservableObject {
         category: "computer-action"
     )
 
-    @Published private(set) var voiceState: CompanionVoiceState = .idle {
+    @Published var voiceState: CompanionVoiceState = .idle {
         didSet {
             updateVisualState()
             if voiceState == .idle {
@@ -181,7 +181,7 @@ final class CompanionManager: ObservableObject {
     }
     @Published private(set) var visualState: YishuVisualState = .breathing
     @Published private(set) var lastTranscript: String?
-    @Published private(set) var livePartialTranscript = ""
+    @Published var livePartialTranscript = ""
     @Published private(set) var hasAccessibilityPermission = false
     @Published private(set) var hasScreenRecordingPermission = false
     @Published private(set) var hasMicrophonePermission = false
@@ -262,7 +262,7 @@ final class CompanionManager: ObservableObject {
     private var onboardingMusicPlayer: AVAudioPlayer?
     private var onboardingMusicFadeTimer: Timer?
 
-    private lazy var voiceSession: YishuVoiceSessionController = {
+    lazy var voiceSession: YishuVoiceSessionController = {
         YishuVoiceSessionController(
             shouldBegin: { [weak self] in
                 guard let self else { return false }
@@ -292,6 +292,20 @@ final class CompanionManager: ObservableObject {
     private lazy var foregroundRuntimeExecution = YishuForegroundRuntimeExecution(
         runtime: yishuAgentRuntimeClient
     )
+    /// Speech onset may observe the live foreground execution. The audio-floor
+    /// coordinator must not cancel, settle, or supersede it.
+    func duplexForegroundRuntimeBoundary() -> YishuDuplexAudioFloor.ForegroundRuntimeBoundary {
+        YishuDuplexAudioFloor.ForegroundRuntimeBoundary(
+            isActive: { [weak self] in
+                self?.foregroundRuntimeExecution.isActive ?? false
+            },
+            cancel: { [weak self] reason in
+                self?.foregroundRuntimeExecution.cancel(reason: reason)
+            },
+            settle: {},
+            supersede: {}
+        )
+    }
     private let voiceProxySupervisor = YishuVoiceProxySupervisor.shared
     private var voiceProxyAvailabilityCancellable: AnyCancellable?
     lazy var providerAccountsViewModel = ProviderAccountsViewModel(
@@ -325,7 +339,7 @@ final class CompanionManager: ObservableObject {
     /// `YishuVoiceProxySupervisor`.
     private static let workerBaseURL = "http://127.0.0.1:8787"
 
-    private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
+    lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
         return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
     }()
     private var activeSentenceSpeechPipeline: YishuSentenceSpeechPipeline?
@@ -691,6 +705,12 @@ final class CompanionManager: ObservableObject {
         ? true
         : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
 
+    /// Opt-in continuous listening. Default off; persisted so a restart keeps
+    /// the last explicit choice. Missing key means off.
+    @Published var isContinuousListeningEnabled: Bool = UserDefaults.standard.bool(
+        forKey: "yishu.continuousListening.enabled"
+    )
+
     /// Spoken reply rate for MiniMax TTS (0.5…2.0). Default 1.0. Not a secret.
     @Published var speechSpeed: Double = YishuSpeechSpeed.load()
 
@@ -781,7 +801,11 @@ final class CompanionManager: ObservableObject {
         print("🔑 奕枢 start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), intro: \(hasSeenIntro), activated: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
+        bindAssistantPlaybackToVoiceSession()
         voiceSession.start()
+        if isContinuousListeningEnabled {
+            voiceSession.setContinuousListeningEnabled(true)
+        }
         bindVoiceProxyAvailability()
         bindDelegatedPresenceObservation()
         yishuPointerTrailMonitor.start()
@@ -1635,9 +1659,14 @@ final class CompanionManager: ObservableObject {
                 case .finalizing:
                     self.turnVisualPhase = .finalizingSpeech
                     self.voiceState = .processing
-                case .recording, .holding:
+                case .recording, .holding, .armed:
                     // Keep waveform from key-down through session start / hold.
+                    // Continuous armed is still listening.
                     self.voiceState = .listening
+                case .starting:
+                    if self.voiceState == .listening {
+                        self.voiceState = .idle
+                    }
                 case .idle:
                     self.turnVisualPhase = .idle
                     self.voiceState = .idle
@@ -1658,14 +1687,32 @@ final class CompanionManager: ObservableObject {
         switch event {
         case let .pressed(traceID):
             handleVoiceSessionPressed(traceID: traceID)
+        case let .speechOnset(traceID):
+            handleDuplexSpeechOnset(traceID: traceID)
+        case .continuousListeningArmed:
+            handleContinuousListeningArmed()
+        case let .continuousListeningFailed(message):
+            handleContinuousListeningFailed(message: message)
         case let .partial(traceID, text):
             handleVoiceSessionPartial(traceID: traceID, text: text)
         case let .released(origin):
             handleVoiceSessionReleased(origin: origin)
         case let .finalized(origin, transcript):
+            if voiceSession.continuousListeningState.isArmed {
+                ClickyAnalytics.trackVoiceEvent(
+                    "duplex.final_accepted",
+                    once: false,
+                    attributes: ["turnId": origin.traceID]
+                )
+                _ = beginBargeInIfEligible(voiceTraceID: origin.traceID)
+            }
             handleVoiceSessionFinalized(origin: origin, transcript: transcript)
         case let .captureFailed(traceID, reason):
-            handleVoiceSessionCaptureFailed(traceID: traceID, reason: reason)
+            if voiceSession.continuousListeningState.isArmed {
+                handleDuplexCaptureFailedWhileContinuous()
+            } else {
+                handleVoiceSessionCaptureFailed(traceID: traceID, reason: reason)
+            }
         case .cancelled:
             livePartialTranscript = ""
         }
@@ -1756,7 +1803,6 @@ final class CompanionManager: ObservableObject {
     }
 
     private func handleVoiceSessionReleased(origin: VoiceTurnOrigin) {
-        ClickyAnalytics.trackPushToTalkReleased()
         turnVisualPhase = .finalizingSpeech
         voiceState = .processing
         ensureOverlayVisibleForVoiceFeedback()
@@ -1793,11 +1839,13 @@ final class CompanionManager: ObservableObject {
         switch reason {
         case .emptyOrNearSilence:
             presentUnclearHearingFailure(traceID: traceID)
+        case .asrTerminal:
+            break
         }
     }
 
     /// Mount (or remount) the cursor overlay so waveform/spinner can show.
-    private func ensureOverlayVisibleForVoiceFeedback() {
+    func ensureOverlayVisibleForVoiceFeedback() {
         if isOverlayVisible, overlayWindowManager.isShowingOverlay() {
             // Already up — still re-order front so it is not buried.
             overlayWindowManager.orderOverlaysFront()
@@ -2117,7 +2165,10 @@ final class CompanionManager: ObservableObject {
                 if !Task.isCancelled && activeVoiceTurnToken == nil {
                     turnVisualPhase = .idle
                     voiceState = .idle
-                    scheduleTransientHideIfNeeded()
+                    restoreListeningIfContinuous()
+                    if !isContinuousListeningEnabled {
+                        scheduleTransientHideIfNeeded()
+                    }
                 }
             }
             turnVisualPhase = directIntent ? .searchingContext : .observingContext
@@ -2332,7 +2383,7 @@ final class CompanionManager: ObservableObject {
         )
     }
 
-    private func startHeldSceneCapture(traceID: String) {
+    func startHeldSceneCapture(traceID: String) {
         heldSceneTask?.cancel()
         heldSceneCache = nil
         let startedAt = Date()
@@ -3933,7 +3984,7 @@ final class CompanionManager: ObservableObject {
         foregroundRuntimeExecution.cancel(reason: reason)
     }
 
-    private func cancelActiveSentenceSpeechPipeline() {
+    func cancelActiveSentenceSpeechPipeline() {
         stopCoverSpeech()
         activeSentenceSpeechPipeline?.cancel()
         activeSentenceSpeechPipeline = nil

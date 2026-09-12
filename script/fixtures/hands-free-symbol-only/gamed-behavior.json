@@ -1,0 +1,32 @@
+{
+  "A": {
+    "finals": [],
+    "pressed": 0,
+    "keyboardStarts": 0,
+    "armed": true
+  },
+  "B": {
+    "finalCount": 0,
+    "keyboardStarts": 0,
+    "stopCount": 0,
+    "armed": true
+  },
+  "C": {
+    "speechOnset": false,
+    "hasFinal": false,
+    "presentationStopped": false,
+    "waitedForTranscript": true,
+    "waitedForRuntimeAck": true
+  },
+  "D": {
+    "runtimeCancels": 1,
+    "runtimeSettles": 1,
+    "runtimeSupersedes": 1,
+    "runtimeActive": false
+  },
+  "E": { "turns": 1, "begins": 1 },
+  "F": { "turns": 1, "begins": 1 },
+  "G": { "lateFinal": true },
+  "duplicateFinals": 2,
+  "H": { "kinds": [] }
+}

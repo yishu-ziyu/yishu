@@ -49,6 +49,12 @@ export const TARGETS = {
   ttsP95: { id: "4", metric: "key_up→tts.first_audio p95", target: "≤3500", max: 3500 },
   presence: { id: "5", metric: "key_up→presence.cue ≤300", target: "100%", min: 1 },
   interrupt: { id: "6", metric: "key_down→tts.stopped p95", target: "≤100", max: 100 },
+  duplexInterrupt: {
+    id: "35",
+    metric: "duplex.speech_onset→tts.stopped p95",
+    target: "≤100",
+    max: 100,
+  },
   ack: { id: "9", metric: "ack-before-tool", target: "100% (n≥20)", min: 1 },
   fields: { id: "1", metric: "require-fields", target: "7 timestamps / turn", min: 1 },
   listen: { id: "16", metric: "listen-mode", target: "10 turn.start, no PTT", min: 1 },
@@ -266,6 +272,29 @@ function eventTimeMs(event, fallbackKeyUpAbs = null) {
   const tms = fieldTms(event);
   if (tms != null && fallbackKeyUpAbs != null) return fallbackKeyUpAbs + tms;
   return null;
+}
+
+export function duplexInterruptDeltas(events) {
+  const timed = events
+    .map((event) => ({ event, t: eventTimeMs(event) }))
+    .filter((row) => row.t != null)
+    .sort((a, b) => a.t - b.t);
+  const deltas = [];
+  let ttsOpen = false;
+  let onsetAt = null;
+  for (const { event, t } of timed) {
+    const name = eventName(event);
+    if (name === "tts.first_audio") ttsOpen = true;
+    if (name === "duplex.speech_onset" && ttsOpen) onsetAt = t;
+    if (name === "tts.stopped") {
+      if (onsetAt != null && t >= onsetAt && t - onsetAt <= INTERRUPT_PAIR_MAX_MS) {
+        deltas.push(t - onsetAt);
+      }
+      onsetAt = null;
+      ttsOpen = false;
+    }
+  }
+  return deltas;
 }
 
 export function interruptDeltas(events) {
@@ -521,6 +550,9 @@ function rowMatchesMetric(rowMetric, wanted) {
   if (!wanted) return true;
   const a = metricKey(rowMetric);
   const b = metricKey(wanted);
+  if (b === "duplex-interrupt" || b.startsWith("duplex.speech_onset")) {
+    return a.startsWith("duplex.speech_onset");
+  }
   return a === b || a.startsWith(b) || b.startsWith(a.split(" p")[0]);
 }
 
@@ -576,6 +608,23 @@ export function evaluate(events, options = {}) {
       fmtMs(interruptP95),
       interrupts.length,
       interruptP95 != null && interruptP95 <= TARGETS.interrupt.max,
+    ),
+  );
+
+  const duplexInterrupts = duplexInterruptDeltas(events);
+  const duplexP50 = percentile(duplexInterrupts, 50);
+  const duplexP95 = percentile(duplexInterrupts, 95);
+  rows.push(
+    row(
+      TARGETS.duplexInterrupt,
+      duplexInterrupts.length
+        ? `p50 ${fmtMs(duplexP50)} / p95 ${fmtMs(duplexP95)}`
+        : "n/a",
+      duplexInterrupts.length,
+      duplexP95 != null
+        && duplexInterrupts.length > 0
+        && duplexP95 <= TARGETS.duplexInterrupt.max,
+      duplexInterrupts.length ? `n=${duplexInterrupts.length}` : "no duplex.speech_onset pairs",
     ),
   );
 
@@ -671,6 +720,9 @@ export function evaluate(events, options = {}) {
     if (wanted) return rowMatchesMetric(r.metric, wanted);
     if (r.metric === TARGETS.fields.metric) return requireFields;
     if (r.metric === TARGETS.listen.metric) return false;
+    if (r.metric === TARGETS.duplexInterrupt.metric) {
+      return wanted && rowMatchesMetric(r.metric, wanted);
+    }
     if (r.metric === TARGETS.backchannel.metric) return false;
     if (r.metric === TARGETS.stall.metric) return faultStall;
     if (r.metric === TARGETS.utterances.metric) return wanted === metricKey(TARGETS.utterances.metric);
@@ -931,8 +983,8 @@ function printHelp() {
 
 Default log: ${DEFAULT_QUALITY_PATH}
 Metrics: partial-before-keyup | key_up→model.first_byte | key_up→tts.first_audio
-         key_up→presence.cue | key_down→tts.stopped | ack-before-tool | require-fields
-         listen-mode | backchannel | model-stall | hardcoded-utterances
+         key_up→presence.cue | key_down→tts.stopped | duplex-interrupt | ack-before-tool
+         require-fields | listen-mode | backchannel | model-stall | hardcoded-utterances
          tts.clip_done | tts.clip_gap`);
 }
 

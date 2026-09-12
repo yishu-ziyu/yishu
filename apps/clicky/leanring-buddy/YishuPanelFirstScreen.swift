@@ -17,6 +17,16 @@ enum YishuPanelFirstScreenCopy {
     static let needPermissionsBody = "部分权限被关掉了。请重新授予下面四项，才能继续用奕枢。"
     static let holdToTalkPrefix = "按住"
     static let releaseToSend = "松开就发送"
+    static let continuousListeningTitle = "连续聆听"
+    static let listeningNow = "正在听，直接说"
+    static let startingContinuous = "正在打开麦克风"
+    static let continuousStartFailed = "没能打开连续聆听"
+
+    static func isListeningNowCopyAllowed(
+        continuousState: YishuContinuousListeningState
+    ) -> Bool {
+        continuousState.isArmed
+    }
     static let scopeCaption = "范围"
     static let scopePersonal = "我的"
     static let scopeProject = "项目"
